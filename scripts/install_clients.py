@@ -222,11 +222,13 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     changes: list[Change] = []
 
     existing = config_path.read_text() if config_path.exists() else ""
+    # Codex schema (codex-cli 0.133.0): no `type` field, header subtable is
+    # `http_headers` (not `headers`). Verified against working sentry and
+    # marker-io entries on the host.
     block = (
         f'\n[mcp_servers.{SERVER_NAME}]\n'
-        f'type = "http"\n'
         f'url = "{url}"\n\n'
-        f'[mcp_servers.{SERVER_NAME}.headers]\n'
+        f'[mcp_servers.{SERVER_NAME}.http_headers]\n'
         f'Authorization = "Bearer {token}"\n'
     )
     marker = f"[mcp_servers.{SERVER_NAME}]"
