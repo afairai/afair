@@ -308,6 +308,53 @@ def test_user_message_for_binary_uses_metadata_only(ctx: ServerContext) -> None:
     assert "bug hunt" in msg
 
 
+# ── recall surfaces interpretation (A2) ────────────────────────────────────
+
+
+def test_recall_surfaces_interpretation_when_present(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2: recall hits include the latest successful Extractor output."""
+    from neverforget.mcp import handlers
+    from neverforget.mcp.schemas import TextContent
+
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.schedule_extraction",
+        extractor.extract_sync,
+    )
+    handlers.remember(
+        content=TextContent(type="text", text="Sajinth proposed a new roadmap"),
+        context="email thread",
+    )
+    r = handlers.recall(query="Sajinth", depth="shallow")
+    assert len(r.hits) == 1
+    interp = r.hits[0].interpretation
+    assert interp is not None
+    assert interp["best_guess_kind"] == "email"
+    # entities surface through verbatim
+    names = [e["name"] for e in interp["entities"]]
+    assert "Sajinth" in names
+
+
+def test_recall_omits_interpretation_when_extraction_failed(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed extractions don't surface — recall hits return interpretation=None."""
+    from neverforget.mcp import handlers
+    from neverforget.mcp.schemas import TextContent
+
+    _patch_llm_raises(monkeypatch, LLMTimeout("upstream timed out"))
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.schedule_extraction",
+        extractor.extract_sync,
+    )
+    handlers.remember(content=TextContent(type="text", text="anything"))
+    r = handlers.recall(query="anything", depth="shallow")
+    assert len(r.hits) == 1
+    assert r.hits[0].interpretation is None
+
+
 # ── interpretation idempotency ─────────────────────────────────────────────
 
 

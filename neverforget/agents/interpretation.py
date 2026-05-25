@@ -146,3 +146,38 @@ def _read_existing(
         produced_by=row["produced_by"],
         extraction=json.loads(row["extraction"]),
     )
+
+
+def read_latest_interpretation(conn: sqlite3.Connection, event_hash: str) -> Interpretation | None:
+    """Return the most recent SUCCESSFUL interpretation for an event.
+
+    Used by recall to surface the Extractor's distillation alongside raw
+    payload text. Failed interpretations (status=failed) are skipped —
+    they have no useful structured data for the AI client to act on.
+    """
+    import json
+
+    row = conn.execute(
+        """
+        SELECT * FROM interpretations
+        WHERE event_hash = ?
+        ORDER BY produced_at DESC, version DESC
+        """,
+        (event_hash,),
+    ).fetchone()
+    if row is None:
+        return None
+    extraction = json.loads(row["extraction"])
+    # Skip failed extractions for the recall path. Callers that want them
+    # can query the table directly.
+    if extraction.get("status") == "failed":
+        return None
+    return Interpretation(
+        id=row["id"],
+        event_id=row["event_id"],
+        event_hash=row["event_hash"],
+        version=row["version"],
+        produced_at=row["produced_at"],
+        produced_by=row["produced_by"],
+        extraction=extraction,
+    )
