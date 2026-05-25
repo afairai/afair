@@ -1,6 +1,6 @@
 # Fly app config — single-tenant per Invariant I8.
-# This file describes the user's own dedicated machine.
-# When renaming the codename: update `app` here, then `fly apps create <new>` + `fly deploy`.
+# This file describes the user's own dedicated machine. When renaming the
+# codename: update `app` here, then `fly apps create <new>` + `fly deploy`.
 
 app = "neverforget"
 primary_region = "fra"  # EU residency by default; change deliberately if needed.
@@ -17,14 +17,27 @@ primary_region = "fra"  # EU residency by default; change deliberately if needed
   EXTRACTOR_MODEL = "anthropic/claude-haiku-4-5"
 
 # Persistent volume — single-tenant means this disk belongs to one user, forever.
+# Created with `fly volumes create vault --region fra --size 1 --snapshot-retention 5`.
+# The 5-day automatic snapshots are Fly's built-in defense for Phase 0;
+# LiteFS replication arrives in Phase 8.
 [mounts]
   source = "vault"
   destination = "/data"
 
+[deploy]
+  # `immediate`: stop the existing machine, swap in the new image, restart.
+  # Brief downtime (~10-30s) per deploy. The single volume stays mounted on
+  # the same machine — no fork, no race, no corruption. True blue/green
+  # requires LiteFS (Phase 8); see docs/operations.md "Deploy strategy" for
+  # the rationale.
+  strategy = "immediate"
+  wait_timeout = "5m"
+
 [http_service]
   internal_port = 8080
   force_https = true
-  # Keep the machine warm — substrate state is local; cold start defeats the latency budget.
+  # Keep the machine warm — substrate state is local; cold start defeats
+  # the latency budget AND `min_machines_running=1` keeps it always-on.
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
@@ -41,6 +54,8 @@ primary_region = "fra"  # EU residency by default; change deliberately if needed
     method = "GET"
     path = "/health"
 
+# Single VM — exactly one machine alive at all times. Per the user's
+# instruction "keep one alive, min one alive, kill old on deploy".
 [[vm]]
   size = "shared-cpu-1x"
   memory_mb = 512

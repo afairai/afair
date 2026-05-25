@@ -1,0 +1,81 @@
+name: Deploy to Fly
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger from the GitHub UI is handy for re-deploys
+  # without an actual code change.
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: prod
+      url: https://neverforget.fly.dev
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # ── Pre-deploy gates — a red gate never deploys ─────────────────
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy neverforget
+
+      - name: Tests
+        run: uv run pytest -q
+        # Live LLM smoke is gated by NEVERFORGET_LIVE_LLM=1; not set in CI,
+        # so the live-API test is automatically skipped here.
+
+      # ── Deploy ──────────────────────────────────────────────────────
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            --app neverforget \
+            --config fly.toml \
+            --remote-only \
+            --wait-timeout 300
+
+      # ── Post-deploy verification ────────────────────────────────────
+      - name: Verify health
+        run: |
+          for i in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" https://neverforget.fly.dev/health || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "✓ /health returned 200"
+              exit 0
+            fi
+            echo "Attempt $i: status=$status; retrying in 5s..."
+            sleep 5
+          done
+          echo "✗ /health did not return 200 after 5 attempts"
+          exit 1
