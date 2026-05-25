@@ -6,6 +6,28 @@ Connect any MCP-speaking AI client to the deployed neverforget server.
 **Auth:** `Authorization: Bearer <NEVERFORGET_AUTH_TOKEN>` on every request
 **Health:** `https://neverforget.fly.dev/health` (no auth required)
 
+## The easy path — one command
+
+```bash
+uv run python scripts/install_clients.py --dry-run   # preview
+uv run python scripts/install_clients.py             # apply
+```
+
+This script:
+
+- Reads the token from `.env.local`
+- Detects Claude Code, Codex CLI, and Cursor on your machine
+- Writes the MCP server config to each one's settings file
+- Appends the instruction snippet to each one's CLAUDE.md / AGENTS.md / rules
+- Backs up every file it touches (`<path>.bak.<timestamp>`)
+- Is idempotent — running twice is safe
+
+After running, **restart any open MCP clients** (Claude Code, Cursor, etc.)
+to pick up the new server. Claude.ai is UI-only; see [claude-ai.md](claude-ai.md).
+
+The per-client docs below explain what the script does, what to tweak for
+non-default setups, and how to troubleshoot.
+
 ## Per-client setup
 
 | Client | Status | Setup guide |
