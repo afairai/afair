@@ -34,6 +34,10 @@ def build_server(settings: Settings) -> FastMCP:
             db=db,
             vault_dir=settings.vault_dir,
             inline_text_max_bytes=settings.inline_text_max_bytes,
+            extractor_model=settings.extractor_model,
+            anthropic_api_key=settings.anthropic_api_key,
+            openai_api_key=settings.openai_api_key,
+            gemini_api_key=settings.gemini_api_key,
         )
     )
 
