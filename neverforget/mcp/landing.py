@@ -1,9 +1,11 @@
 """Static landing page at ``/`` — the project's manifesto, typography-only.
 
 A single self-contained HTML document (no external assets, no JS, no
-fonts to fetch — just CSS with a system-font stack). Mirrors VISION.md
-§1 verbatim so the page stays in sync with the constitution by hand:
-when §1 changes, update _LANDING_HTML below in the same commit.
+fonts to fetch — just CSS with a system-font stack). Three stacked
+sections — manifesto, foundations, architecture — that mirror
+VISION.md §1, §2, and §6 respectively. When those sections change,
+update the inline HTML in the same commit so the landing stays in sync
+with the constitution by hand.
 
 Why a manifesto-page and not a marketing site:
   - Pre-launch phase (Phase 0/1). Name, pricing, license still deferred.
@@ -82,6 +84,8 @@ _LANDING_HTML = """\
       text-transform: uppercase;
       margin: 0 0 4.5rem;
     }
+    section { margin-top: 6rem; }
+    section .eyebrow { margin-bottom: 2rem; }
     blockquote {
       margin: 0 0 3rem;
       padding: 0 0 0 1.5rem;
@@ -98,10 +102,77 @@ _LANDING_HTML = """\
     }
     em { font-style: italic; color: var(--fg); }
     strong { font-weight: 600; color: var(--accent); letter-spacing: -0.005em; }
+
+    /* foundations (§2) — numbered principles list */
+    .principles {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .principles li {
+      display: grid;
+      grid-template-columns: 2.75rem 1fr;
+      column-gap: 0.75rem;
+      align-items: baseline;
+      padding: 1.25rem 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .principles li:first-child { border-top: 1px solid var(--rule); }
+    .principles .num {
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.12em;
+    }
+    .principles .title {
+      display: block;
+      color: var(--fg);
+      font-weight: 600;
+      letter-spacing: -0.005em;
+      margin-bottom: 0.25rem;
+    }
+    .principles .detail {
+      display: block;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.55;
+    }
+
+    /* architecture (§6) — three-layer text spread */
+    .layers {
+      margin: 0;
+      padding: 0;
+      border-top: 1px solid var(--rule);
+    }
+    .layers > div {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      column-gap: 1.5rem;
+      align-items: baseline;
+      padding: 1.25rem 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .layers dt {
+      font-weight: 600;
+      letter-spacing: -0.005em;
+    }
+    .layers dd {
+      margin: 0;
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-align: right;
+    }
+    .layers dd .i {
+      color: var(--accent);
+      letter-spacing: 0.08em;
+    }
+
     hr {
       border: 0;
       border-top: 1px solid var(--rule);
-      margin: 4.5rem 0 1.75rem;
+      margin: 5rem 0 1.75rem;
     }
     footer {
       color: var(--muted);
@@ -112,12 +183,24 @@ _LANDING_HTML = """\
     @media (max-width: 480px) {
       main { padding: 4.5rem 1.25rem 3rem; }
       .eyebrow { margin-bottom: 3rem; }
+      section { margin-top: 4.25rem; }
+      section .eyebrow { margin-bottom: 1.5rem; }
       blockquote { font-size: 1.32rem; padding-left: 1rem; margin-bottom: 2.25rem; }
       p { font-size: 16.5px; }
+      .principles li {
+        grid-template-columns: 2rem 1fr;
+        padding: 1rem 0;
+      }
+      .layers > div {
+        grid-template-columns: 1fr;
+        row-gap: 0.35rem;
+        padding: 1rem 0;
+      }
+      .layers dd { text-align: left; }
       hr { margin: 3.5rem 0 1.5rem; }
     }
     @media (prefers-reduced-motion: reduce) {
-      footer a { transition: none; }
+      * { transition: none !important; }
     }
   </style>
 </head>
@@ -148,6 +231,58 @@ _LANDING_HTML = """\
       credentials from individual browsers, this liberates context
       from individual AI silos.
     </p>
+
+    <section aria-labelledby="foundations">
+      <p class="eyebrow" id="foundations">Foundations &middot; non-negotiable</p>
+      <ol class="principles">
+        <li>
+          <span class="num">01</span>
+          <div>
+            <span class="title">The user owns the substrate.</span>
+            <span class="detail">Self-hosting is first-class, not a fallback. Hosted is convenience, never structural dependency.</span>
+          </div>
+        </li>
+        <li>
+          <span class="num">02</span>
+          <div>
+            <span class="title">Single-tenant, always.</span>
+            <span class="detail">Every instance belongs to exactly one user. Multi-tenancy is forbidden architecturally, not just practically.</span>
+          </div>
+        </li>
+        <li>
+          <span class="num">03</span>
+          <div>
+            <span class="title">Cross-vendor by default.</span>
+            <span class="detail">Claude, GPT, Gemini, Mistral, local models &mdash; all equal citizens. If it only works with one provider, it has failed.</span>
+          </div>
+        </li>
+        <li>
+          <span class="num">04</span>
+          <div>
+            <span class="title">Schema is emergent, never imposed.</span>
+            <span class="detail">A minimal bootstrap scaffold &mdash; categories grow from your interaction, not from a fixed taxonomy.</span>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="architecture">
+      <p class="eyebrow" id="architecture">Architecture &middot; three layers</p>
+      <dl class="layers">
+        <div>
+          <dt>MCP Surface</dt>
+          <dd>stable forever &middot; additive only &middot; <span class="i">I1</span></dd>
+        </div>
+        <div>
+          <dt>Society of Mind</dt>
+          <dd>salience &rarr; CEN &cup; DMN &middot; <span class="i">I3</span></dd>
+        </div>
+        <div>
+          <dt>Substrate</dt>
+          <dd>append-only &middot; content-addressed &middot; <span class="i">I2</span> &middot; on your disk</dd>
+        </div>
+      </dl>
+    </section>
 
     <hr>
 
