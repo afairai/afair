@@ -436,10 +436,10 @@ For each competitor: what they have, what they don't, and — crucially — the 
 - **Doesn't have:** Emergent ontology, multi-agent swarm, MCP-first cross-vendor surface, opinionated memory phenotypes.
 - **Structural limit:** Library/framework framing, not product. Lacks the consumer-facing thesis. Closest in spirit; furthest from execution polish.
 
-**[Supermemory](https://supermemory.ai)** — $2.6M backed, hybrid RAG + connectors.
-- **Has:** Strong benchmark performance (85.2% LongMemEval), connectors for Drive/Gmail/Notion, multi-modal ingestion.
-- **Doesn't have:** Open source, user-owned, emergent, swarm.
-- **Structural limit:** Closed source. Hosted-only. Cannot credibly claim sovereignty.
+**[Supermemory](https://supermemory.ai)** — $2.6M seed, OSS-from-day-one memory infrastructure.
+- **Has:** **MIT-licensed** ([github.com/supermemoryai/supermemory](https://github.com/supermemoryai/supermemory)), 22.7K stars, full monorepo (web app + SDKs + MCP server + plugins). **#1 on LongMemEval, LoCoMo, AND ConvoMem** — the three current memory benchmarks. Aggressive multi-modal extraction (PDFs, OCR for images, transcription for video, AST-aware chunking for code). Framework adapters for Vercel AI SDK, LangChain, LangGraph, OpenAI Agents SDK, Mastra. Claims sub-300ms hybrid + ~50ms one-call user profile retrieval. Explicit auto-forgetting / temporal-update handling.
+- **Doesn't have:** User-owned positioning (they sell API/SDK to developers, not "your digital brain"), single-tenant-per-user (hosted multi-tenant SaaS economics), emergent ontology (their memory graph has imposed shape), swarm architecture (monolithic pipeline), EU-native default.
+- **Structural limit:** $2.6M VC means hosted multi-tenant economics — they architecturally CANNOT pivot to single-tenant-per-user without abandoning the growth thesis. Positioning is developer-tool, not user-product; the moat is benchmark wins + integrations, not cognitive sovereignty. **They are the closest direct competitor and the one to study, especially their benchmark + multi-modal execution; we differentiate on positioning + architecture, not on memory-engine quality.**
 
 **[LangMem](https://github.com/langchain-ai/langmem)** — LangChain's memory primitives.
 - **Has:** Tight LangGraph integration, free, simple.
