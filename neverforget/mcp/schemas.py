@@ -57,7 +57,16 @@ Depth = Literal["shallow", "normal", "deep"]
 
 
 class RecallHit(BaseModel):
-    """One match returned by `recall`. payload_summary is truncation-safe."""
+    """One match returned by `recall`.
+
+    ``payload_summary`` is the truncation-safe view of the raw substrate
+    payload (text snippet, mime, etc.).
+    ``interpretation`` is the latest successful Extractor output for the
+    event when one is available — best_guess_kind, summary, entities,
+    salient_facts, language, confidence, source_attribution. Optional;
+    will be ``None`` for events whose extraction failed or is still in
+    flight.
+    """
 
     event_id: str
     content_hash: str
@@ -65,6 +74,7 @@ class RecallHit(BaseModel):
     kind: str
     origin: str
     payload_summary: dict[str, Any]
+    interpretation: dict[str, Any] | None = None
 
 
 class RecallResult(BaseModel):

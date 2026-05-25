@@ -11,7 +11,7 @@ import base64
 import binascii
 from typing import TYPE_CHECKING, Any
 
-from ..agents import schedule_extraction
+from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.embedding import EmbeddingError, embed_text
 from ..substrate import (
     build_binary_payload,
@@ -96,7 +96,34 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+_INTERPRETATION_SURFACE_KEYS = (
+    "best_guess_kind",
+    "summary",
+    "entities",
+    "salient_facts",
+    "language",
+    "confidence",
+    "source_attribution",
+)
+
+
+def _interpretation_summary(extraction: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the AI-useful subset of an Extractor's output for inclusion in
+    a recall hit. Returns None when no useful fields are present.
+    """
+    surface: dict[str, Any] = {}
+    for key in _INTERPRETATION_SURFACE_KEYS:
+        if key in extraction and extraction[key] not in (None, "", [], {}):
+            surface[key] = extraction[key]
+    return surface or None
+
+
 def _event_to_hit(event: Event) -> RecallHit:
+    ctx = get_context()
+    interp = read_latest_interpretation(ctx.db, event.content_hash)
+    interpretation: dict[str, Any] | None = (
+        _interpretation_summary(interp.extraction) if interp is not None else None
+    )
     return RecallHit(
         event_id=event.id,
         content_hash=event.content_hash,
@@ -104,6 +131,7 @@ def _event_to_hit(event: Event) -> RecallHit:
         kind=event.kind,
         origin=event.origin,
         payload_summary=_payload_summary(event.payload),
+        interpretation=interpretation,
     )
 
 

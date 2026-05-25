@@ -11,6 +11,7 @@ from __future__ import annotations
 from .extractor import extract_sync, schedule_extraction
 from .interpretation import (
     Interpretation,
+    read_latest_interpretation,
     write_failed_interpretation,
     write_interpretation,
 )
@@ -18,6 +19,7 @@ from .interpretation import (
 __all__ = [
     "Interpretation",
     "extract_sync",
+    "read_latest_interpretation",
     "schedule_extraction",
     "write_failed_interpretation",
     "write_interpretation",
