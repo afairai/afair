@@ -146,47 +146,56 @@ def _append_snippet_if_missing(
 
 
 def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
-    settings_path = Path.home() / ".claude" / "settings.json"
+    # Recent Claude Code reads MCP servers from ~/.claude.json (the user-level
+    # config). Older guidance also pointed at ~/.claude/settings.json. We
+    # write the MCP entry into both so the server is picked up across
+    # versions; the CLAUDE.md snippet only needs one home (the global file).
+    primary_path = Path.home() / ".claude.json"
+    legacy_path = Path.home() / ".claude" / "settings.json"
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
 
-    # Detection: settings.json exists OR claude binary is in PATH.
-    if not settings_path.exists() and shutil.which("claude") is None:
-        _skip("Claude Code not detected (no ~/.claude/settings.json, no `claude` in PATH)")
+    if (
+        not primary_path.exists()
+        and not legacy_path.exists()
+        and shutil.which("claude") is None
+    ):
+        _skip("Claude Code not detected (no ~/.claude.json, no settings.json, no `claude` in PATH)")
         return []
 
     changes: list[Change] = []
-
-    settings: dict[str, Any] = {}
-    if settings_path.exists():
-        existing_text = settings_path.read_text().strip()
-        if existing_text:
-            try:
-                settings = json.loads(existing_text)
-            except json.JSONDecodeError as e:
-                _err(f"Claude Code settings.json is malformed JSON: {e}")
-                return []
-
-    mcp_servers = settings.setdefault("mcpServers", {})
     desired = {
         "type": "http",
         "url": url,
         "headers": {"Authorization": f"Bearer {token}"},
     }
 
-    if mcp_servers.get(SERVER_NAME) == desired:
-        _ok("Claude Code: settings.json already up to date")
-    else:
-        backup = _backup(settings_path, dry)
+    for path, label in [(primary_path, "~/.claude.json"), (legacy_path, "~/.claude/settings.json")]:
+        settings: dict[str, Any] = {}
+        if path.exists():
+            text = path.read_text().strip()
+            if text:
+                try:
+                    settings = json.loads(text)
+                except json.JSONDecodeError as e:
+                    _err(f"Claude Code {label} is malformed JSON: {e}")
+                    continue
+
+        mcp_servers = settings.setdefault("mcpServers", {})
+        if mcp_servers.get(SERVER_NAME) == desired:
+            _ok(f"Claude Code: {label} already up to date")
+            continue
+
+        backup = _backup(path, dry)
         if not dry:
             mcp_servers[SERVER_NAME] = desired
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(settings, indent=2) + "\n")
         action = "would write" if dry else "wrote"
-        msg = f"Claude Code: {action} {settings_path}"
+        msg = f"Claude Code: {action} {label}"
         if backup:
             msg += f" (backup: {backup.name})"
         _ok(msg)
-        changes.append(Change("settings", settings_path, action))
+        changes.append(Change("settings", path, action))
 
     snippet_change = _append_snippet_if_missing(claude_md, dry=dry)
     if snippet_change is None:
