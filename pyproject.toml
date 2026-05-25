@@ -1,0 +1,76 @@
+[project]
+name = "neverforget"
+version = "0.0.1"
+description = "User-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — exposed via MCP."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+authors = [
+    { name = "Gowrynath Sivaganeshamoorthy", email = "gowrynath@gmail.com" },
+]
+
+dependencies = [
+    # MCP server framework (Streamable HTTP transport)
+    "fastmcp>=2.0.0",
+    # HTTP framework under FastMCP
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    # Validation
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    # Substrate storage — SQLite + vector search
+    "sqlite-vec>=0.1.6",
+    # LLM provider abstraction (Invariant I5 — vendor neutrality)
+    "litellm>=1.52.0",
+    # Structured logging
+    "structlog>=24.4.0",
+    # HTTP client
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+neverforget = "neverforget.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["neverforget"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "RUF",      # ruff-specific
+    "SIM",      # simplify
+    "TCH",      # type-checking
+]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
