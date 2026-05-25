@@ -121,6 +121,13 @@ def build_server(settings: Settings) -> FastMCP:
     ) -> schemas.GetEventResult:
         return handlers.get_event(event_id=event_id, content_hash=content_hash)
 
+    @mcp.tool(description=descriptions.INVALIDATE, version="1")
+    def invalidate(
+        target_hash: str,
+        reason: str | None = None,
+    ) -> schemas.InvalidateResult:
+        return handlers.invalidate(target_hash=target_hash, reason=reason)
+
     # ── /health — orchestrator-facing, never goes through MCP protocol ──────
 
     @mcp.custom_route("/health", methods=["GET"])

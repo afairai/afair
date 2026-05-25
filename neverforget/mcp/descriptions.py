@@ -120,6 +120,57 @@ the whole document" or "read me section 3")? Call ``get_event`` with the
 """
 
 
+INVALIDATE = """\
+Mark a previously-recorded fact as superseded by later evidence.
+
+WHEN TO CALL:
+  - The user explicitly corrects an earlier statement ("actually Sajinth
+    is now CTO, not CEO" / "ignore what I said about X yesterday").
+  - You discover a contradiction between an old memory and a new one
+    the user is sharing now, AND the new one is meant to replace the
+    old one rather than coexist with it.
+  - A meeting outcome supersedes an earlier plan; a launched product
+    name replaces a working title; a deal closed at terms different
+    from the initial discussion.
+
+WHEN NOT TO CALL:
+  - The user adds NEW information without contradicting old (use
+    ``remember`` — facts accumulate by default).
+  - You're uncertain whether the old fact is genuinely wrong; ask the
+    user first. Invalidation is for explicit supersessions.
+  - The target event doesn't exist or is itself an invalidation event
+    (the call will be rejected).
+
+ARGUMENTS:
+  - target_hash: ``sha256:...`` content_hash of the event being
+    superseded. Find it via the ``content_hash`` field returned from
+    ``recall``, ``observe``, or ``remember``.
+  - reason: Optional free-text explanation. Helpful for audit and for
+    future recall ("we ignored this fact because…").
+
+RETURN:
+  {"ok": true,
+   "event_id": "01K...",          // ULID of the invalidation event itself
+   "content_hash": "sha256:...",  // the invalidation event's own hash
+   "target_hash": "sha256:...",   // what was invalidated
+   "target_already_invalidated": false}  // true if prior invalidation existed
+
+WHAT THIS DOES:
+  Appends a new event to the substrate (kind=invalidate) referencing
+  the target. The target event is NEVER touched — substrate is
+  append-only by design (Invariant I2). Subsequent ``recall`` calls
+  still return the target as a hit, but each hit now carries an
+  ``invalidation`` field with the timestamp + reason. AI clients
+  decide: for current-state questions prefer hits where
+  ``invalidation is null``; for historical/audit questions, all
+  hits remain relevant context.
+
+  Bi-temporal queries ("what was true at point T") work for free —
+  events with ``created_at <= T`` and either no invalidation or
+  ``invalidation.at > T`` were valid at T.
+"""
+
+
 GET_EVENT = """\
 Return the FULL untruncated payload for one specific event.
 

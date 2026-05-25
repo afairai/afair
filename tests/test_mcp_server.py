@@ -58,6 +58,7 @@ async def test_server_builds_and_registers_all_v1_tools(tmp_path: Path) -> None:
         "list_context",
         "observe",
         "get_event",
+        "invalidate",
     }
 
 
