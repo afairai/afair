@@ -392,9 +392,9 @@ Every self-modification is itself an event in the substrate. The full history of
 **Capability gate:** One trusted external user maintains daily use for 30 days without abandoning.
 **Ships:** Installer, onboarding flow for technical users, first round of usability fixes from real friction. Still self-host only.
 
-### Phase 7 — Open Source Release
-**Capability gate:** Public repo, documented setup, first 10 self-hosting users running independently.
-**Ships:** Open-source release of core (source-available or AGPL — license decision pending), installation docs, basic Discord/GitHub community, contribution guidelines.
+### Phase 7 — Public Release (license decision per §16)
+**Capability gate:** Public repo under whichever license §16 selects, documented setup, first 10 self-hosting users running independently.
+**Ships:** Source release under the §16-chosen license, installation docs, basic Discord/GitHub community, contribution guidelines. **If §16's Phase-6 review concludes closed source**, Phase 7 transforms into a binary-distribution / managed-only launch — the capability gate (10 external users) and the operational deliverables still apply, just without the OSS repo.
 
 ### Phase 8 — Managed Hosting (Per-User Dedicated Machines)
 **Capability gate:** First paying user runs on managed Fly machine for 30+ days; provisioning is automated end-to-end.
@@ -545,8 +545,8 @@ Honest list of what is not yet figured out:
 - **Multi-modal indexing.** Code, prose, audio, images, structured data in one substrate. Content addressing solves storage; cross-modal retrieval is open.
 - **Invariant enforcement under self-modification.** The system can modify its rules. What stops it from modifying its way out of correctness? Likely answer: a thin kernel of invariants protected by external (out-of-system) checks. Mechanism unclear.
 - **Identity resolution.** When you switch device, lose a session, or share an agent with someone briefly — who is the user? This is unsolved in the field broadly. In our single-tenant model, partially solved by "one instance = one user."
-- **Pricing.** Open-source core is non-negotiable. Managed hosting subscription pricing must cover Fly costs + management margin + premium features. Indicative range: €15–30/month per user, but real number depends on actual Fly costs once load is measured. Family/group plans? Unclear.
-- **License for open-source core.** AGPL (forces forks to also open-source), MIT (maximum adoption), or source-available with commercial use restrictions (à la BSL — Sentry's model)? Trade-off is community adoption vs. business defensibility against larger players forking the OSS core for commercial use.
+- **Pricing.** Managed hosting subscription must cover Fly costs + management margin + premium features. Indicative range: €15–30/month per user, but the real number depends on actual Fly costs once load is measured. Family/group plans? Unclear. Cross-cuts with §16 — different OSS models suggest different price floors.
+- **Licensing / source availability.** See §16. Deferred to a Phase-6 review with real data.
 - **Scope/Context handling.** Even in single-user single-tenant, the user has multiple life contexts (work / personal / family / hobby). Fingerprint-based emergent clusters from §5.5 thinking apply, but exact retrieval scoping behavior is undefined.
 - **Naming.** See §15.
 
@@ -644,6 +644,69 @@ The following were considered seriously and either had unavailable domains or di
 Pattern that did not work: anything in the form `[number]mind`, `[number]brain`, `[number]memory`, `[adjective]mind` is exhausted.
 
 Pattern most likely to work in Phase 6-7: a real word with **adjacent (not descriptive) semantic meaning**, in `.com` rather than `.ai`. Reference cases: Cursor, Linear, Notion, Arc, Granola, Loop.
+
+---
+
+## 16. Licensing & Source Availability
+
+### Current Status
+
+**Decision deferred to a Phase-6 review.** Until then, **build everything as if the repo goes public tomorrow** (see "operational rule" below).
+
+The Open Source Release in §9 Phase 7 is described as a *capability gate*, not a foregone conclusion. Whether the core ships under an OSS license (AGPL3 / Apache2 / MIT), as source-available (BSL / SSPL), or remains proprietary — that decision is made with real adoption + competitive + operational data, not committed in advance.
+
+### Why the decision is deferred
+
+Three reasons:
+
+1. **The market isn't settled.** As of Phase 0/1, direct memory-framework competitors split: 5 of 9 fully open (Mem0, Letta, Cognee, Graphiti, LangMem), 1 open-core (Zep), 3 closed (Supermemory, Anthropic Memory, OpenAI Memory). The right answer depends on which model is winning at Phase-6 entry.
+2. **We don't yet know what's load-bearing.** The orchestration layer (per-user Fly provisioning, billing, web UI) might be the only piece worth keeping closed; the substrate + MCP + agents may be totally fine open. We cannot draw that line cleanly without operational experience.
+3. **Premature commitment closes doors.** Locking in "closed" now invites lock-in patterns into the architecture. Locking in "open" now exposes half-built work to public scrutiny. Both are bad in opposite ways.
+
+### Operational rule until decision time
+
+> **Build everything as if it goes public tomorrow.**
+
+This is the only stance that keeps both doors open without expensive rewrites later. Concretely:
+
+- Code quality, naming, comments, architecture — **production-grade always**.
+- **No secrets in code, no hardcoded credentials, no internal jokes, no slurs against competitors** in code or commit messages.
+- **No proprietary algorithmic tricks that depend on staying secret for their value.** If the algorithm is the moat, the moat is fragile.
+- **No lock-in mechanisms** — no anti-export, no phone-home, no kill-switches, no DRM-style checks. Self-hosting is a first-class deployment (Invariant I4).
+- **Telemetry minimal, off-by-default, anonymized** when on. Documented in the README.
+- **Tests + docs at every layer.** A stranger should be able to read the repo and understand what's happening.
+- **Commit messages and PR descriptions reviewable by a stranger.** Conventional commits, imperative voice, no "fix the thing" subjects.
+- **Dependency licenses tracked.** All transitive deps Apache2/MIT/BSD-compatible so an open release isn't accidentally GPL-tainted (or vice versa, so a closed release isn't accidentally AGPL-poisoned by a transitive).
+- **No code that we'd be embarrassed to ship in public.** Same standard whether the audience is one engineer or ten thousand.
+
+### What gets decided at Phase 6
+
+When we reach Phase 6 (first external user maintaining 30 days of daily use), we re-evaluate with:
+
+- Real adoption numbers for OSS vs closed memory frameworks
+- Direct competitor moves (consolidations, license flips, exits)
+- Our own operational maturity (can we maintain an OSS community? do we have the bandwidth for issue triage?)
+- Customer signal (do prospective paying users care about "really open" or do they just want "I can export my data"?)
+- Legal climate (AI Act enforcement, dependency-license sweeps, regulator stances on open-source AI)
+
+### Decision criteria
+
+When the call comes, the choice matrix:
+
+| Option | When it's the right answer |
+|---|---|
+| **AGPL3 core + closed orchestration** (PostHog / Plausible model) | Trust-driven sales motion; EU/regulated buyers want forks-stay-open; we want viral copyleft |
+| **Apache2 core + closed orchestration** (Supabase / Mem0 model) | Maximum adoption; enterprise-friendly; willing to accept the risk of commercial forks |
+| **BSL / source-available** (Sentry / Cockroach pattern) | Want to prevent specific cloud-provider forks while staying mostly transparent |
+| **Closed source** (1Password / Fastmail model) | Service quality + brand is the moat, not the code; small team, no community capacity |
+
+**Default expectation if no strong signal emerges**: Apache2 core + closed orchestration, mirroring Supabase / Mem0 — both solved the same problem we're solving (user-owned + managed hosting + adoption).
+
+### What this section does NOT change
+
+- Invariant I4 (user owns the substrate) remains binding regardless of license choice. Even closed-source can satisfy I4 via documented export + binary self-hosting; OSS just makes the proof easier.
+- Invariant I1 (MCP surface stability) is independent of license — the protocol surface is forever, not the implementation behind it.
+- Invariant I8 (single-tenant) is architectural, not legal — applies to both OSS and closed deployments.
 
 ---
 
