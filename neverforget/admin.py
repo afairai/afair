@@ -94,10 +94,11 @@ def backfill_vectors_and_links(*, dry_run: bool = False) -> dict[str, int]:
             stats["embeddings_failed"] += 1
             continue
 
-        db.execute(
-            "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
-            (event.content_hash, serialize_vector(vec)),
-        )
+        with db:
+            db.execute(
+                "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+                (event.content_hash, serialize_vector(vec)),
+            )
         stats["embeddings_added"] += 1
         log.info("backfill.embedding_added", event_id=event.id, dim=len(vec))
 

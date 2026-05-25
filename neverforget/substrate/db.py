@@ -33,6 +33,10 @@ def open_db(vault_dir: Path, *, embedding_dim: int = 1536) -> sqlite3.Connection
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA temp_store = MEMORY")
+    # Wait up to 5s for a busy lock before raising. Lets the admin
+    # backfill coexist with the running server on the same database
+    # without "database is locked" errors on briefly-contended writes.
+    conn.execute("PRAGMA busy_timeout = 5000")
 
     # Load sqlite-vec extension (provides the vec0 virtual table type).
     # Must happen before the vec DDL runs.
