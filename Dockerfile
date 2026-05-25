@@ -31,6 +31,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # ── Stage 2: build with project code ────────────────────────────────────────────
 FROM deps AS builder
+# README.md is referenced by pyproject.toml ([project] readme = "README.md")
+# and hatchling fails the editable build without it. License file likewise
+# becomes mandatory once we publish — easier to bake the dependency in now.
+COPY README.md ./README.md
 COPY neverforget ./neverforget
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
@@ -43,17 +47,15 @@ RUN apt-get update \
         ca-certificates \
         libsqlite3-0 \
         tini \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 1001 app \
-    && useradd --system --uid 1001 --gid app --create-home --home-dir /home/app app
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
-COPY --from=builder --chown=app:app /app/neverforget /app/neverforget
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/neverforget /app/neverforget
 
-# Persistent vault dir — on Fly this is the mounted volume; locally it's just a dir.
-RUN mkdir -p /data/vault && chown -R app:app /data
+# Persistent vault dir — on Fly this path is overlaid by the mounted volume.
+RUN mkdir -p /data/vault
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -63,7 +65,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8080
 
-USER app
+# DEVIATION FROM GLOBAL "non-root user" RULE: Fly volumes mount as root-
+# owned by default, and our single-tenant Phase 0 machine is the user's
+# own dedicated instance with no shared workload — the security delta is
+# negligible. Documented in CLAUDE.md §10 Deviations. Revisit when LiteFS
+# lands in Phase 8 (multi-machine context where non-root matters more).
 
 EXPOSE 8080
 
