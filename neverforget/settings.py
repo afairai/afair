@@ -38,6 +38,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Substrate inline-vs-spill threshold
+    inline_text_max_bytes: int = Field(
+        default=64 * 1024,
+        ge=1,
+        description=(
+            "Text payloads larger than this spill to the filesystem object "
+            "store; smaller stays inline in the SQLite row. Binary content "
+            "always spills regardless of size."
+        ),
+    )
+
     # ── MCP server
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8765, ge=1, le=65535)

@@ -20,6 +20,8 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     # Substrate storage — SQLite + vector search
     "sqlite-vec>=0.1.6",
+    # Time-sortable identifiers for substrate events
+    "python-ulid>=3.0.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
     "litellm>=1.52.0",
     # Structured logging
