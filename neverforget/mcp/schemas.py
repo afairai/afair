@@ -66,6 +66,11 @@ class RecallHit(BaseModel):
     salient_facts, language, confidence, source_attribution. Optional;
     will be ``None`` for events whose extraction failed or is still in
     flight.
+    ``linked_event_ids`` are content_hashes the Bind agent automatically
+    found to be semantically similar to this hit at extraction time.
+    Useful for "show me events related to this one" — empty list when
+    the Bind agent hasn't (yet) processed this event or found no
+    neighbors.
     """
 
     event_id: str
@@ -75,6 +80,7 @@ class RecallHit(BaseModel):
     origin: str
     payload_summary: dict[str, Any]
     interpretation: dict[str, Any] | None = None
+    linked_event_ids: list[str] = []
 
 
 class RecallResult(BaseModel):

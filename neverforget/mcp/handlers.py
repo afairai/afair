@@ -12,6 +12,7 @@ import binascii
 from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
+from ..agents.binder import get_linked_event_ids
 from ..agents.embedding import EmbeddingError, embed_text
 from ..substrate import (
     build_binary_payload,
@@ -132,6 +133,7 @@ def _event_to_hit(event: Event) -> RecallHit:
         origin=event.origin,
         payload_summary=_payload_summary(event.payload),
         interpretation=interpretation,
+        linked_event_ids=get_linked_event_ids(ctx.db, event.content_hash),
     )
 
 

@@ -149,18 +149,22 @@ def _read_existing(
 
 
 def read_latest_interpretation(conn: sqlite3.Connection, event_hash: str) -> Interpretation | None:
-    """Return the most recent SUCCESSFUL interpretation for an event.
+    """Return the most recent SUCCESSFUL Extractor interpretation for an event.
 
     Used by recall to surface the Extractor's distillation alongside raw
     payload text. Failed interpretations (status=failed) are skipped —
     they have no useful structured data for the AI client to act on.
+
+    Filters by ``produced_by LIKE 'extractor:%'`` so that bind records
+    written by the Bind agent (``binder:v0``) don't shadow the actual
+    Extractor output. Bind records are accessed via their own helper.
     """
     import json
 
     row = conn.execute(
         """
         SELECT * FROM interpretations
-        WHERE event_hash = ?
+        WHERE event_hash = ? AND produced_by LIKE 'extractor:%'
         ORDER BY produced_at DESC, version DESC
         """,
         (event_hash,),
