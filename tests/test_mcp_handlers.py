@@ -10,6 +10,10 @@ from pydantic import ValidationError
 
 from neverforget.mcp import handlers
 from neverforget.mcp.context import ServerContext, clear_context, set_context
+from neverforget.mcp.handlers import (
+    EventNotFoundError,
+    InvalidGetEventArgsError,
+)
 from neverforget.mcp.schemas import (
     MAX_REMEMBER_BYTES,
     BinaryContent,
@@ -355,3 +359,86 @@ def test_observe_then_recall_finds_it(ctx: ServerContext) -> None:
     assert len(r.hits) == 1
     assert r.hits[0].payload_summary["action"] == "edit_file"
     assert r.hits[0].payload_summary["subject"] == "events.py"
+
+
+# ── get_event — full payload retrieval ─────────────────────────────────────
+
+
+def test_get_event_returns_full_text_no_truncation(ctx: ServerContext) -> None:
+    """A long inline-text event surfaces verbatim via get_event,
+    while recall still truncates the same hit at 500 chars."""
+    long_text = "Section " + "A" * 2000 + " — End"
+    r = handlers.remember(content=TextContent(type="text", text=long_text))
+
+    # Recall truncates to 500 chars (the existing behavior we keep).
+    recall_result = handlers.recall(query="Section", depth="shallow")
+    assert len(recall_result.hits) == 1
+    preview = recall_result.hits[0].payload_summary["text"]
+    assert len(preview) <= 500
+    assert recall_result.hits[0].payload_summary.get("truncated") is True
+
+    # get_event by event_id returns the FULL text.
+    full = handlers.get_event(event_id=r.event_id)
+    assert full.payload["content_type"] == "text"
+    assert full.payload["text"] == long_text
+    assert len(full.payload["text"]) > 2000
+
+
+def test_get_event_by_content_hash_works(ctx: ServerContext) -> None:
+    r = handlers.remember(content=TextContent(type="text", text="hash lookup"))
+    full = handlers.get_event(content_hash=r.content_hash)
+    assert full.event_id == r.event_id
+    assert full.payload["text"] == "hash lookup"
+
+
+def test_get_event_rejects_both_or_neither_selector(ctx: ServerContext) -> None:
+    """Per spec, exactly ONE of event_id or content_hash must be provided."""
+    handlers.remember(content=TextContent(type="text", text="x"))
+    with pytest.raises(InvalidGetEventArgsError):
+        handlers.get_event()
+    with pytest.raises(InvalidGetEventArgsError):
+        handlers.get_event(event_id="01XYZ", content_hash="sha256:abc")
+
+
+def test_get_event_unknown_id_raises_not_found(ctx: ServerContext) -> None:
+    with pytest.raises(EventNotFoundError):
+        handlers.get_event(event_id="01DOESNOTEXIST00000000")
+
+
+def test_get_event_inlines_text_large_blob(ctx: ServerContext) -> None:
+    """text-large payloads spill to the object store; get_event reads
+    them back so the caller sees one consistent shape with payload.text
+    populated."""
+    # Force spill by lowering the inline threshold for this test's context.
+    ctx.inline_text_max_bytes = 100
+    big = "Q" * 5000
+    r = handlers.remember(content=TextContent(type="text", text=big))
+
+    full = handlers.get_event(event_id=r.event_id)
+    assert full.payload["content_type"] == "text-large"
+    assert full.payload["text"] == big
+    # The blob_hash and size_bytes are preserved for traceability.
+    assert full.payload["blob_hash"].startswith("sha256:")
+    assert full.payload["size_bytes"] == len(big)
+
+
+def test_get_event_binary_returns_metadata_not_bytes(ctx: ServerContext) -> None:
+    """Binary events keep raw bytes in the object store; get_event surfaces
+    metadata only. A future read_blob tool would expose the actual bytes."""
+    import base64
+
+    raw = b"\x89PNG\x00\x00fake-png-bytes" * 50
+    r = handlers.remember(
+        content=BinaryContent(
+            type="binary",
+            data_b64=base64.b64encode(raw).decode("ascii"),
+            mime="image/png",
+            filename_hint="bug.png",
+        )
+    )
+    full = handlers.get_event(event_id=r.event_id)
+    assert full.payload["content_type"] == "binary"
+    assert full.payload["mime"] == "image/png"
+    assert full.payload["filename_hint"] == "bug.png"
+    assert full.payload["size_bytes"] == len(raw)
+    assert "text" not in full.payload  # bytes aren't inlined

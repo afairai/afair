@@ -42,12 +42,23 @@ def _settings_for(tmp_path: Path) -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_server_builds_and_registers_all_four_tools(tmp_path: Path) -> None:
-    """Server boots and exposes exactly the four v1 tools per Invariant I1."""
+async def test_server_builds_and_registers_all_v1_tools(tmp_path: Path) -> None:
+    """Server boots and exposes the v1 tool surface per Invariant I1.
+
+    I1 is additive: tools are added forever; existing signatures never
+    change. Started at 4 (remember/recall/list_context/observe); since
+    2026-05-25 also exposes get_event for full untruncated retrieval.
+    """
     server = build_server(_settings_for(tmp_path))
     tools = await server.list_tools()
     tool_names = {t.name for t in tools}
-    assert tool_names == {"remember", "recall", "list_context", "observe"}
+    assert tool_names == {
+        "remember",
+        "recall",
+        "list_context",
+        "observe",
+        "get_event",
+    }
 
 
 @pytest.mark.asyncio
