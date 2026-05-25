@@ -12,9 +12,11 @@ import binascii
 from typing import TYPE_CHECKING, Any
 
 from ..agents import schedule_extraction
+from ..agents.embedding import EmbeddingError, embed_text
 from ..substrate import (
     build_binary_payload,
     build_text_payload,
+    hybrid_search,
     iter_events,
     search_fts,
     write_event,
@@ -187,19 +189,55 @@ def remember(
 def recall(
     query: str,
     scope: str | None = None,
-    depth: Depth = "shallow",
+    depth: Depth = "normal",
     limit: int = 20,
 ) -> RecallResult:
+    """Retrieve relevant events.
+
+    Depth semantics (Phase 1):
+      - ``shallow`` — FTS5 only. No LLM/embedding API call. Cheapest.
+      - ``normal``  — Hybrid FTS5 + vector recall via Reciprocal Rank
+                      Fusion. One embedding API call for the query;
+                      then a parallel vec0 nearest-neighbor lookup.
+                      Catches semantic matches that share no tokens.
+      - ``deep``    — Not yet richer than normal; returns hybrid + note
+                      until the Phase 3+ reasoning agent lands.
+    """
     ctx = get_context()
-
     note: str | None = None
-    if depth != "shallow":
-        note = f"depth={depth!r} is not yet implemented (Phase 0); returning shallow results."
+    depth_used: Depth = depth
 
-    events = search_fts(ctx.db, query, limit=limit)
+    if depth == "shallow" or not ctx.semantic_recall_enabled:
+        events = search_fts(ctx.db, query, limit=limit)
+        depth_used = "shallow"
+    else:
+        # normal or deep — both use hybrid for now
+        api_key_secret = (
+            ctx.openai_api_key
+            if ctx.embedding_model.startswith("openai/")
+            else ctx.anthropic_api_key
+        )
+        api_key = api_key_secret.get_secret_value() if api_key_secret is not None else None
+        try:
+            query_vector = embed_text(model=ctx.embedding_model, text=query, api_key=api_key)
+            events = hybrid_search(ctx.db, query=query, query_vector=query_vector, limit=limit)
+            depth_used = "normal"
+        except EmbeddingError:
+            # Embedding API failed — fall back to FTS without surfacing the
+            # error to the AI client (they can't act on it).
+            events = search_fts(ctx.db, query, limit=limit)
+            depth_used = "shallow"
+            note = "semantic recall unavailable; returned FTS-only results"
+        else:
+            if depth == "deep":
+                note = (
+                    "deep depth is not yet richer than normal "
+                    "(Phase 3+ reasoning agent pending); returned hybrid results"
+                )
+
     return RecallResult(
         hits=[_event_to_hit(e) for e in events],
-        depth_used="shallow",
+        depth_used=depth_used,
         note=note,
     )
 

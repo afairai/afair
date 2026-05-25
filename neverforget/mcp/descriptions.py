@@ -88,17 +88,17 @@ ARGUMENTS:
     "email", "this week", "work". Treated as an FTS hint in Phase 0;
     later phases will interpret it semantically (e.g., as emergent
     category filter).
-  - depth: Optional, default "shallow". One of:
-      "shallow" — fast indexed lookup. Returns in well under a second.
-                  Best for almost every call.
-      "normal"  — combines keyword + vector similarity + light reasoning.
-                  Use when shallow returned nothing and you suspect
-                  there's relevant memory you're not finding by keyword.
-      "deep"    — full reasoning pass over the substrate. Slower.
-                  Use only when the question is high-stakes and you need
-                  exhaustive consideration.
-  Note: In Phase 0, only "shallow" is fully implemented. Calls with
-  "normal" or "deep" return shallow results with a note in the response.
+  - depth: Optional, default "normal" (Phase 1+). One of:
+      "shallow" — FTS5 keyword search only. No embedding API call.
+                  Cheapest (~10ms, $0). Use when latency is critical
+                  or when the substrate is on a metered connection.
+      "normal"  — Hybrid FTS5 + vector recall via Reciprocal Rank
+                  Fusion. Catches semantic matches that share no
+                  tokens with the query. ~150ms latency, ~$0.0001
+                  per call. The default — strictly more results than
+                  shallow.
+      "deep"    — Same as normal today; reserved for the Phase 3+
+                  reasoning agent. Returns a note if you request it.
 
 RETURN:
   {"hits": [{"event_id": "...", "content_hash": "...", "created_at": "...",
