@@ -9,20 +9,22 @@ from __future__ import annotations
 
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids
-from ..agents.embedding import EmbeddingError, embed_text
+from ..agents.embedding import EmbeddingError, embed_query
 from ..substrate import (
     build_binary_payload,
     build_text_payload,
-    hybrid_search,
     iter_events,
+    rrf_merge,
     search_fts,
+    search_vec,
     write_event,
 )
-from .context import get_context
+from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
     ContextSummary,
@@ -48,6 +50,12 @@ DEFAULT_ORIGIN = "agent"
 
 # Snippet length for text in recall/list_context summaries.
 SUMMARY_TEXT_CHARS = 500
+
+# Background pool used to overlap the OpenAI embedding API call with the
+# (cheap) local FTS query during recall. Pool is process-level so it
+# survives across requests. max_workers=4 covers a handful of concurrent
+# recalls; embedding is the dominant cost so this rarely saturates.
+_RECALL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recall-parallel")
 
 
 class ContentTooLargeError(ValueError):
@@ -119,9 +127,8 @@ def _interpretation_summary(extraction: dict[str, Any]) -> dict[str, Any] | None
     return surface or None
 
 
-def _event_to_hit(event: Event) -> RecallHit:
-    ctx = get_context()
-    interp = read_latest_interpretation(ctx.db, event.content_hash)
+def _event_to_hit(event: Event, db: Any) -> RecallHit:
+    interp = read_latest_interpretation(db, event.content_hash)
     interpretation: dict[str, Any] | None = (
         _interpretation_summary(interp.extraction) if interp is not None else None
     )
@@ -133,8 +140,33 @@ def _event_to_hit(event: Event) -> RecallHit:
         origin=event.origin,
         payload_summary=_payload_summary(event.payload),
         interpretation=interpretation,
-        linked_event_ids=get_linked_event_ids(ctx.db, event.content_hash),
+        linked_event_ids=get_linked_event_ids(db, event.content_hash),
     )
+
+
+def _api_key_for_embedding(ctx: Any) -> str | None:
+    """Return the right API key for the configured embedding model.
+
+    Provider selection follows the model-string prefix (litellm convention)
+    so this stays I5-neutral — adding a new provider is a settings change
+    plus one line here.
+    """
+    model = ctx.embedding_model
+    key = None
+    if model.startswith("openai/"):
+        key = ctx.openai_api_key
+    elif model.startswith("voyage/"):
+        key = ctx.voyage_api_key
+    elif model.startswith("gemini/"):
+        key = ctx.gemini_api_key
+    elif model.startswith("anthropic/"):
+        key = ctx.anthropic_api_key
+    else:
+        # Unknown provider — try the OpenAI key as least-bad default; if
+        # the call fails, the EmbeddingError fallback in recall serves
+        # FTS-only results.
+        key = ctx.openai_api_key
+    return key.get_secret_value() if key is not None else None
 
 
 # ── remember ────────────────────────────────────────────────────────────────
@@ -147,6 +179,7 @@ def remember(
     parent_hashes: list[str] | None = None,
 ) -> RememberResult:
     ctx = get_context()
+    db = connect_for_thread()
 
     if isinstance(content, TextContent):
         encoded = content.text.encode("utf-8")
@@ -191,10 +224,10 @@ def remember(
         payload=payload,
         parent_hashes=sorted_parents,
     )
-    already_existed = read_event_by_hash(ctx.db, preview_hash) is not None
+    already_existed = read_event_by_hash(db, preview_hash) is not None
 
     event = write_event(
-        ctx.db,
+        db,
         origin=DEFAULT_ORIGIN,
         kind="remember",
         payload=payload,
@@ -227,38 +260,42 @@ def recall(
     Depth semantics (Phase 1):
       - ``shallow`` — FTS5 only. No LLM/embedding API call. Cheapest.
       - ``normal``  — Hybrid FTS5 + vector recall via Reciprocal Rank
-                      Fusion. One embedding API call for the query;
-                      then a parallel vec0 nearest-neighbor lookup.
-                      Catches semantic matches that share no tokens.
+                      Fusion. The OpenAI embedding API call runs
+                      concurrently with the (cheap) FTS query via a
+                      thread pool — net latency is bounded by the
+                      slower of the two (almost always embedding).
+                      Cached query strings hit instantly.
       - ``deep``    — Not yet richer than normal; returns hybrid + note
                       until the Phase 3+ reasoning agent lands.
     """
     ctx = get_context()
+    db = connect_for_thread()
     note: str | None = None
     depth_used: Depth = depth
 
     if depth == "shallow" or not ctx.semantic_recall_enabled:
-        events = search_fts(ctx.db, query, limit=limit)
+        events = search_fts(db, query, limit=limit)
         depth_used = "shallow"
     else:
-        # normal or deep — both use hybrid for now
-        api_key_secret = (
-            ctx.openai_api_key
-            if ctx.embedding_model.startswith("openai/")
-            else ctx.anthropic_api_key
+        # Overlap embedding API call (network-bound, 100-300ms) with the
+        # FTS query (CPU-bound, <10ms). If the embedding succeeds we merge
+        # via RRF; if it fails we fall back to FTS-only without surfacing
+        # the error to the AI client.
+        api_key = _api_key_for_embedding(ctx)
+        emb_future = _RECALL_POOL.submit(
+            embed_query, model=ctx.embedding_model, text=query, api_key=api_key
         )
-        api_key = api_key_secret.get_secret_value() if api_key_secret is not None else None
+        fts_hits = search_fts(db, query, limit=limit)
         try:
-            query_vector = embed_text(model=ctx.embedding_model, text=query, api_key=api_key)
-            events = hybrid_search(ctx.db, query=query, query_vector=query_vector, limit=limit)
-            depth_used = "normal"
+            embedding = emb_future.result()
         except EmbeddingError:
-            # Embedding API failed — fall back to FTS without surfacing the
-            # error to the AI client (they can't act on it).
-            events = search_fts(ctx.db, query, limit=limit)
+            events = fts_hits
             depth_used = "shallow"
             note = "semantic recall unavailable; returned FTS-only results"
         else:
+            vec_hits = search_vec(db, embedding, limit=limit)
+            events = rrf_merge(fts_hits, vec_hits, limit=limit)
+            depth_used = "normal"
             if depth == "deep":
                 note = (
                     "deep depth is not yet richer than normal "
@@ -266,7 +303,7 @@ def recall(
                 )
 
     return RecallResult(
-        hits=[_event_to_hit(e) for e in events],
+        hits=[_event_to_hit(e, db) for e in events],
         depth_used=depth_used,
         note=note,
     )
@@ -276,23 +313,23 @@ def recall(
 
 
 def list_context(about: str | None = None, limit: int = 50) -> ListContextResult:
-    ctx = get_context()
+    db = connect_for_thread()
 
     if about:
-        recent_events = search_fts(ctx.db, about, limit=limit)
+        recent_events = search_fts(db, about, limit=limit)
     else:
-        recent_events = list(iter_events(ctx.db, limit=limit))
+        recent_events = list(iter_events(db, limit=limit))
 
-    total_row = ctx.db.execute("SELECT COUNT(*) FROM events").fetchone()
+    total_row = db.execute("SELECT COUNT(*) FROM events").fetchone()
     total: int = total_row[0] if total_row else 0
 
     by_kind: dict[str, int] = {
         row["kind"]: row["c"]
-        for row in ctx.db.execute("SELECT kind, COUNT(*) AS c FROM events GROUP BY kind")
+        for row in db.execute("SELECT kind, COUNT(*) AS c FROM events GROUP BY kind")
     }
     by_origin: dict[str, int] = {
         row["origin"]: row["c"]
-        for row in ctx.db.execute("SELECT origin, COUNT(*) AS c FROM events GROUP BY origin")
+        for row in db.execute("SELECT origin, COUNT(*) AS c FROM events GROUP BY origin")
     }
 
     return ListContextResult(
@@ -300,7 +337,7 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
             total_events=total,
             by_kind=by_kind,
             by_origin=by_origin,
-            recent=[_event_to_hit(e) for e in recent_events],
+            recent=[_event_to_hit(e, db) for e in recent_events],
         ),
     )
 
@@ -309,7 +346,7 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
 
 
 def observe(event: ObserveEvent) -> ObserveResult:
-    ctx = get_context()
+    db = connect_for_thread()
 
     # Dump back to a plain dict, preserving any extra fields the client set.
     event_dict = event.model_dump(exclude_none=False)
@@ -325,10 +362,10 @@ def observe(event: ObserveEvent) -> ObserveResult:
         payload=payload,
         parent_hashes=None,
     )
-    already_existed = read_event_by_hash(ctx.db, preview_hash) is not None
+    already_existed = read_event_by_hash(db, preview_hash) is not None
 
     written = write_event(
-        ctx.db,
+        db,
         origin=DEFAULT_ORIGIN,
         kind="observe",
         payload=payload,

@@ -107,27 +107,19 @@ def search_vec(
     return [row_to_event(r) for r in rows]
 
 
-def hybrid_search(
-    conn: sqlite3.Connection,
+def rrf_merge(
+    fts_hits: list[Event],
+    vec_hits: list[Event],
     *,
-    query: str,
-    query_vector: Sequence[float] | None,
     limit: int = 20,
     rrf_k: int = 60,
 ) -> list[Event]:
-    """Combine FTS5 + vector results via Reciprocal Rank Fusion.
+    """Pure merge function — combine two ranked result lists via RRF.
 
-    For each result list, every hit gets a contribution of ``1 / (rrf_k + rank)``
-    to its total score. Documents appearing in both lists rank highest.
-    Documents only in one still appear, ordered by their position in that
-    list. ``rrf_k = 60`` is the canonical default from the literature.
-
-    When ``query_vector`` is ``None`` this falls back to FTS-only —
-    useful when semantic_recall is disabled or the embedding API failed.
+    Separated from ``hybrid_search`` so callers that fetched FTS and vec
+    results in parallel (e.g., recall with the embedding API call running
+    concurrently with FTS) can merge without re-running the queries.
     """
-    fts_hits = search_fts(conn, query, limit=limit)
-    vec_hits = search_vec(conn, query_vector, limit=limit) if query_vector is not None else []
-
     if not fts_hits and not vec_hits:
         return []
     if not vec_hits:
@@ -146,3 +138,25 @@ def hybrid_search(
 
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)
     return [by_id[eid] for eid in sorted_ids[:limit]]
+
+
+def hybrid_search(
+    conn: sqlite3.Connection,
+    *,
+    query: str,
+    query_vector: Sequence[float] | None,
+    limit: int = 20,
+    rrf_k: int = 60,
+) -> list[Event]:
+    """Combine FTS5 + vector results via Reciprocal Rank Fusion.
+
+    Sequential variant — runs FTS, then vec, then merges. Callers that want
+    to overlap the embedding API call with FTS should fetch the two
+    result lists themselves (in parallel) and call ``rrf_merge`` directly.
+
+    When ``query_vector`` is ``None`` this falls back to FTS-only —
+    useful when semantic_recall is disabled or the embedding API failed.
+    """
+    fts_hits = search_fts(conn, query, limit=limit)
+    vec_hits = search_vec(conn, query_vector, limit=limit) if query_vector is not None else []
+    return rrf_merge(fts_hits, vec_hits, limit=limit, rrf_k=rrf_k)

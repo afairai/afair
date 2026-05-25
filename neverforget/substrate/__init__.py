@@ -11,6 +11,7 @@ constitutional review.
 
 from __future__ import annotations
 
+from .checkpoint import start_checkpoint_loop
 from .db import init_db, open_db
 from .events import (
     Event,
@@ -28,7 +29,7 @@ from .payload import (
     derive_searchable_text,
 )
 from .schema import SCHEMA_VERSION
-from .search import hybrid_search, search_fts, search_vec
+from .search import hybrid_search, rrf_merge, search_fts, search_vec
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -46,8 +47,10 @@ __all__ = [
     "read_event_by_hash",
     "read_event_by_id",
     "read_object",
+    "rrf_merge",
     "search_fts",
     "search_vec",
+    "start_checkpoint_loop",
     "write_event",
     "write_object",
 ]

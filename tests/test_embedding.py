@@ -197,6 +197,75 @@ def test_embed_text_rejects_response_with_mismatched_vector_count(
         embedding.embed_text(model="openai/text-embedding-3-small", text=text)
 
 
+# ── query embedding cache ──────────────────────────────────────────────────
+
+
+def test_query_cache_hits_avoid_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repeat query string hits the cache — no second API call."""
+    embedding.reset_query_cache()
+    call_count = {"n": 0}
+
+    def fake_embedding(**kwargs: Any) -> _FakeEmbedding:
+        call_count["n"] += 1
+        return _FakeEmbedding([[0.1, 0.2]])
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "embedding", fake_embedding)
+
+    v1 = embedding.embed_query(model="openai/x", text="hello world")
+    v2 = embedding.embed_query(model="openai/x", text="hello world")
+    v3 = embedding.embed_query(model="openai/x", text="hello world")
+    assert v1 == v2 == v3 == [0.1, 0.2]
+    assert call_count["n"] == 1  # cache served 2 of 3
+
+    stats = embedding.query_cache_stats()
+    assert stats["hits"] == 2
+    assert stats["misses"] == 1
+
+
+def test_query_cache_keys_by_model_and_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Different models cache independently — switching providers re-embeds."""
+    embedding.reset_query_cache()
+    seen_models: list[str] = []
+
+    def fake_embedding(**kwargs: Any) -> _FakeEmbedding:
+        seen_models.append(kwargs["model"])
+        return _FakeEmbedding([[1.0, 0.0]])
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "embedding", fake_embedding)
+
+    embedding.embed_query(model="openai/text-embedding-3-small", text="hi")
+    embedding.embed_query(model="voyage/voyage-3", text="hi")  # different model
+    embedding.embed_query(model="openai/text-embedding-3-small", text="hi")  # cached
+    assert seen_models == ["openai/text-embedding-3-small", "voyage/voyage-3"]
+
+
+def test_query_cache_eviction_at_maxsize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Beyond the LRU cap, the oldest entry is evicted."""
+    cache = embedding._QueryEmbeddingCache(maxsize=2)
+
+    def fake_embedding(**kwargs: Any) -> _FakeEmbedding:
+        return _FakeEmbedding([[float(len(kwargs["input"][0])), 0.0]])
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "embedding", fake_embedding)
+
+    cache.get_or_compute(model="m", text="A", api_key=None)
+    cache.get_or_compute(model="m", text="B", api_key=None)
+    cache.get_or_compute(model="m", text="C", api_key=None)  # evicts "A"
+
+    stats = cache.stats()
+    assert stats["size"] == 2
+
+    # "A" should miss again (evicted); "B" and "C" hit
+    cache.get_or_compute(model="m", text="A", api_key=None)
+    assert cache.stats()["misses"] == 4  # A, B, C, A-again
+
+
 # ── token estimation ──────────────────────────────────────────────────────
 
 
