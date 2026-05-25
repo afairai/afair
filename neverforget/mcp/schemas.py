@@ -56,6 +56,26 @@ class RememberResult(BaseModel):
 Depth = Literal["shallow", "normal", "deep"]
 
 
+class InvalidationSummary(BaseModel):
+    """Surfacing of a fact's bi-temporal invalidation status.
+
+    Present when a later event with ``kind='invalidate'`` referenced this
+    hit's ``content_hash``. The AI client uses this to decide whether to
+    treat the hit as currently-true (``invalidation is None``) or as
+    historical context. The original event remains in the substrate
+    forever per I2 — this is just the projection.
+    """
+
+    at: str
+    """ISO 8601 timestamp when the invalidation was recorded (t_invalid)."""
+
+    by_event_id: str
+    """Event id of the invalidation — fetch via ``get_event`` for full
+    reason + context."""
+
+    reason: str | None = None
+
+
 class RecallHit(BaseModel):
     """One match returned by `recall`.
 
@@ -71,6 +91,10 @@ class RecallHit(BaseModel):
     Useful for "show me events related to this one" — empty list when
     the Bind agent hasn't (yet) processed this event or found no
     neighbors.
+    ``invalidation`` is non-null when a later event recorded a
+    contradiction or supersession for this hit. Recall does NOT filter
+    invalidated hits — they surface alongside current ones so the AI
+    can decide based on query intent (current state vs history).
     """
 
     event_id: str
@@ -81,6 +105,7 @@ class RecallHit(BaseModel):
     payload_summary: dict[str, Any]
     interpretation: dict[str, Any] | None = None
     linked_event_ids: list[str] = []
+    invalidation: InvalidationSummary | None = None
 
 
 class RecallResult(BaseModel):
@@ -162,3 +187,31 @@ class GetEventResult(BaseModel):
     interpretation: dict[str, Any] | None = None
     linked_event_ids: list[str] = []
     parent_hashes: list[str] = []
+    invalidation: InvalidationSummary | None = None
+
+
+# ── invalidate ──────────────────────────────────────────────────────────────
+
+
+class InvalidateResult(BaseModel):
+    """Result of the ``invalidate`` MCP tool — bi-temporal supersession.
+
+    Records that ``target_hash`` is no longer considered current. Both
+    the target event and any prior invalidations remain in the substrate
+    forever (I2); this just appends a new event marking the supersession.
+    """
+
+    ok: bool
+    event_id: str
+    """ULID of the new invalidation event."""
+
+    content_hash: str
+    """sha256 hash of the new invalidation event itself."""
+
+    target_hash: str
+    """The event_hash that this invalidation supersedes."""
+
+    target_already_invalidated: bool
+    """True if a prior invalidation already existed for the target.
+    The new one becomes the current (latest-wins) record; the prior
+    one stays in the substrate."""
