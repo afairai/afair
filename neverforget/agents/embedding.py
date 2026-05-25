@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +33,85 @@ if TYPE_CHECKING:
 
 class EmbeddingError(Exception):
     """Any failure during embedding generation."""
+
+
+# ── query-side embedding cache ────────────────────────────────────────────
+# Substrate write embeddings (each event is unique) intentionally bypass
+# this cache. The read-side recall path embeds the SAME query string over
+# and over — caching there turns a 300ms OpenAI roundtrip into a dict
+# lookup. Bounded LRU prevents unbounded memory growth on long sessions.
+_QUERY_CACHE_MAXSIZE = 256
+
+
+class _QueryEmbeddingCache:
+    """Thread-safe bounded LRU. Lock held only for cache mutation; the
+    network call runs unlocked so a slow OpenAI roundtrip doesn't block
+    cache hits from concurrent recall calls.
+    """
+
+    def __init__(self, maxsize: int = _QUERY_CACHE_MAXSIZE) -> None:
+        self._maxsize = maxsize
+        self._cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get_or_compute(self, *, model: str, text: str, api_key: str | None) -> list[float]:
+        key = (model, text)
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                self.hits += 1
+                return list(cached)
+        # Miss — compute outside the lock so other threads can keep hitting
+        # the cache while we wait on the network.
+        vec = embed_text(model=model, text=text, api_key=api_key)
+        with self._lock:
+            self._cache[key] = list(vec)
+            self._cache.move_to_end(key)
+            self.misses += 1
+            while len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+        return vec
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self.hits = 0
+            self.misses = 0
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "hits": self.hits,
+                "misses": self.misses,
+                "size": len(self._cache),
+                "maxsize": self._maxsize,
+            }
+
+
+_query_cache = _QueryEmbeddingCache()
+
+
+def embed_query(*, model: str, text: str, api_key: str | None = None) -> list[float]:
+    """Cached variant of ``embed_text`` for read-side query strings.
+
+    Same signature as ``embed_text`` — caller can swap them without other
+    changes. Cache is process-local; survives across requests, dies with
+    the server. Bounded to 256 distinct (model, text) pairs.
+    """
+    return _query_cache.get_or_compute(model=model, text=text, api_key=api_key)
+
+
+def query_cache_stats() -> dict[str, int]:
+    """Inspect the recall-query cache. Useful for /health or admin diagnostics."""
+    return _query_cache.stats()
+
+
+def reset_query_cache() -> None:
+    """Empty the query cache. Used by tests; rarely called in production."""
+    _query_cache.clear()
 
 
 # ── chunking parameters ────────────────────────────────────────────────

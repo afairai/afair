@@ -223,9 +223,10 @@ def test_recall_normal_depth_with_mocked_embedding_uses_hybrid(
         )
     )
 
-    # Mock the embedding call to return a 1536-dim zero vector
+    # Mock the embedding call to return a 1536-dim zero vector.
+    # handlers.recall uses embed_query (the cached variant) since 2026-05-25.
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.embed_text",
+        "neverforget.mcp.handlers.embed_query",
         lambda **_: [0.0] * 1536,
     )
 

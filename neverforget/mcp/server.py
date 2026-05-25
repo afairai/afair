@@ -17,10 +17,10 @@ from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
-from ..substrate import open_db
+from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, schemas
 from .auth import BearerTokenMiddleware
-from .context import ServerContext, get_context, set_context
+from .context import ServerContext, connect_for_thread, set_context
 from .oauth import routes as oauth_routes
 
 if TYPE_CHECKING:
@@ -30,26 +30,38 @@ if TYPE_CHECKING:
 
 
 def build_server(settings: Settings) -> FastMCP:
-    """Construct a FastMCP instance wired to a freshly-opened substrate.
+    """Construct a FastMCP instance wired to the substrate.
+
+    Production no longer holds a single shared sqlite3.Connection on
+    ServerContext — handlers acquire per-thread connections via
+    ``connect_for_thread()`` so SQLite WAL's concurrent-reader model
+    is actually exercised when multiple AI clients hit the server.
 
     The server name "neverforget" is the codename surface visible to MCP
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
-    db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
     set_context(
         ServerContext(
-            db=db,
             vault_dir=settings.vault_dir,
             inline_text_max_bytes=settings.inline_text_max_bytes,
             extractor_model=settings.extractor_model,
             anthropic_api_key=settings.anthropic_api_key,
             openai_api_key=settings.openai_api_key,
             gemini_api_key=settings.gemini_api_key,
+            voyage_api_key=settings.voyage_api_key,
             embedding_model=settings.embedding_model,
             embedding_dim=settings.embedding_dim,
             semantic_recall_enabled=settings.semantic_recall_enabled,
         )
+    )
+
+    # Background WAL-checkpoint loop — folds back the WAL file every 5
+    # minutes so it doesn't grow unbounded on long-running servers.
+    start_checkpoint_loop(
+        settings.vault_dir,
+        embedding_dim=settings.embedding_dim,
+        interval_seconds=300,
     )
 
     mcp: FastMCP = FastMCP("neverforget")
@@ -95,8 +107,8 @@ def build_server(settings: Settings) -> FastMCP:
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
         try:
-            ctx = get_context()
-            ctx.db.execute("SELECT 1").fetchone()
+            db = connect_for_thread()
+            db.execute("SELECT 1").fetchone()
         except Exception as e:
             return JSONResponse(
                 {"status": "degraded", "error": str(e)},

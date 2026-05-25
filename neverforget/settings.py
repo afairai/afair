@@ -65,10 +65,17 @@ class Settings(BaseSettings):
     # Format: "<provider>/<model>" — any litellm-supported model.
     extractor_model: str = "anthropic/claude-haiku-4-5"
 
-    # Provider keys — set whichever your selected model needs.
+    # Provider keys — set whichever your selected model needs. Adding a
+    # provider here + a model-prefix branch in handlers._api_key_for_embedding
+    # is the only code change to switch embedding/LLM vendors (I5).
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
+    # Voyage AI = Anthropic's blessed embedding provider (Anthropic doesn't
+    # ship native embeddings). Set this to use ``voyage/voyage-3`` etc. for
+    # the EMBEDDING_MODEL — keeps the whole RAG stack Anthropic-ecosystem
+    # adjacent without depending on OpenAI for both LLM + embedding.
+    voyage_api_key: SecretStr | None = None
 
     # ── Authentication
     # Two layers, defense-in-depth:
@@ -127,10 +134,17 @@ class Settings(BaseSettings):
     # ── Embeddings (Phase 1 — semantic recall via sqlite-vec)
     # Default: OpenAI text-embedding-3-small. We already have OPENAI_API_KEY,
     # 1536 dimensions, ~$0.02 per 1M tokens. Pluggable via litellm's standard
-    # provider-prefix format.
+    # provider-prefix format. Tested providers + recommended dimensions:
+    #   openai/text-embedding-3-small  → 1536 (default)
+    #   openai/text-embedding-3-large  → 3072
+    #   voyage/voyage-3                → 1024
+    #   voyage/voyage-3-lite           → 512
+    #   gemini/embedding-001           → 768
+    #   cohere/embed-english-v3.0      → 1024
+    # Any litellm-supported embedding model works — the only code change
+    # needed to add a new provider is its API key field above.
     embedding_model: str = "openai/text-embedding-3-small"
-    # Embedding vector dimension. MUST match the model. text-embedding-3-small
-    # is 1536; voyage-3-lite is 1024; openai/text-embedding-3-large is 3072.
+    # Embedding vector dimension. MUST match the model (see table above).
     # The events_vec virtual table is created with this dimension at boot;
     # changing it requires dropping the vec table and re-embedding.
     embedding_dim: int = Field(default=1536, ge=64, le=8192)
