@@ -19,11 +19,22 @@
 - MCP server (`neverforget/mcp/`) — four v1 tools (remember/recall/list_context/
   observe) over Streamable HTTP, with AI-facing tool descriptions, /health
   endpoint, and binary-via-base64 + 10 MB cap in `remember`
+- Extractor agent (`neverforget/agents/`) — warm-path LLM extraction via
+  litellm; default `anthropic/claude-haiku-4-5`; failed extractions stored
+  as `status: failed` rows for retry/diagnosis
+- **Fly deployment live at https://neverforget.fly.dev** — single-tenant
+  machine in `fra`, 1 GB volume `vault` with 5-day auto-snapshots,
+  `strategy = "immediate"`, `min_machines_running = 1`
+- **GitHub Actions deploy pipeline** at `.github/workflows/deploy.yml` —
+  branch-based on `main`, runs ruff + mypy + pytest gates, then
+  `flyctl deploy --remote-only`, verifies `/health`
+- `docs/operations.md` — runbooks for deploy, backup-to-laptop, snapshot
+  restore, permanent erasure, secret rotation
 
 ### 0.2 What's in flight
 
-- Task #4 — context-aware Extractor agent (warm path)
-- Tasks #5–#7 — Fly deploy, cross-vendor verification, capability-gate journal
+- Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
+- Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
 
 ### 0.3 What's blocked
 
@@ -77,6 +88,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `.env.example` | Required env vars with comments | When env shape changes |
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
 | `docs/clients/*.md` | Per-client MCP connection config | When client integration changes |
+| `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |
+| `.github/workflows/deploy.yml` | Branch-based CI deploy to Fly | When pipeline changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 
 ## 5. Invariants — quick reference
