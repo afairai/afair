@@ -12,7 +12,7 @@ def test_landing_html_contains_manifesto() -> None:
     html = landing._LANDING_HTML
     assert "Every individual owns" in html
     assert "cognitive sovereignty layer" in html
-    assert "1Password liberated" in html  # phrase split across lines in source
+    assert "password managers liberated" in html  # phrase split across lines in source
     assert "credentials" in html
     assert "Codename" in html
 
@@ -61,7 +61,10 @@ async def test_landing_handler_returns_html_with_cache_header() -> None:
     assert "<title>neverforget — vision</title>" in body
 
 
-def test_landing_html_links_to_health() -> None:
-    """Footer points at /health so a visitor with curiosity gets a 200 JSON
-    rather than a dead end. Cheap diagnostic surface for the public."""
-    assert 'href="/health"' in landing._LANDING_HTML
+def test_landing_html_has_no_outbound_links() -> None:
+    """Manifesto stands alone — no /health diagnostic link, no external
+    links, no internal nav. Reduces surface for indexing + analytics +
+    visitor curiosity dead-ends."""
+    html = landing._LANDING_HTML
+    # No <a href> tags at all in the page body.
+    assert "<a " not in html, "manifesto should have zero outbound or internal links"
