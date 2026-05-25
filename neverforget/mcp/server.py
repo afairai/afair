@@ -1,18 +1,25 @@
 """FastMCP server wiring.
 
 Registers the four v1 tools with their AI-facing descriptions and exposes
-a /health endpoint for the orchestrator (Fly) to probe.
+a /health endpoint for the orchestrator (Fly) to probe. The bearer-token
+auth middleware is layered on at HTTP-level via a thin Starlette wrapper —
+this keeps authentication BELOW the MCP tool surface (Invariant I1).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import uvicorn
 from fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
+from starlette.routing import Mount
 
 from ..substrate import open_db
 from . import descriptions, handlers, schemas
+from .auth import BearerTokenMiddleware
 from .context import ServerContext, get_context, set_context
 
 if TYPE_CHECKING:
@@ -96,12 +103,43 @@ def build_server(settings: Settings) -> FastMCP:
     return mcp
 
 
+def build_app(settings: Settings) -> Starlette:
+    """Build the ASGI app: FastMCP wrapped in the bearer-token middleware.
+
+    The Starlette wrapper composes two layers:
+      1. ``BearerTokenMiddleware`` — checks Authorization: Bearer header
+         on every request, except the exempt paths.
+      2. The FastMCP app mounted at "/" — handles MCP protocol + /health.
+
+    /health is the only exempt path: Fly's orchestrator probes it to
+    determine liveness and cannot present the auth token.
+    """
+    mcp = build_server(settings)
+    mcp_app = mcp.http_app()
+    token = settings.auth_token.get_secret_value() if settings.auth_token is not None else None
+    middleware = [
+        Middleware(
+            BearerTokenMiddleware,
+            token=token,
+            exempt_paths=["/health"],
+        ),
+    ]
+    # CRITICAL: pass FastMCP's lifespan to the parent app so its
+    # StreamableHTTPSessionManager initializes correctly. Without this,
+    # all MCP-protocol requests fail with "Task group is not initialized".
+    return Starlette(
+        routes=[Mount("/", app=mcp_app)],
+        middleware=middleware,
+        lifespan=mcp_app.lifespan,
+    )
+
+
 def run(settings: Settings) -> None:
     """Run the MCP server until interrupted. Uses Streamable HTTP transport."""
-    mcp = build_server(settings)
-    mcp.run(
-        transport="http",
+    app = build_app(settings)
+    uvicorn.run(
+        app,
         host=settings.mcp_host,
         port=settings.mcp_port,
-        show_banner=False,
+        log_level=settings.log_level.lower(),
     )
