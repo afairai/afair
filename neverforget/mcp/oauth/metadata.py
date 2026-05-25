@@ -58,5 +58,8 @@ def authorization_server_metadata(settings: Settings) -> dict[str, object]:
         # MCP 2026-07-28 RC requires clients to validate this; Claude.ai
         # rejects responses without it.
         "authorization_response_iss_parameter_supported": True,
+        # Tokens we issue bind to a specific resource via `aud` claim
+        # (RFC 8707 Resource Indicators). The MCP spec requires this.
+        "resource_indicators_supported": True,
         "service_documentation": f"{issuer}/",
     }
