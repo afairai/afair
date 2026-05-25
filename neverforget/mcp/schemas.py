@@ -53,7 +53,17 @@ class RememberResult(BaseModel):
 # ── recall ──────────────────────────────────────────────────────────────────
 
 
-Depth = Literal["shallow", "normal", "deep"]
+Depth = Literal["auto", "shallow", "normal", "deep"]
+"""Recall depth selector.
+
+- ``auto``     — system picks based on the query shape (default since
+                 2026-05-26 ; stolen from Cognee's auto-routing concept).
+                 Exact identifiers, single words → shallow; otherwise normal.
+                 Caller doesn't have to think about it.
+- ``shallow``  — FTS5 keyword only. No embedding API call.
+- ``normal``   — Hybrid FTS5 + vector via Reciprocal Rank Fusion.
+- ``deep``     — Same as normal until the Phase 3+ reasoning agent lands.
+"""
 
 
 class InvalidationSummary(BaseModel):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -295,22 +296,63 @@ def remember(
 # ── recall ──────────────────────────────────────────────────────────────────
 
 
+# Compiled at import time; matches ULID-shaped strings (26 chars of the
+# Crockford base32 alphabet, ULIDs are uppercase but be tolerant).
+_ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
+_IDENTIFIER_PREFIXES = ("sha256:", "http://", "https://", "file://")
+
+
+def _auto_route_depth(query: str) -> Depth:
+    """Pick the optimal recall depth without bothering the caller.
+
+    Heuristics (stolen-and-improved from Cognee, who route between graph
+    and vector; we route between FTS and hybrid since FastEmbed made the
+    semantic path essentially free):
+
+      - Exact identifiers (sha256: prefix, http(s) URLs, file:// paths,
+        bare ULIDs): vector adds nothing because there is no semantic
+        neighborhood. FTS exact-match wins on speed and precision.
+      - Single tokens after FTS sanitization: usually a name, ID, or
+        rare term; FTS5 already ranks these well, embedding similarity
+        risks pulling in loosely-related noise.
+      - Everything else: hybrid normal. Since FastEmbed turned the
+        embedding cost into ~5ms in-process inference, the broader
+        coverage is free.
+
+    Returns the concrete depth ("shallow"|"normal") — never "auto" or
+    "deep" so the downstream code only sees the resolved value.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return "shallow"
+    if any(stripped.startswith(p) for p in _IDENTIFIER_PREFIXES):
+        return "shallow"
+    if _ULID_RE.match(stripped):
+        return "shallow"
+    # Token count after FTS sanitization (mirrors search_fts's behavior).
+    tokens = re.sub(r'[-+*"():^]', " ", stripped).split()
+    if len(tokens) <= 1:
+        return "shallow"
+    return "normal"
+
+
 def recall(
     query: str,
     scope: str | None = None,
-    depth: Depth = "normal",
+    depth: Depth = "auto",
     limit: int = 20,
 ) -> RecallResult:
     """Retrieve relevant events.
 
-    Depth semantics (Phase 1):
+    Depth semantics (Phase 2):
+      - ``auto``    — system picks based on query shape (default).
+                      Exact identifiers or single tokens → shallow;
+                      multi-token natural language → normal hybrid.
+                      Callers rarely need anything else.
       - ``shallow`` — FTS5 only. No LLM/embedding API call. Cheapest.
       - ``normal``  — Hybrid FTS5 + vector recall via Reciprocal Rank
-                      Fusion. The OpenAI embedding API call runs
-                      concurrently with the (cheap) FTS query via a
-                      thread pool — net latency is bounded by the
-                      slower of the two (almost always embedding).
-                      Cached query strings hit instantly.
+                      Fusion. The embedding call runs concurrently with
+                      the FTS query; cached query strings hit instantly.
       - ``deep``    — Not yet richer than normal; returns hybrid + note
                       until the Phase 3+ reasoning agent lands.
     """
@@ -318,6 +360,13 @@ def recall(
     db = connect_for_thread()
     note: str | None = None
     depth_used: Depth = depth
+
+    # Resolve auto BEFORE branching, so the downstream logic only sees
+    # the concrete depth. Keep depth_used reflecting the resolved value
+    # so the caller can observe which path actually ran.
+    if depth == "auto":
+        depth = _auto_route_depth(query)
+        depth_used = depth
 
     if depth == "shallow" or not ctx.semantic_recall_enabled:
         events = search_fts(db, query, limit=limit)
