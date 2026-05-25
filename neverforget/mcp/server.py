@@ -15,12 +15,13 @@ from fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 
 from ..substrate import open_db
 from . import descriptions, handlers, schemas
 from .auth import BearerTokenMiddleware
 from .context import ServerContext, get_context, set_context
+from .oauth import routes as oauth_routes
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -116,22 +117,63 @@ def build_app(settings: Settings) -> Starlette:
     """
     mcp = build_server(settings)
     mcp_app = mcp.http_app()
-    token = settings.auth_token.get_secret_value() if settings.auth_token is not None else None
+    static_token = (
+        settings.auth_token.get_secret_value() if settings.auth_token is not None else None
+    )
+
+    # OAuth-related paths must bypass the auth middleware (clients need to
+    # discover and start the dance without credentials).
+    exempt_paths = {
+        "/health",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+    }
+    exempt_prefixes = ("/oauth/",)
+
     middleware = [
         Middleware(
             BearerTokenMiddleware,
-            token=token,
-            exempt_paths=["/health"],
+            settings=settings,
+            static_token=static_token,
+            exempt_paths=exempt_paths,
+            exempt_prefixes=exempt_prefixes,
         ),
     ]
+
+    # Routes: OAuth metadata + dance endpoints + the mounted MCP app.
+    routes = [
+        Route(
+            "/.well-known/oauth-protected-resource",
+            oauth_routes.well_known_oauth_protected_resource,
+            methods=["GET"],
+        ),
+        Route(
+            "/.well-known/oauth-authorization-server",
+            oauth_routes.well_known_oauth_authorization_server,
+            methods=["GET"],
+        ),
+        Route("/oauth/register", oauth_routes.oauth_register, methods=["POST"]),
+        Route("/oauth/authorize", oauth_routes.oauth_authorize, methods=["GET"]),
+        Route(
+            "/oauth/identity/github/callback",
+            oauth_routes.oauth_identity_github_callback,
+            methods=["GET"],
+        ),
+        Route("/oauth/token", oauth_routes.oauth_token, methods=["POST"]),
+        Route("/oauth/revoke", oauth_routes.oauth_revoke, methods=["POST"]),
+        Mount("/", app=mcp_app),
+    ]
+
     # CRITICAL: pass FastMCP's lifespan to the parent app so its
-    # StreamableHTTPSessionManager initializes correctly. Without this,
-    # all MCP-protocol requests fail with "Task group is not initialized".
-    return Starlette(
-        routes=[Mount("/", app=mcp_app)],
+    # StreamableHTTPSessionManager initializes correctly.
+    app = Starlette(
+        routes=routes,
         middleware=middleware,
         lifespan=mcp_app.lifespan,
     )
+    # Make settings accessible to OAuth route handlers via request.app.state.
+    app.state.settings = settings
+    return app
 
 
 def run(settings: Settings) -> None:
