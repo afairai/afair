@@ -6,12 +6,40 @@ Interpretation layer (task #4) and is composed on top of this.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from .events import Event, row_to_event
 
 if TYPE_CHECKING:
     import sqlite3
+
+
+# FTS5 special characters that need to be stripped from natural-language
+# queries before being passed as a MATCH expression. Hyphens are the most
+# common gotcha — they parse as the NOT operator, so "smoke-test" tries to
+# search for "smoke" NOT "test" and SQLite reports "no such column: test".
+_FTS5_SPECIALS_RE = re.compile(r'[-+*"():^]')
+
+
+def _safe_fts_query(query: str) -> str:
+    """Convert a natural-language query into an FTS5-safe AND-of-tokens form.
+
+    The recall tool's contract says "plain words, no special syntax". This
+    helper makes the implementation honor that contract:
+      - FTS5 special chars (- + * " ( ) : ^) are replaced with spaces
+      - The result is split into tokens
+      - Each token is double-quoted (FTS5 phrase syntax for a single word)
+      - Tokens are joined with spaces (FTS5's implicit AND)
+
+    Returns an empty string when the query has no tokens — callers should
+    short-circuit on that to avoid running an empty MATCH.
+    """
+    sanitized = _FTS5_SPECIALS_RE.sub(" ", query)
+    tokens = [t for t in sanitized.split() if t]
+    if not tokens:
+        return ""
+    return " ".join(f'"{t}"' for t in tokens)
 
 
 def search_fts(
@@ -22,9 +50,13 @@ def search_fts(
 ) -> list[Event]:
     """Run an FTS5 ``MATCH`` query, return events ordered by rank.
 
-    The ``query`` is passed directly to SQLite's FTS5 query syntax — quotes
-    for phrase match, ``NEAR()``, ``OR``, ``-`` for exclude, all supported.
+    Natural-language queries are sanitized (see ``_safe_fts_query``) so
+    callers can pass arbitrary text without worrying about FTS5 operator
+    characters. Empty or all-stripped queries return an empty list.
     """
+    safe = _safe_fts_query(query)
+    if not safe:
+        return []
     rows = conn.execute(
         """
         SELECT events.* FROM events
@@ -33,6 +65,6 @@ def search_fts(
         ORDER BY rank
         LIMIT ?
         """,
-        (query, limit),
+        (safe, limit),
     ).fetchall()
     return [row_to_event(r) for r in rows]

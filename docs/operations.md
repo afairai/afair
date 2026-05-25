@@ -230,7 +230,7 @@ curl https://neverforget.fly.dev/health
 # Expected: {"status":"ok"}
 
 # MCP tool listing (proves the cross-vendor surface is alive)
-curl -X POST https://neverforget.fly.dev/mcp/ \
+curl -X POST https://neverforget.fly.dev/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq
