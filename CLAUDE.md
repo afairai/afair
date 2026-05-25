@@ -87,9 +87,11 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `README.md` | Public-facing setup + orientation | When setup steps change |
 | `.env.example` | Required env vars with comments | When env shape changes |
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
-| `docs/clients/*.md` | Per-client MCP connection config | When client integration changes |
+| `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |
 | `.github/workflows/deploy.yml` | Branch-based CI deploy to Fly | When pipeline changes |
+| `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
+| `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 
 ## 5. Invariants — quick reference
