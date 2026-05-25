@@ -23,14 +23,22 @@ _FTS5_SPECIALS_RE = re.compile(r'[-+*"():^]')
 
 
 def _safe_fts_query(query: str) -> str:
-    """Convert a natural-language query into an FTS5-safe AND-of-tokens form.
+    """Convert a natural-language query into an FTS5-safe OR-of-tokens form.
 
     The recall tool's contract says "plain words, no special syntax". This
-    helper makes the implementation honor that contract:
+    helper honors that contract:
       - FTS5 special chars (- + * " ( ) : ^) are replaced with spaces
       - The result is split into tokens
       - Each token is double-quoted (FTS5 phrase syntax for a single word)
-      - Tokens are joined with spaces (FTS5's implicit AND)
+      - Tokens are joined with OR — FTS5 then ranks results by relevance
+        (documents matching MORE tokens rank higher; documents matching
+        ANY token still appear)
+
+    Why OR + rank, not AND: a 4-token natural-language query like
+    "cross-vendor verification I5 neutrality" should still find a document
+    that contains "cross-vendor" but not "I5" — that document is clearly
+    relevant. FTS5's BM25 ranking puts the strongest matches first; the
+    LIMIT cuts off the tail.
 
     Returns an empty string when the query has no tokens — callers should
     short-circuit on that to avoid running an empty MATCH.
@@ -39,7 +47,7 @@ def _safe_fts_query(query: str) -> str:
     tokens = [t for t in sanitized.split() if t]
     if not tokens:
         return ""
-    return " ".join(f'"{t}"' for t in tokens)
+    return " OR ".join(f'"{t}"' for t in tokens)
 
 
 def search_fts(
