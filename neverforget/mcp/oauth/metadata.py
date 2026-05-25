@@ -54,5 +54,9 @@ def authorization_server_metadata(settings: Settings) -> dict[str, object]:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "code_challenge_methods_supported": ["S256"],
+        # RFC 9207 — we include `iss` in authorization response redirects.
+        # MCP 2026-07-28 RC requires clients to validate this; Claude.ai
+        # rejects responses without it.
+        "authorization_response_iss_parameter_supported": True,
         "service_documentation": f"{issuer}/",
     }

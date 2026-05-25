@@ -277,7 +277,15 @@ async def oauth_identity_github_callback(request: Request) -> Response:
         db.close()
 
     # Build redirect back to the original MCP client with our auth code.
-    qs_parts: dict[str, str] = {"code": our_code.code}
+    # Per RFC 9207 (Authorization Server Issuer Identification) we MUST
+    # include `iss` so the client can confirm which authorization server
+    # the response came from — mitigates a class of mix-up attacks.
+    # MCP 2026-07-28 RC explicitly requires this for spec compliance;
+    # Claude.ai's strict client rejects responses missing it.
+    qs_parts: dict[str, str] = {
+        "code": our_code.code,
+        "iss": settings.effective_oauth_issuer,
+    }
     if login.client_state:
         qs_parts["state"] = login.client_state
     separator = "&" if "?" in login.redirect_uri else "?"
