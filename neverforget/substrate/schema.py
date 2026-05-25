@@ -129,3 +129,17 @@ SCHEMA_DDL: tuple[str, ...] = (
     ) STRICT
     """,
 )
+
+
+# Vector-table DDL — parameterized by embedding dimension and rendered at
+# boot via str.format(dim=...). sqlite-vec must be loaded first.
+# Stored separately from SCHEMA_DDL so it can be re-run with different
+# dimensions if needed (e.g., during a model migration in a later phase).
+VEC_DDL: tuple[str, ...] = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(
+        content_hash TEXT PRIMARY KEY,
+        embedding    FLOAT[{dim}]
+    )
+    """,
+)

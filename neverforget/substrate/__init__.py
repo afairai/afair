@@ -28,7 +28,7 @@ from .payload import (
     derive_searchable_text,
 )
 from .schema import SCHEMA_VERSION
-from .search import search_fts
+from .search import hybrid_search, search_fts, search_vec
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -38,6 +38,7 @@ __all__ = [
     "canonical_json",
     "content_hash",
     "derive_searchable_text",
+    "hybrid_search",
     "init_db",
     "iter_events",
     "object_path",
@@ -46,6 +47,7 @@ __all__ = [
     "read_event_by_id",
     "read_object",
     "search_fts",
+    "search_vec",
     "write_event",
     "write_object",
 ]

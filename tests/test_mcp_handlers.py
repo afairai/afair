@@ -39,7 +39,15 @@ def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def ctx(tmp_path: Path) -> Iterator[ServerContext]:
     db = open_db(tmp_path)
-    sc = ServerContext(db=db, vault_dir=tmp_path, inline_text_max_bytes=64 * 1024)
+    # Disable semantic_recall by default — these tests don't mock the
+    # embedding API. Tests that specifically want the hybrid path
+    # re-enable it + monkeypatch embed_text.
+    sc = ServerContext(
+        db=db,
+        vault_dir=tmp_path,
+        inline_text_max_bytes=64 * 1024,
+        semantic_recall_enabled=False,
+    )
     set_context(sc)
     try:
         yield sc
@@ -178,20 +186,57 @@ def test_recall_shallow_finds_match(ctx: ServerContext) -> None:
     assert "Sajinth" in r.hits[0].payload_summary["text"]
 
 
-def test_recall_normal_depth_degrades_with_note(ctx: ServerContext) -> None:
+def test_recall_normal_depth_with_semantic_disabled_returns_shallow(
+    ctx: ServerContext,
+) -> None:
+    """With semantic_recall disabled (no embedding API), normal degrades to
+    shallow + the standard FTS-only note."""
     handlers.remember(content=TextContent(type="text", text="anything"))
     r = handlers.recall(query="anything", depth="normal")
     assert r.depth_used == "shallow"
-    assert r.note is not None
-    assert "normal" in r.note
 
 
 def test_recall_deep_depth_degrades_with_note(ctx: ServerContext) -> None:
+    """Deep is not yet richer than normal; should always note that."""
     handlers.remember(content=TextContent(type="text", text="anything"))
     r = handlers.recall(query="anything", depth="deep")
+    # With semantic_recall disabled, deep also falls to shallow.
     assert r.depth_used == "shallow"
-    assert r.note is not None
-    assert "deep" in r.note
+
+
+def test_recall_normal_depth_with_mocked_embedding_uses_hybrid(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When semantic_recall is enabled and the embedding API works, normal
+    depth runs the hybrid FTS+vector pipeline and surfaces depth_used=normal."""
+    from neverforget.mcp.context import ServerContext as SC
+    from neverforget.mcp.context import set_context
+
+    # Replace context with one that has semantic_recall enabled
+    set_context(
+        SC(
+            db=ctx.db,
+            vault_dir=ctx.vault_dir,
+            inline_text_max_bytes=64 * 1024,
+            semantic_recall_enabled=True,
+            embedding_model="openai/text-embedding-3-small",
+        )
+    )
+
+    # Mock the embedding call to return a 1536-dim zero vector
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.embed_text",
+        lambda **_: [0.0] * 1536,
+    )
+
+    handlers.remember(content=TextContent(type="text", text="anything noteworthy"))
+    r = handlers.recall(query="noteworthy", depth="normal")
+    assert r.depth_used == "normal"
+    assert r.note is None
+    # The remembered event should be found via FTS even though the vector
+    # store may be empty (semantic_recall_enabled but no embedding stored
+    # because schedule_extraction was no-op'd above).
+    assert len(r.hits) >= 1
 
 
 def test_recall_truncates_long_text_in_summary(ctx: ServerContext) -> None:

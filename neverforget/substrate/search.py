@@ -1,7 +1,8 @@
-"""Substrate search — FTS5 keyword retrieval over the immutable log.
+"""Substrate search — FTS5 keyword retrieval + sqlite-vec semantic recall.
 
-Phase 0 uses FTS5 only. Vector search via sqlite-vec lives in the
-Interpretation layer (task #4) and is composed on top of this.
+Phase 0 was FTS-only. Phase 1 adds vector recall via sqlite-vec and a
+hybrid merge using Reciprocal Rank Fusion. Both paths return ``Event``
+objects from the same substrate table.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from .events import Event, row_to_event
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Sequence
 
 
 # FTS5 special characters that need to be stripped from natural-language
@@ -76,3 +78,71 @@ def search_fts(
         (safe, limit),
     ).fetchall()
     return [row_to_event(r) for r in rows]
+
+
+def search_vec(
+    conn: sqlite3.Connection,
+    query_vector: Sequence[float],
+    *,
+    limit: int = 20,
+) -> list[Event]:
+    """Run a cosine-similarity vector query against events_vec.
+
+    Returns events ordered by closest distance (smaller = more similar).
+    Events that have no embedding row (e.g., extraction failed) don't
+    appear here — they remain reachable via FTS.
+    """
+    import struct
+
+    payload = struct.pack(f"<{len(query_vector)}f", *query_vector)
+    rows = conn.execute(
+        """
+        SELECT events.* FROM events_vec
+        JOIN events ON events.content_hash = events_vec.content_hash
+        WHERE embedding MATCH ? AND k = ?
+        ORDER BY distance
+        """,
+        (payload, limit),
+    ).fetchall()
+    return [row_to_event(r) for r in rows]
+
+
+def hybrid_search(
+    conn: sqlite3.Connection,
+    *,
+    query: str,
+    query_vector: Sequence[float] | None,
+    limit: int = 20,
+    rrf_k: int = 60,
+) -> list[Event]:
+    """Combine FTS5 + vector results via Reciprocal Rank Fusion.
+
+    For each result list, every hit gets a contribution of ``1 / (rrf_k + rank)``
+    to its total score. Documents appearing in both lists rank highest.
+    Documents only in one still appear, ordered by their position in that
+    list. ``rrf_k = 60`` is the canonical default from the literature.
+
+    When ``query_vector`` is ``None`` this falls back to FTS-only —
+    useful when semantic_recall is disabled or the embedding API failed.
+    """
+    fts_hits = search_fts(conn, query, limit=limit)
+    vec_hits = search_vec(conn, query_vector, limit=limit) if query_vector is not None else []
+
+    if not fts_hits and not vec_hits:
+        return []
+    if not vec_hits:
+        return fts_hits[:limit]
+    if not fts_hits:
+        return vec_hits[:limit]
+
+    scores: dict[str, float] = {}
+    by_id: dict[str, Event] = {}
+    for rank, event in enumerate(fts_hits):
+        scores[event.id] = scores.get(event.id, 0.0) + 1.0 / (rrf_k + rank + 1)
+        by_id.setdefault(event.id, event)
+    for rank, event in enumerate(vec_hits):
+        scores[event.id] = scores.get(event.id, 0.0) + 1.0 / (rrf_k + rank + 1)
+        by_id.setdefault(event.id, event)
+
+    sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)
+    return [by_id[eid] for eid in sorted_ids[:limit]]

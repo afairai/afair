@@ -35,6 +35,10 @@ class ServerContext:
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
+    # Embeddings (Phase 1 — semantic recall via sqlite-vec)
+    embedding_model: str = "openai/text-embedding-3-small"
+    embedding_dim: int = 1536
+    semantic_recall_enabled: bool = True
 
 
 _context: ServerContext | None = None

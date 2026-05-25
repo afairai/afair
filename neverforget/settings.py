@@ -124,8 +124,19 @@ class Settings(BaseSettings):
     # instance. Comma-separated GitHub usernames (case-insensitive).
     identity_allowlist: str = ""
 
-    # ── Embeddings
-    embedding_model: str = "anthropic/voyage-3-lite"
+    # ── Embeddings (Phase 1 — semantic recall via sqlite-vec)
+    # Default: OpenAI text-embedding-3-small. We already have OPENAI_API_KEY,
+    # 1536 dimensions, ~$0.02 per 1M tokens. Pluggable via litellm's standard
+    # provider-prefix format.
+    embedding_model: str = "openai/text-embedding-3-small"
+    # Embedding vector dimension. MUST match the model. text-embedding-3-small
+    # is 1536; voyage-3-lite is 1024; openai/text-embedding-3-large is 3072.
+    # The events_vec virtual table is created with this dimension at boot;
+    # changing it requires dropping the vec table and re-embedding.
+    embedding_dim: int = Field(default=1536, ge=64, le=8192)
+    # Whether semantic recall is active. Disable to fall back to FTS-only
+    # (useful for local dev without an OpenAI key).
+    semantic_recall_enabled: bool = True
 
     @field_validator("vault_dir", mode="before")
     @classmethod
