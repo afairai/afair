@@ -18,6 +18,7 @@ import structlog
 
 from ..substrate import open_db
 from ..substrate.events import read_event_by_id
+from .embedding import EmbeddingError, embed_text, serialize_vector
 from .interpretation import (
     write_failed_interpretation,
     write_interpretation,
@@ -47,6 +48,17 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="extractor")
 atexit.register(lambda: _EXECUTOR.shutdown(wait=True, cancel_futures=False))
 
 
+def _api_key_for(model: str, ctx: object) -> str | None:
+    """Return the right secret-value key for a given litellm-style model string."""
+    if model.startswith("openai/"):
+        key = getattr(ctx, "openai_api_key", None)
+    elif model.startswith("gemini/"):
+        key = getattr(ctx, "gemini_api_key", None)
+    else:
+        key = getattr(ctx, "anthropic_api_key", None)
+    return key.get_secret_value() if key is not None else None
+
+
 def schedule_extraction(event_id: str) -> None:
     """Fire-and-forget the extraction for ``event_id``. Returns immediately.
 
@@ -58,21 +70,16 @@ def schedule_extraction(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
-    api_key = (
-        ctx.anthropic_api_key.get_secret_value() if ctx.anthropic_api_key is not None else None
-    )
-    # OpenAI key fallback when the model selects an OpenAI model.
-    if ctx.extractor_model.startswith("openai/") and ctx.openai_api_key is not None:
-        api_key = ctx.openai_api_key.get_secret_value()
-    if ctx.extractor_model.startswith("gemini/") and ctx.gemini_api_key is not None:
-        api_key = ctx.gemini_api_key.get_secret_value()
-
     _EXECUTOR.submit(
         _run_extraction,
         event_id=event_id,
         vault_dir=ctx.vault_dir,
         model=ctx.extractor_model,
-        api_key=api_key,
+        api_key=_api_key_for(ctx.extractor_model, ctx),
+        embedding_model=ctx.embedding_model,
+        embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
+        embedding_dim=ctx.embedding_dim,
+        semantic_recall_enabled=ctx.semantic_recall_enabled,
     )
 
 
@@ -84,19 +91,15 @@ def extract_sync(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
-    api_key = (
-        ctx.anthropic_api_key.get_secret_value() if ctx.anthropic_api_key is not None else None
-    )
-    if ctx.extractor_model.startswith("openai/") and ctx.openai_api_key is not None:
-        api_key = ctx.openai_api_key.get_secret_value()
-    if ctx.extractor_model.startswith("gemini/") and ctx.gemini_api_key is not None:
-        api_key = ctx.gemini_api_key.get_secret_value()
-
     _run_extraction(
         event_id=event_id,
         vault_dir=ctx.vault_dir,
         model=ctx.extractor_model,
-        api_key=api_key,
+        api_key=_api_key_for(ctx.extractor_model, ctx),
+        embedding_model=ctx.embedding_model,
+        embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
+        embedding_dim=ctx.embedding_dim,
+        semantic_recall_enabled=ctx.semantic_recall_enabled,
     )
 
 
@@ -106,9 +109,13 @@ def _run_extraction(
     vault_dir: Path,
     model: str,
     api_key: str | None,
+    embedding_model: str = "openai/text-embedding-3-small",
+    embedding_api_key: str | None = None,
+    embedding_dim: int = 1536,
+    semantic_recall_enabled: bool = True,
 ) -> None:
     """The actual extraction work. Opens its own DB connection per thread."""
-    db = open_db(vault_dir)
+    db = open_db(vault_dir, embedding_dim=embedding_dim)
     try:
         event = read_event_by_id(db, event_id)
         if event is None:
@@ -175,8 +182,73 @@ def _run_extraction(
             best_guess_kind=validated_or_error.get("best_guess_kind"),
             model=model,
         )
+
+        # Generate + store the embedding for semantic recall. Failure here
+        # is non-fatal — the substrate event is durable; only the vector
+        # store doesn't get populated, and recall falls back to FTS for
+        # this event.
+        if semantic_recall_enabled:
+            embedding_text = _embedding_text_for_event(event, validated_or_error)
+            try:
+                vector = embed_text(
+                    model=embedding_model,
+                    text=embedding_text,
+                    api_key=embedding_api_key,
+                )
+                _store_embedding(db, event.content_hash, vector)
+                log.info(
+                    "extractor.embedding_stored",
+                    event_id=event_id,
+                    dim=len(vector),
+                    model=embedding_model,
+                )
+            except EmbeddingError as e:
+                log.warning(
+                    "extractor.embedding_failed",
+                    event_id=event_id,
+                    error=str(e),
+                    model=embedding_model,
+                )
     finally:
         db.close()
+
+
+def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> str:
+    """Choose the text to embed for an event.
+
+    We use a composed signal: the inline payload text (if any) plus the
+    extractor's summary plus the entity names. This gives the embedding
+    both raw content and the LLM's distilled understanding.
+    """
+    pieces: list[str] = []
+    payload = getattr(event, "payload", {}) or {}
+    if isinstance(payload, dict):
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            pieces.append(text.strip())
+        for key in ("context", "filename_hint", "action", "subject", "result"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                pieces.append(value.strip())
+    summary = extraction.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        pieces.append(summary.strip())
+    entities = extraction.get("entities")
+    if isinstance(entities, list):
+        names = [e.get("name") if isinstance(e, dict) else None for e in entities]
+        pieces.extend(n for n in names if isinstance(n, str) and n.strip())
+    combined = "\n".join(pieces).strip()
+    return combined or "(empty event)"
+
+
+def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None:
+    """Insert (or replace) the embedding row for ``content_hash``."""
+    serialized = serialize_vector(vector)
+    # vec0 virtual table accepts INSERT OR REPLACE for upsert semantics.
+    db.execute(  # type: ignore[attr-defined]
+        "INSERT OR REPLACE INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+        (content_hash, serialized),
+    )
 
 
 def _validate_extraction(data: dict[str, object]) -> dict[str, object] | str:

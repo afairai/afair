@@ -36,7 +36,7 @@ def build_server(settings: Settings) -> FastMCP:
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
-    db = open_db(settings.vault_dir)
+    db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
     set_context(
         ServerContext(
             db=db,
@@ -46,6 +46,9 @@ def build_server(settings: Settings) -> FastMCP:
             anthropic_api_key=settings.anthropic_api_key,
             openai_api_key=settings.openai_api_key,
             gemini_api_key=settings.gemini_api_key,
+            embedding_model=settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
+            semantic_recall_enabled=settings.semantic_recall_enabled,
         )
     )
 
@@ -71,7 +74,7 @@ def build_server(settings: Settings) -> FastMCP:
     def recall(
         query: str,
         scope: str | None = None,
-        depth: schemas.Depth = "shallow",
+        depth: schemas.Depth = "normal",
         limit: int = 20,
     ) -> schemas.RecallResult:
         return handlers.recall(query=query, scope=scope, depth=depth, limit=limit)
