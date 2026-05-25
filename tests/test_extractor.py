@@ -355,6 +355,129 @@ def test_recall_omits_interpretation_when_extraction_failed(
     assert r.hits[0].interpretation is None
 
 
+# ── binder v0 (A4) ─────────────────────────────────────────────────────────
+
+
+def test_binder_links_semantically_similar_events(ctx: ServerContext) -> None:
+    """Three events with similar embeddings — binder should link them
+    in each direction."""
+    from neverforget.agents.binder import find_and_record_links, get_linked_event_ids
+    from neverforget.substrate import write_event
+
+    # Build three events with controlled embeddings (3-dim for simplicity).
+    e1 = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "alpha", "context": None},
+    )
+    e2 = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "beta", "context": None},
+    )
+    e3 = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "gamma", "context": None},
+    )
+
+    # NOTE: the test DB was opened with embedding_dim=1536 (the default).
+    # Re-create the vec table at dim=3 so this test is fast.
+    ctx.db.execute("DROP TABLE IF EXISTS events_vec")
+    ctx.db.execute(
+        "CREATE VIRTUAL TABLE events_vec USING vec0(content_hash TEXT PRIMARY KEY, embedding FLOAT[3])"
+    )
+
+    import struct
+
+    # Make e1, e2 similar (along +x axis); e3 different (along +y axis).
+    for ch, vec in [
+        (e1.content_hash, [1.0, 0.0, 0.0]),
+        (e2.content_hash, [0.9, 0.1, 0.0]),  # close to e1
+        (e3.content_hash, [0.0, 1.0, 0.0]),  # far from e1
+    ]:
+        ctx.db.execute(
+            "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+            (ch, struct.pack("<3f", *vec)),
+        )
+
+    # Link e1 against the others — should find e2 closest.
+    result = find_and_record_links(ctx.db, event=e1, embedding=[1.0, 0.0, 0.0], top_k=2)
+    assert result is not None
+    link_hashes = [link["event_hash"] for link in result["links"]]
+    # e2 should be first (most similar to e1)
+    assert link_hashes[0] == e2.content_hash
+    # e1 itself must be filtered out
+    assert e1.content_hash not in link_hashes
+
+    # Helper round-trip
+    linked = get_linked_event_ids(ctx.db, e1.content_hash)
+    assert e2.content_hash in linked
+
+
+def test_binder_skips_when_no_neighbors(ctx: ServerContext) -> None:
+    """A single isolated event has no neighbors → binder records nothing."""
+    from neverforget.agents.binder import find_and_record_links, get_linked_event_ids
+    from neverforget.substrate import write_event
+
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "lonely", "context": None},
+    )
+    # No events_vec row for this event — query returns 0 neighbors.
+    result = find_and_record_links(ctx.db, event=e, embedding=[1.0] * 1536)
+    assert result is None
+    assert get_linked_event_ids(ctx.db, e.content_hash) == []
+
+
+def test_recall_surfaces_linked_event_ids(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RecallHit carries linked_event_ids when the Bind agent has run."""
+    from neverforget.agents.binder import find_and_record_links
+    from neverforget.mcp import handlers
+    from neverforget.mcp.schemas import TextContent
+
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+    # Skip the embedding+binder path inside extract_sync — we'll set up
+    # the bind record manually for determinism.
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.schedule_extraction",
+        lambda _id: None,
+    )
+
+    handlers.remember(content=TextContent(type="text", text="primary"))
+    handlers.remember(content=TextContent(type="text", text="neighbor"))
+
+    # Manually re-create the vec table at dim=3 for the test, populate,
+    # and run the binder.
+    ctx.db.execute("DROP TABLE IF EXISTS events_vec")
+    ctx.db.execute(
+        "CREATE VIRTUAL TABLE events_vec USING vec0(content_hash TEXT PRIMARY KEY, embedding FLOAT[3])"
+    )
+    import struct
+
+    from neverforget.substrate import iter_events
+
+    events = list(iter_events(ctx.db, kind="remember", order="asc"))
+    for ev, vec in zip(events, [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]], strict=False):
+        ctx.db.execute(
+            "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+            (ev.content_hash, struct.pack("<3f", *vec)),
+        )
+    find_and_record_links(ctx.db, event=events[0], embedding=[1.0, 0.0, 0.0], top_k=2)
+
+    r = handlers.recall(query="primary", depth="shallow")
+    assert len(r.hits) == 1
+    hit = r.hits[0]
+    assert events[1].content_hash in hit.linked_event_ids
+
+
 # ── interpretation idempotency ─────────────────────────────────────────────
 
 
