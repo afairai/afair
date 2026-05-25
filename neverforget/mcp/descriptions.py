@@ -88,17 +88,24 @@ ARGUMENTS:
     "email", "this week", "work". Treated as an FTS hint in Phase 0;
     later phases will interpret it semantically (e.g., as emergent
     category filter).
-  - depth: Optional, default "normal" (Phase 1+). One of:
-      "shallow" — FTS5 keyword search only. No embedding API call.
-                  Cheapest (~10ms, $0). Use when latency is critical
-                  or when the substrate is on a metered connection.
+  - depth: Optional, default "auto" (Phase 2+). One of:
+      "auto"    — system picks based on query shape. Exact identifiers
+                  (sha256:..., URLs, ULIDs) and single-token queries go
+                  to shallow; multi-token natural language goes to
+                  normal hybrid. Recommended default — you almost never
+                  need to override.
+      "shallow" — FTS5 keyword search only. No embedding inference.
+                  Cheapest (~10ms). Use for exact-match scenarios that
+                  auto might miss.
       "normal"  — Hybrid FTS5 + vector recall via Reciprocal Rank
                   Fusion. Catches semantic matches that share no
-                  tokens with the query. ~150ms latency, ~$0.0001
-                  per call. The default — strictly more results than
-                  shallow.
+                  tokens with the query. ~120ms latency since the
+                  embedding inference is local (FastEmbed in-process).
       "deep"    — Same as normal today; reserved for the Phase 3+
                   reasoning agent. Returns a note if you request it.
+
+  The returned ``depth_used`` field tells you which path actually ran
+  — useful when ``auto`` resolves to one direction or the other.
 
 RETURN:
   {"hits": [{"event_id": "...", "content_hash": "...", "created_at": "...",
