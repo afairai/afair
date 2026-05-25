@@ -252,11 +252,20 @@ def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> s
 
 
 def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None:
-    """Insert (or replace) the embedding row for ``content_hash``."""
+    """Insert (or replace) the embedding row for ``content_hash``.
+
+    sqlite-vec's vec0 virtual table does NOT honor ``INSERT OR REPLACE``
+    semantics the way regular tables do — INSERT OR REPLACE against an
+    existing primary key still fires the UNIQUE constraint. We do an
+    explicit DELETE+INSERT instead so reprocess (which writes over a
+    previous, possibly-stale embedding) always succeeds.
+    """
     serialized = serialize_vector(vector)
-    # vec0 virtual table accepts INSERT OR REPLACE for upsert semantics.
     db.execute(  # type: ignore[attr-defined]
-        "INSERT OR REPLACE INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+        "DELETE FROM events_vec WHERE content_hash = ?", (content_hash,)
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
         (content_hash, serialized),
     )
 
