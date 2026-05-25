@@ -22,7 +22,7 @@ from starlette.routing import Mount, Route
 
 from ..agents.embedding import embed_query
 from ..substrate import start_checkpoint_loop
-from . import descriptions, handlers, schemas
+from . import descriptions, handlers, landing, schemas
 from .auth import BearerTokenMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .oauth import routes as oauth_routes
@@ -156,8 +156,10 @@ def build_app(settings: Settings) -> Starlette:
     )
 
     # OAuth-related paths must bypass the auth middleware (clients need to
-    # discover and start the dance without credentials).
+    # discover and start the dance without credentials). The landing page
+    # at / is public too (visiting the URL should never gate on a token).
     exempt_paths = {
+        "/",
         "/health",
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-authorization-server",
@@ -178,8 +180,12 @@ def build_app(settings: Settings) -> Starlette:
         ),
     ]
 
-    # Routes: OAuth metadata + dance endpoints + the mounted MCP app.
+    # Routes: landing page + OAuth metadata + dance endpoints + the
+    # mounted MCP app. The landing Route is GET/HEAD-only at "/"; POST /
+    # falls through Starlette's partial-match handling to the Mount("/")
+    # below which routes to the FastMCP app for the MCP protocol.
     routes = [
+        Route("/", landing.index, methods=["GET", "HEAD"]),
         Route(
             "/.well-known/oauth-protected-resource",
             oauth_routes.well_known_oauth_protected_resource,
