@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +65,27 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
 
+    # ── Authentication (Phase 0: bearer token)
+    # When set, the MCP server requires every request to carry
+    #   Authorization: Bearer <token>
+    # /health is exempt so Fly's orchestrator can probe liveness.
+    # In production (ENVIRONMENT=fly) this MUST be set — the validator
+    # below fails boot if it isn't. Local dev may omit it; the server
+    # then runs un-authed (MCP_HOST=127.0.0.1 confines it to loopback).
+    #
+    # The env var name is intentionally prefixed so other apps' AUTH_TOKEN
+    # vars on the same host can't collide. validation_alias makes pydantic-
+    # settings read NEVERFORGET_AUTH_TOKEN from the environment instead of
+    # AUTH_TOKEN.
+    auth_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "auth_token",
+            "NEVERFORGET_AUTH_TOKEN",
+            "neverforget_auth_token",
+        ),
+    )
+
     # ── Embeddings
     embedding_model: str = "anthropic/voyage-3-lite"
 
@@ -84,6 +105,25 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def _auth_required_in_prod(self) -> Settings:
+        """Fail boot if production environment lacks an auth token.
+
+        The deployed server is publicly addressable (any client on the
+        internet can hit `https://<app>.fly.dev/mcp/`). Without an auth
+        token configured the substrate would be world-readable AND
+        world-writable. Refuse to start so the misconfiguration is
+        loud instead of silent.
+        """
+        if self.environment == "fly" and self.auth_token is None:
+            msg = (
+                "NEVERFORGET_AUTH_TOKEN must be set when ENVIRONMENT=fly. "
+                "Generate one with: python -c "
+                "'import secrets; print(secrets.token_urlsafe(32))'"
+            )
+            raise ValueError(msg)
+        return self
 
 
 def load_settings() -> Settings:
