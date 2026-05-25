@@ -58,4 +58,8 @@ primary_region = "fra"  # EU residency by default; change deliberately if needed
 # instruction "keep one alive, min one alive, kill old on deploy".
 [[vm]]
   size = "shared-cpu-1x"
-  memory_mb = 512
+  memory_mb = 1024
+  # Bumped 512 → 1024 on 2026-05-25 after backfill OOM'd while embedding
+  # a 56KB constitution document. Headroom matters when the warm-path
+  # Extractor runs concurrent LLM + embedding calls plus the FastAPI
+  # worker and litellm imports (resident set ~150MB at idle).

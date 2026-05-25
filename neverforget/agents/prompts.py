@@ -1,8 +1,13 @@
-"""Extractor prompts — system + user-message builders.
+"""Extractor prompts — system + user-message builders + tool-use schema.
 
 Phase 0 prompts intentionally minimal but complete. Refinement happens
 during the two-week capability-gate journal (task #7) as we observe what
 the LLM gets wrong. Each refinement is itself committed history per I7.
+
+Since 2026-05-25 the extractor uses provider tool-use forcing rather than
+"please respond as JSON" — the JSON Schema below is the contract. The
+system prompt only carries semantic guidance (when to use which field,
+how to handle ambiguity); shape enforcement is handled by tool-use.
 """
 
 from __future__ import annotations
@@ -18,47 +23,153 @@ EXTRACTOR_SCHEMA_VERSION = 1
 """Bumped only when the extraction JSON shape changes (additive only)."""
 
 
+# Hard cap on the user-message length we hand to the LLM. Above this the
+# message is truncated with an explicit elision marker — the extractor
+# still sees the SHAPE of the document (title, opening, closing) which is
+# usually enough to produce a useful summary + entities. 30,000 chars is
+# ~8,500 tokens, leaves room for system prompt + tool definition + output
+# inside Haiku 4.5's 200K-token context. Phase 2+ can chunk-and-aggregate;
+# truncation is the v0 safe default.
+MAX_USER_MESSAGE_CHARS = 30_000
+_TRUNCATION_HEAD = 24_000
+_TRUNCATION_TAIL = 4_000
+
+
+EXTRACTOR_TOOL_NAME = "record_extraction"
+EXTRACTOR_TOOL_DESCRIPTION = (
+    "Record the structured extraction for one event from the user's substrate. "
+    "Call exactly once per event. Fill every required field; use empty arrays "
+    "or null for fields without information rather than omitting them."
+)
+
+
+# JSON Schema for the extraction tool. Kept as a plain dict so we can
+# ship it directly to litellm; no Pydantic round-trip needed at the
+# call site. Mirrors the previous EXTRACTOR_SYSTEM_PROMPT's "Required
+# JSON schema" section but with formal constraints the provider can
+# enforce rather than the prior English description.
+EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "best_guess_kind": {
+            "type": "string",
+            "description": (
+                "Short free-text classification (e.g., 'email', 'meeting_notes', "
+                "'decision', 'fact', 'task', 'idea', 'code_snippet', 'voice_memo', "
+                "'screenshot', 'contact_info', 'preference', 'constitution', "
+                "'documentation'). Pick the most accurate single label — do NOT "
+                "constrain to a fixed enum, the system intentionally learns its "
+                "own ontology."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "One-sentence summary, max ~240 characters.",
+        },
+        "entities": {
+            "type": "array",
+            "description": "Named entities mentioned in the event.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "person",
+                            "organization",
+                            "place",
+                            "project",
+                            "product",
+                            "concept",
+                            "other",
+                        ],
+                    },
+                },
+                "required": ["name", "type"],
+            },
+        },
+        "relations": {
+            "type": "array",
+            "description": "Subject-predicate-object triples extracted from the text.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string", "description": "Short verb-phrase."},
+                    "object": {"type": "string"},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        },
+        "time_references": {
+            "type": "array",
+            "description": "Time expressions in the text, resolved to ISO 8601 when possible.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Original phrase."},
+                    "iso": {
+                        "type": ["string", "null"],
+                        "description": "ISO 8601 datetime if resolvable from context, else null.",
+                    },
+                },
+                "required": ["text", "iso"],
+            },
+        },
+        "salient_facts": {
+            "type": "array",
+            "description": "Atomic facts worth remembering for later retrieval.",
+            "items": {"type": "string"},
+        },
+        "language": {
+            "type": "string",
+            "description": "ISO 639-1 language code of the content (en, de, fr, ...).",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Self-assessment: 0.0 = guess, 1.0 = explicit/verbatim.",
+        },
+        "source_attribution": {
+            "type": ["string", "null"],
+            "description": "Who said this or where it came from; null if not stated.",
+        },
+    },
+    "required": ["best_guess_kind", "summary"],
+}
+
+
 EXTRACTOR_SYSTEM_PROMPT = """\
 You are an information extractor for a personal memory vault. Given one
-event from the user's substrate, output a strict JSON object describing
-its structure and content. No preamble, no markdown fences — JSON only.
+event from the user's substrate, call the ``record_extraction`` tool with
+a structured description of its content.
 
-Rules:
+Guidance:
 - Never invent information not present in the input.
-- Use null or empty arrays for fields with no information.
+- Use empty arrays or null for fields without information; never guess.
 - Resolve relative dates ("yesterday", "next Tuesday") to ISO 8601 if you
-  can compute them from the event's created_at; otherwise leave iso as null.
-- best_guess_kind is a short free-text classification (e.g., "email",
-  "meeting_notes", "decision", "fact", "task", "idea", "code_snippet",
-  "voice_memo", "screenshot", "contact_info", "preference"). Do NOT
-  constrain to a fixed enum — pick the most accurate single label.
-- confidence is your own self-assessment (0.0 = guess, 1.0 = explicit).
-
-Required JSON schema:
-{
-  "best_guess_kind": "<string>",
-  "summary": "<one-sentence summary, max ~240 chars>",
-  "entities": [
-    {"name": "<string>",
-     "type": "<person|organization|place|project|product|concept|other>"}
-  ],
-  "relations": [
-    {"subject": "<string>", "predicate": "<short verb-phrase>",
-     "object": "<string>"}
-  ],
-  "time_references": [
-    {"text": "<original phrase>", "iso": "<ISO 8601 or null>"}
-  ],
-  "salient_facts": ["<fact 1>", "<fact 2>"],
-  "language": "<ISO 639-1 code (en, de, fr, es, ...)>",
-  "confidence": <0.0-1.0>,
-  "source_attribution": "<who said this / where it came from, or null>"
-}
+  can compute them from the event's ``event_created_at``; otherwise leave
+  ``iso`` as null.
+- ``best_guess_kind`` is free-text — pick the single most accurate label
+  for what this event IS (constitution, decision, meeting_notes, email,
+  code_snippet, etc.). The system learns its own ontology over time;
+  don't restrict yourself to a fixed enum.
+- ``confidence`` reflects your own self-assessment, not the user's.
+- If the event payload was truncated (you'll see a TRUNCATED marker),
+  extract from what you can see; mention truncation only if a salient
+  fact obviously lies in the elided portion.
 """
 
 
 def build_user_message(event: Event) -> str:
-    """Compose the per-event user message handed to the LLM."""
+    """Compose the per-event user message handed to the LLM.
+
+    For over-large payloads (long markdown, large pasted text, big code
+    blobs), truncates the ``text`` field with an explicit elision marker
+    so the LLM sees the shape (start + end) without burning context.
+    """
     payload = event.payload
     content_type = payload.get("content_type", "unknown")
 
@@ -99,6 +210,29 @@ def build_user_message(event: Event) -> str:
         if key not in visible and key not in {"content_type", "blob_hash"}:
             visible[key] = value
 
+    # Truncate the dominant text field before serializing, so JSON
+    # quoting overhead doesn't eat our budget.
+    text_value = visible.get("text")
+    if isinstance(text_value, str) and len(text_value) > MAX_USER_MESSAGE_CHARS:
+        visible["text"] = _truncate_with_marker(text_value)
+        visible["truncated_original_length"] = len(text_value)
+
     return "Extract structured information from the following event:\n\n" + json.dumps(
         visible, ensure_ascii=False, indent=2
     )
+
+
+def _truncate_with_marker(text: str) -> str:
+    """Keep the first and last segments, replace the middle with an elision marker.
+
+    Most documents put their thesis up front and conclusions at the end;
+    keeping both ends gives the extractor enough to summarize and entity-
+    spot without flooding the context window.
+    """
+    if len(text) <= MAX_USER_MESSAGE_CHARS:
+        return text
+    head = text[:_TRUNCATION_HEAD]
+    tail = text[-_TRUNCATION_TAIL:]
+    elided_chars = len(text) - _TRUNCATION_HEAD - _TRUNCATION_TAIL
+    marker = f"\n\n[TRUNCATED: {elided_chars:,} chars elided from middle]\n\n"
+    return head + marker + tail

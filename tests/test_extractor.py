@@ -72,7 +72,7 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch, response: dict[str, Any]) -> Non
             raw=json.dumps(response),
         )
 
-    monkeypatch.setattr("neverforget.agents.extractor.call_json", fake_call)
+    monkeypatch.setattr("neverforget.agents.extractor.call_tool", fake_call)
 
 
 def _patch_llm_raises(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
@@ -81,7 +81,7 @@ def _patch_llm_raises(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
     def fake_call(**_: object) -> LLMResult:
         raise exc
 
-    monkeypatch.setattr("neverforget.agents.extractor.call_json", fake_call)
+    monkeypatch.setattr("neverforget.agents.extractor.call_tool", fake_call)
 
 
 def _count_interpretations(ctx: ServerContext) -> int:
@@ -261,6 +261,65 @@ def test_observe_handler_triggers_extraction(
 
 
 # ── prompt construction ────────────────────────────────────────────────────
+
+
+def test_user_message_truncates_over_long_text(ctx: ServerContext) -> None:
+    """A 60KB text field gets truncated with a marker so the LLM stays in budget."""
+    from neverforget.agents.prompts import (
+        MAX_USER_MESSAGE_CHARS,
+        build_user_message,
+    )
+    from neverforget.substrate import write_event
+
+    big = "abcde" * 12_000  # 60_000 chars, well above MAX_USER_MESSAGE_CHARS (30_000)
+    assert len(big) > MAX_USER_MESSAGE_CHARS
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": big, "context": None, "type_hint": None},
+    )
+    msg = build_user_message(e)
+
+    # The full raw text must NOT appear verbatim in the LLM message.
+    assert big not in msg
+    # Elision marker is present and gives the LLM enough info to know it's truncated.
+    assert "TRUNCATED" in msg
+    assert "elided" in msg
+    # The original length is surfaced so future-us can debug.
+    assert "truncated_original_length" in msg
+    # Head + tail markers are preserved (first and last chars present).
+    assert big[:50] in msg
+    assert big[-50:] in msg
+
+
+def test_user_message_for_normal_size_is_not_truncated(ctx: ServerContext) -> None:
+    """Below the threshold, the text passes through untouched."""
+    from neverforget.agents.prompts import build_user_message
+    from neverforget.substrate import write_event
+
+    normal = "hello world " * 100  # ~1200 chars, well under threshold
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": normal, "context": None, "type_hint": None},
+    )
+    msg = build_user_message(e)
+    assert normal in msg
+    assert "TRUNCATED" not in msg
+
+
+def test_tool_schema_required_fields_present() -> None:
+    """The schema we ship to the model must include the mandatory fields."""
+    from neverforget.agents.prompts import EXTRACTOR_TOOL_SCHEMA
+
+    required = EXTRACTOR_TOOL_SCHEMA["required"]
+    assert "best_guess_kind" in required
+    assert "summary" in required
+    # Every property defined has a description so the model knows what to put.
+    for name, defn in EXTRACTOR_TOOL_SCHEMA["properties"].items():
+        assert "description" in defn or "type" in defn, f"property {name} has neither"
 
 
 def test_user_message_includes_text_for_inline_text(ctx: ServerContext) -> None:
