@@ -23,6 +23,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.fixture(autouse=True)
+def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Handler tests don't exercise the extractor — disable it globally.
+
+    Real LLM calls would (a) make tests flaky/slow and (b) require live keys
+    in CI. The extractor itself is tested separately in test_extractor.py.
+    """
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.schedule_extraction",
+        lambda _event_id: None,
+    )
+
+
 @pytest.fixture
 def ctx(tmp_path: Path) -> Iterator[ServerContext]:
     db = open_db(tmp_path)

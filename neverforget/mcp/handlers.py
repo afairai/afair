@@ -11,6 +11,7 @@ import base64
 import binascii
 from typing import TYPE_CHECKING, Any
 
+from ..agents import schedule_extraction
 from ..substrate import (
     build_binary_payload,
     build_text_payload,
@@ -167,6 +168,11 @@ def remember(
         payload=payload,
         parent_hashes=parent_hashes,
     )
+    # Fire the warm-path Extractor — never on dedup (the existing event
+    # already had its chance) and never blocking the user-facing tool call.
+    if not already_existed:
+        schedule_extraction(event.id)
+
     return RememberResult(
         ok=True,
         event_id=event.id,
@@ -241,12 +247,27 @@ def observe(event: ObserveEvent) -> ObserveResult:
     event_dict = event.model_dump(exclude_none=False)
     payload: dict[str, Any] = {"content_type": "event", **event_dict}
 
+    # Dedup-detection for parity with remember — same I3-clean idempotency.
+    from ..substrate import content_hash as compute_content_hash
+    from ..substrate import read_event_by_hash
+
+    preview_hash = compute_content_hash(
+        kind="observe",
+        origin=DEFAULT_ORIGIN,
+        payload=payload,
+        parent_hashes=None,
+    )
+    already_existed = read_event_by_hash(ctx.db, preview_hash) is not None
+
     written = write_event(
         ctx.db,
         origin=DEFAULT_ORIGIN,
         kind="observe",
         payload=payload,
     )
+    if not already_existed:
+        schedule_extraction(written.id)
+
     return ObserveResult(
         ok=True,
         event_id=written.id,
