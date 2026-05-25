@@ -18,6 +18,7 @@ import structlog
 
 from ..substrate import open_db
 from ..substrate.events import read_event_by_id
+from .binder import find_and_record_links
 from .embedding import EmbeddingError, embed_text, serialize_vector
 from .interpretation import (
     write_failed_interpretation,
@@ -202,6 +203,9 @@ def _run_extraction(
                     dim=len(vector),
                     model=embedding_model,
                 )
+                # Bind agent v0 — find prior semantically-similar events
+                # and record the links. Soft-fail per binder.py.
+                find_and_record_links(db, event=event, embedding=vector)
             except EmbeddingError as e:
                 log.warning(
                     "extractor.embedding_failed",
