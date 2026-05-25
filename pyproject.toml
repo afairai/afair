@@ -33,6 +33,14 @@ dependencies = [
     "jinja2>=3.1.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
     "litellm>=1.52.0",
+    # Local ONNX embeddings — opt-in vendor for the embedding hot path.
+    # Switching to fastembed/* eliminates the 150-300ms OpenAI roundtrip
+    # on every recall. Uses ~150MB resident; first run downloads the model
+    # (~100MB) then caches in ~/.cache/fastembed.
+    "fastembed>=0.4.0",
+    # Faster event loop than asyncio default; uvicorn picks it up via
+    # loop='uvloop'. Linux-only (Fly runs Linux); harmless on dev macOS.
+    "uvloop>=0.20.0; sys_platform != 'win32'",
     # Structured logging
     "structlog>=24.4.0",
     # HTTP client

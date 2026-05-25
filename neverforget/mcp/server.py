@@ -8,20 +8,26 @@ this keeps authentication BELOW the MCP tool surface (Invariant I1).
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
+import structlog
 import uvicorn
 from fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from ..agents.embedding import embed_query
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, schemas
 from .auth import BearerTokenMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .oauth import routes as oauth_routes
+
+log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -63,6 +69,12 @@ def build_server(settings: Settings) -> FastMCP:
         embedding_dim=settings.embedding_dim,
         interval_seconds=300,
     )
+
+    # Pre-warm in a background thread so boot stays fast but the first
+    # user request hits an already-open SQLite connection AND an already-
+    # warm OpenAI HTTPS connection. Pays ~1-2s of cold-start cost upfront
+    # so the first real recall isn't penalized.
+    _spawn_warmup(settings)
 
     mcp: FastMCP = FastMCP("neverforget")
 
@@ -153,6 +165,10 @@ def build_app(settings: Settings) -> Starlette:
     exempt_prefixes = ("/oauth/",)
 
     middleware = [
+        # gzip first (outermost) so compression sees the auth-middleware's
+        # responses too. min_size=500 avoids compressing tiny payloads where
+        # gzip overhead would exceed the saving.
+        Middleware(GZipMiddleware, minimum_size=500, compresslevel=5),
         Middleware(
             BearerTokenMiddleware,
             settings=settings,
@@ -198,12 +214,64 @@ def build_app(settings: Settings) -> Starlette:
     return app
 
 
+def _spawn_warmup(settings: Settings) -> None:
+    """Pre-warm SQLite + the embedding provider in a background thread.
+
+    Sequenced:
+      1. Open a DB connection and run a trivial SELECT — pages the
+         schema + sqlite-vec extension into the SQLite cache.
+      2. Issue ONE dummy ``embed_query`` against the configured model.
+         For OpenAI/Voyage/etc. this performs the TLS handshake + first
+         HTTP/2 request so the persistent httpx client kept by litellm
+         is warm. For fastembed it triggers the model download (if not
+         cached) and ONNX session creation.
+
+    Runs as a daemon thread so boot stays fast and a slow/failed warmup
+    doesn't block server startup.
+    """
+
+    def warmup() -> None:
+        try:
+            db = connect_for_thread()
+            db.execute("SELECT 1").fetchone()
+        except Exception as e:
+            log.warning("warmup.db_failed", error=str(e))
+
+        # Skip embedding warmup if we have no API key for the configured
+        # model — in dev without keys this would just log a warning.
+        api_key: str | None = None
+        if settings.embedding_model.startswith("openai/") and settings.openai_api_key:
+            api_key = settings.openai_api_key.get_secret_value()
+        elif settings.embedding_model.startswith("voyage/") and settings.voyage_api_key:
+            api_key = settings.voyage_api_key.get_secret_value()
+        elif settings.embedding_model.startswith("anthropic/") and settings.anthropic_api_key:
+            api_key = settings.anthropic_api_key.get_secret_value()
+        elif settings.embedding_model.startswith("gemini/") and settings.gemini_api_key:
+            api_key = settings.gemini_api_key.get_secret_value()
+        # fastembed/* needs no key.
+
+        try:
+            embed_query(model=settings.embedding_model, text="warmup", api_key=api_key)
+            log.info("warmup.done", model=settings.embedding_model)
+        except Exception as e:
+            log.warning("warmup.embedding_failed", error=str(e))
+
+    threading.Thread(target=warmup, name="boot-warmup", daemon=True).start()
+
+
 def run(settings: Settings) -> None:
-    """Run the MCP server until interrupted. Uses Streamable HTTP transport."""
+    """Run the MCP server until interrupted. Uses Streamable HTTP transport.
+
+    Uses uvloop event loop on POSIX for ~10-30% I/O throughput improvement
+    over asyncio default. On Windows, uvicorn falls back to asyncio
+    automatically (the dependency is platform-gated in pyproject).
+    """
     app = build_app(settings)
     uvicorn.run(
         app,
         host=settings.mcp_host,
         port=settings.mcp_port,
         log_level=settings.log_level.lower(),
+        loop="uvloop",
+        http="httptools",
     )
