@@ -23,7 +23,7 @@ This file is the operating constitution for a solo-built project. It is written 
 
 The inversion: today, Anthropic, OpenAI, Google, and Cursor own *your* context. They are the vaults; you rent space. This project flips the relationship. The user owns the substrate. The AI tools are clients.
 
-The end state is not "another memory framework for developers." The end state is a **cognitive sovereignty layer** for the next decade — the way 1Password liberated credentials from individual browsers, this liberates context from individual AI silos.
+The end state is not "another memory framework for developers." The end state is a **cognitive sovereignty layer** for the next decade — the way password managers liberated credentials from individual browsers, this liberates context from individual AI silos.
 
 ---
 

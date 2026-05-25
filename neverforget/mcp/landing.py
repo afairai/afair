@@ -109,14 +109,6 @@ _LANDING_HTML = """\
       font-size: 0.74rem;
       letter-spacing: 0.06em;
     }
-    footer a {
-      color: var(--muted);
-      text-decoration: none;
-      border-bottom: 1px solid var(--rule);
-      padding-bottom: 1px;
-      transition: color 120ms ease, border-color 120ms ease;
-    }
-    footer a:hover, footer a:focus { color: var(--accent); border-color: var(--accent); outline: none; }
     @media (max-width: 480px) {
       main { padding: 4.5rem 1.25rem 3rem; }
       .eyebrow { margin-bottom: 3rem; }
@@ -152,7 +144,7 @@ _LANDING_HTML = """\
     <p>
       The end state is not another memory framework for developers.
       The end state is a <strong>cognitive sovereignty layer</strong>
-      for the next decade &mdash; the way 1Password liberated
+      for the next decade &mdash; the way password managers liberated
       credentials from individual browsers, this liberates context
       from individual AI silos.
     </p>
@@ -160,7 +152,7 @@ _LANDING_HTML = """\
     <hr>
 
     <footer>
-      Phase 1 &middot; in execution &middot; <a href="/health">status</a>
+      Phase 1 &middot; in execution
     </footer>
   </main>
 </body>
