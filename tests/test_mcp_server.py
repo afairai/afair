@@ -16,8 +16,16 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_context() -> Iterator[None]:
-    """Each test gets a clean module-level context."""
+def _isolated_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Each test gets a clean module-level context and a no-op extractor.
+
+    The MCP-protocol smoke tests exercise the tool registration + call path,
+    not the LLM — extractor work is covered separately in test_extractor.py.
+    """
+    monkeypatch.setattr(
+        "neverforget.mcp.handlers.schedule_extraction",
+        lambda _event_id: None,
+    )
     clear_context()
     try:
         yield

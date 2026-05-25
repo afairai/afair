@@ -14,14 +14,27 @@ if TYPE_CHECKING:
     import sqlite3
     from pathlib import Path
 
+    from pydantic import SecretStr
+
 
 @dataclass
 class ServerContext:
-    """Everything a tool handler needs to talk to the substrate."""
+    """Everything a tool handler or agent needs at runtime.
+
+    Carries the substrate connection, the vault path, the inline-vs-spill
+    threshold, the selected extractor model, and provider API keys. New
+    fields may be added; existing fields are part of the v1 internal
+    contract (handlers and agents rely on them).
+    """
 
     db: sqlite3.Connection
     vault_dir: Path
     inline_text_max_bytes: int
+    # Extractor / LLM (Invariant I5 — model string drives provider via litellm)
+    extractor_model: str = "anthropic/claude-haiku-4-5"
+    anthropic_api_key: SecretStr | None = None
+    openai_api_key: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
 
 
 _context: ServerContext | None = None
