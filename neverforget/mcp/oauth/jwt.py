@@ -68,9 +68,11 @@ def issue_access_token(
 ) -> IssuedToken:
     """Mint a short-lived access token for ``subject``.
 
-    ``audience`` defaults to the server's own issuer URL. Different
-    deployments would use different audiences so a token issued for
-    instance A is not valid at instance B.
+    ``audience`` defaults to the MCP resource URL (``<issuer>/mcp``) per
+    RFC 8707 + the MCP authorization spec — tokens are bound to a specific
+    resource, NOT to the authorization server's issuer URL. Strict clients
+    (Claude.ai included) validate ``aud`` against the resource they intend
+    to call and silently reject on mismatch.
     """
     if settings.jwt_secret is None:
         msg = "NEVERFORGET_JWT_SECRET must be set to issue tokens"
@@ -79,7 +81,10 @@ def issue_access_token(
     now = int(time.time())
     exp = now + settings.access_token_ttl_seconds
     iss = settings.effective_oauth_issuer
-    aud = audience or iss
+    # Default audience is the MCP endpoint URL — the canonical resource
+    # identifier per RFC 8707. Callers can override (e.g., when the client
+    # explicitly requested a different resource via the `resource` param).
+    aud = audience or f"{iss}/mcp"
     jti = secrets.token_urlsafe(16)
 
     payload = {
@@ -119,7 +124,8 @@ def validate(
         raise JWTError(msg)
 
     expected_iss = settings.effective_oauth_issuer
-    expected_aud = expected_audience or expected_iss
+    # Default expected audience is the MCP endpoint (per RFC 8707).
+    expected_aud = expected_audience or f"{expected_iss}/mcp"
 
     try:
         payload = jwt.decode(
