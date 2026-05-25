@@ -28,7 +28,7 @@ def open_db(vault_dir: Path, *, embedding_dim: int = 1536) -> sqlite3.Connection
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Pragmas — durability + concurrency
+    # Pragmas — durability + concurrency + performance
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -37,6 +37,19 @@ def open_db(vault_dir: Path, *, embedding_dim: int = 1536) -> sqlite3.Connection
     # backfill coexist with the running server on the same database
     # without "database is locked" errors on briefly-contended writes.
     conn.execute("PRAGMA busy_timeout = 5000")
+    # Memory-mapped reads — SQLite mmaps the database file up to this many
+    # bytes. Reads skip the OS-cache→userspace copy when the page is hot.
+    # 256MB is far larger than the current vault but cheap (only mapped
+    # pages are actually paged in).
+    conn.execute("PRAGMA mmap_size = 268435456")  # 256MB
+    # Page cache — negative value means kilobytes (positive = pages).
+    # -65536 ≈ 64MB of recent pages kept hot in this connection's cache.
+    # Per-connection, so per-thread connections each get their own 64MB
+    # working set (acceptable for our 1GB VM).
+    conn.execute("PRAGMA cache_size = -65536")
+    # Run the planner's auto-tune. Cheap to call repeatedly; SQLite skips
+    # the work when nothing has changed since the last optimize.
+    conn.execute("PRAGMA optimize")
 
     # Load sqlite-vec extension (provides the vec0 virtual table type).
     # Must happen before the vec DDL runs.
