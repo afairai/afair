@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     """Process-wide configuration loaded from environment + .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Load .env first, then .env.local — .env.local takes precedence so
+        # developer-specific secrets override committed defaults. Same
+        # convention as Next.js / Vite / Create-React-App.
+        env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
