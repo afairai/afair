@@ -24,10 +24,13 @@ from .interpretation import (
     write_failed_interpretation,
     write_interpretation,
 )
-from .llm import LLMError, LLMResponseError, call_json
+from .llm import LLMError, LLMResponseError, call_tool
 from .prompts import (
     EXTRACTOR_SCHEMA_VERSION,
     EXTRACTOR_SYSTEM_PROMPT,
+    EXTRACTOR_TOOL_DESCRIPTION,
+    EXTRACTOR_TOOL_NAME,
+    EXTRACTOR_TOOL_SCHEMA,
     build_user_message,
 )
 
@@ -126,10 +129,13 @@ def _run_extraction(
         produced_by = f"extractor:{model}"
 
         try:
-            result = call_json(
+            result = call_tool(
                 model=model,
                 system=EXTRACTOR_SYSTEM_PROMPT,
                 user=build_user_message(event),
+                tool_name=EXTRACTOR_TOOL_NAME,
+                tool_description=EXTRACTOR_TOOL_DESCRIPTION,
+                tool_schema=EXTRACTOR_TOOL_SCHEMA,
                 api_key=api_key,
             )
         except LLMError as e:
