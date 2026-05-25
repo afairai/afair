@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING, Any
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids
 from ..agents.embedding import EmbeddingError, embed_query
+from ..agents.invalidation import (
+    InvalidationInfo,
+    read_invalidation,
+    read_invalidations_batch,
+    write_invalidation,
+)
 from ..substrate import (
     build_binary_payload,
     build_text_payload,
@@ -33,6 +39,8 @@ from .schemas import (
     ContextSummary,
     Depth,
     GetEventResult,
+    InvalidateResult,
+    InvalidationSummary,
     ListContextResult,
     ObserveEvent,
     ObserveResult,
@@ -76,6 +84,11 @@ class EventNotFoundError(LookupError):
 
 class InvalidGetEventArgsError(ValueError):
     """Raised by ``get_event`` when both or neither selector is provided."""
+
+
+class InvalidateTargetError(ValueError):
+    """Raised when ``invalidate`` is called with a target that doesn't exist
+    or is itself an invalidation event (no nested invalidations)."""
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -139,7 +152,15 @@ def _interpretation_summary(extraction: dict[str, Any]) -> dict[str, Any] | None
     return surface or None
 
 
-def _event_to_hit(event: Event, db: Any) -> RecallHit:
+def _invalidation_to_summary(info: InvalidationInfo | None) -> InvalidationSummary | None:
+    if info is None:
+        return None
+    return InvalidationSummary(at=info.at, by_event_id=info.by_event_id, reason=info.reason)
+
+
+def _event_to_hit(
+    event: Event, db: Any, *, invalidation: InvalidationInfo | None = None
+) -> RecallHit:
     interp = read_latest_interpretation(db, event.content_hash)
     interpretation: dict[str, Any] | None = (
         _interpretation_summary(interp.extraction) if interp is not None else None
@@ -153,7 +174,20 @@ def _event_to_hit(event: Event, db: Any) -> RecallHit:
         payload_summary=_payload_summary(event.payload),
         interpretation=interpretation,
         linked_event_ids=get_linked_event_ids(db, event.content_hash),
+        invalidation=_invalidation_to_summary(invalidation),
     )
+
+
+def _attach_invalidations(events: list[Event], db: Any) -> dict[str, InvalidationInfo]:
+    """Batch-fetch invalidation info for a list of events.
+
+    Returns a dict keyed by ``content_hash`` for use when building hits.
+    Avoids N+1 lookups when recall returns many results.
+    """
+    if not events:
+        return {}
+    hashes = [e.content_hash for e in events]
+    return read_invalidations_batch(db, hashes)
 
 
 def _api_key_for_embedding(ctx: Any) -> str | None:
@@ -314,8 +348,9 @@ def recall(
                     "(Phase 3+ reasoning agent pending); returned hybrid results"
                 )
 
+    invalidations = _attach_invalidations(events, db)
     return RecallResult(
-        hits=[_event_to_hit(e, db) for e in events],
+        hits=[_event_to_hit(e, db, invalidation=invalidations.get(e.content_hash)) for e in events],
         depth_used=depth_used,
         note=note,
     )
@@ -344,12 +379,16 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
         for row in db.execute("SELECT origin, COUNT(*) AS c FROM events GROUP BY origin")
     }
 
+    invalidations = _attach_invalidations(recent_events, db)
     return ListContextResult(
         summary=ContextSummary(
             total_events=total,
             by_kind=by_kind,
             by_origin=by_origin,
-            recent=[_event_to_hit(e, db) for e in recent_events],
+            recent=[
+                _event_to_hit(e, db, invalidation=invalidations.get(e.content_hash))
+                for e in recent_events
+            ],
         ),
     )
 
@@ -434,6 +473,64 @@ def get_event(
         interpretation=interpretation,
         linked_event_ids=get_linked_event_ids(db, event.content_hash),
         parent_hashes=list(event.parent_hashes or []),
+        invalidation=_invalidation_to_summary(read_invalidation(db, event.content_hash)),
+    )
+
+
+# ── invalidate ──────────────────────────────────────────────────────────────
+
+
+def invalidate(target_hash: str, reason: str | None = None) -> InvalidateResult:
+    """Mark a substrate event as superseded by later evidence.
+
+    Append-only bi-temporal model (stolen from Graphiti, implemented at
+    the substrate layer instead of in a graph DB):
+
+      - The target event is NOT touched. I2 forbids it.
+      - A new event with ``kind='invalidate'`` is written, with the
+        target hash recorded in its payload and in ``parent_hashes`` for
+        lineage.
+      - Subsequent recall calls surface the target with a non-null
+        ``invalidation`` field — but DO NOT filter it out. The AI
+        client decides based on whether the query is about current
+        state or history.
+      - Re-validation is not modelled. To "undo" an invalidation,
+        write a new fact and (optionally) invalidate the invalidation
+        itself; latest-by-created_at wins on the read side.
+
+    Rejects:
+      - target_hash that doesn't resolve to any substrate event
+      - target_hash that points at an existing invalidate event
+        (no nested invalidations in v0; future Phase could add them)
+    """
+    db = connect_for_thread()
+
+    target = read_event_by_hash(db, target_hash)
+    if target is None:
+        msg = f"no event found for target_hash={target_hash!r}"
+        raise InvalidateTargetError(msg)
+    if target.kind == "invalidate":
+        msg = (
+            f"target {target_hash!r} is itself an invalidation event; "
+            "nested invalidations are not supported in v1"
+        )
+        raise InvalidateTargetError(msg)
+
+    prior = read_invalidation(db, target_hash)
+    already = prior is not None
+
+    new_event = write_invalidation(
+        db,
+        target_hash=target_hash,
+        reason=reason,
+        origin=DEFAULT_ORIGIN,
+    )
+    return InvalidateResult(
+        ok=True,
+        event_id=new_event.id,
+        content_hash=new_event.content_hash,
+        target_hash=target_hash,
+        target_already_invalidated=already,
     )
 
 

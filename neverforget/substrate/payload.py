@@ -79,6 +79,9 @@ def derive_searchable_text(payload: dict[str, Any]) -> str:
         "action",
         "subject",
         "result",
+        # bi-temporal invalidation payload — humans search for "why did we
+        # mark X outdated" → reason is the natural text to index
+        "reason",
     ):
         value = payload.get(key)
         if isinstance(value, str) and value:
