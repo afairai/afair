@@ -70,4 +70,62 @@ SCHEMA_DDL: tuple[str, ...] = (
     ) STRICT
     """,
     "CREATE INDEX IF NOT EXISTS interpretations_event_idx ON interpretations(event_id)",
+    # ── OAuth state (Phase 1) — pluggable identity + JWT issuance ──────────
+    # These tables are MUTABLE (codes are short-lived, tokens get revoked).
+    # The events-table append-only triggers do NOT apply here. They live in
+    # substrate.db alongside the immutable substrate for backup-locality.
+    """
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id           TEXT PRIMARY KEY,
+        client_secret_hash  TEXT,
+        redirect_uris       TEXT NOT NULL,
+        client_name         TEXT,
+        registered_at       TEXT NOT NULL,
+        metadata            TEXT
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+        code                  TEXT PRIMARY KEY,
+        client_id             TEXT NOT NULL,
+        redirect_uri          TEXT NOT NULL,
+        scope                 TEXT,
+        code_challenge        TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        user_sub              TEXT NOT NULL,
+        user_email            TEXT,
+        expires_at            TEXT NOT NULL,
+        created_at            TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS oauth_codes_client_idx ON oauth_codes(client_id)",
+    "CREATE INDEX IF NOT EXISTS oauth_codes_expires_idx ON oauth_codes(expires_at)",
+    """
+    CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+        token_hash    TEXT PRIMARY KEY,
+        client_id     TEXT NOT NULL,
+        user_sub      TEXT NOT NULL,
+        scope         TEXT,
+        expires_at    TEXT NOT NULL,
+        created_at    TEXT NOT NULL,
+        revoked_at    TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS oauth_refresh_user_idx ON oauth_refresh_tokens(user_sub)",
+    # ── Login flow state ───────────────────────────────────────────────────
+    # Holds the in-flight OAuth dance state between /oauth/authorize and
+    # the identity backend's callback. Short-lived (~10 min). Mutable.
+    """
+    CREATE TABLE IF NOT EXISTS oauth_login_state (
+        state                 TEXT PRIMARY KEY,
+        client_id             TEXT NOT NULL,
+        redirect_uri          TEXT NOT NULL,
+        scope                 TEXT,
+        code_challenge        TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        client_state          TEXT,
+        expires_at            TEXT NOT NULL,
+        created_at            TEXT NOT NULL
+    ) STRICT
+    """,
 )

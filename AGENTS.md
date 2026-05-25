@@ -1,18 +1,16 @@
 <claude-mem-context>
 # Memory Context
 
-# [neverforget] recent context, 2026-05-25 6:29pm GMT+2
+# [neverforget] recent context, 2026-05-25 6:42pm GMT+2
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (18,315t read) | 316,202t work | 94% savings
+Stats: 50 obs (17,969t read) | 447,601t work | 96% savings
 
 ### May 25, 2026
-2197 4:41p 🔵 Fly Volume Durability Model for neverforget Phase 0
 2198 4:51p ⚖️ Fly Deployment: GitHub Actions + Blue/Green Strategy Confirmed
-2199 " 🔵 Blue/Green Deployment Incompatible with Single-Volume SQLite Architecture
 2200 4:52p ⚖️ Fly Machine Lifecycle: Single Machine, Kill Old on Deploy
 2201 5:03p 🟣 fly.toml Written: Single-Machine, Immediate Strategy, Always-On
 2202 " ⚖️ Dockerfile Runs as Root — Documented Deviation from Non-Root Global Rule
@@ -45,8 +43,6 @@ Stats: 50 obs (18,315t read) | 316,202t work | 94% savings
 2229 " 🟣 neverforget Redeployed to Production with Bearer Token Auth Active
 2230 5:42p 🔵 Production /health Returns 503 After Auth Middleware Deploy — Database Check Failing
 2231 " 🔵 Production Boot Guard Working — Server Crash-Looping Because Staged Secret Not Activated
-S607 User asked how to automate the manual MCP connection setup process for the neverforget project (May 25 at 5:58 PM)
-S608 User asked how to automate MCP client setup — full one-command installer built, tested, and shipped to main (May 25 at 5:58 PM)
 2232 6:05p 🟣 Automated MCP client installer script created
 2233 6:12p 🔴 install_clients.py crashed on empty JSON config files
 2234 " ✅ docs/clients/README.md updated with one-command installer section
@@ -65,11 +61,34 @@ S614 Task #6 marked completed — Phase 0 cross-vendor MCP verification done, 6 
 S615 User opened the Phase 0 journal and attempted Claude.ai connector — blocked by OAuth requirement (May 25 at 6:19 PM)
 2241 6:22p ✅ Task #7 started — Phase 0 two-week daily-use journal
 2242 6:23p 🟣 Phase 0 daily-use journal created with Day 1 entry
+S616 Inspecting Codex CLI config to verify neverforget MCP entry and auth format (May 25 at 6:24 PM)
 2243 6:26p 🔵 neverforget MCP Server Returns No Resources or Templates
 2244 6:27p 🔵 Codex CLI uses http_headers not headers — neverforget entry may be missing auth
 2245 " 🔵 Codex neverforget TOML block uses headers not http_headers — format mismatch confirmed
-S616 Inspecting Codex CLI config to verify neverforget MCP entry and auth format (May 25 at 6:27 PM)
+S617 Phase 0 complete verification: all three client instruction files confirmed, CI green, production healthy — session winding down to daily-use phase (May 25 at 6:27 PM)
 2246 6:29p 🔵 Codex MCP Server Configuration
+2247 " 🔵 neverforget recall depth='normal' Not Yet Implemented (Phase 0)
+2248 6:36p ⚖️ OAuth layer prioritized as next phase — bearer-only auth deemed insufficient
+S618 User directed: finish Task #7 (daily-use journal window) then implement OAuth ASAP to stop relying solely on bearer token auth (May 25 at 6:37 PM)
+**Investigated**: - CI run 26410481597 (dda7010) confirmed green — all 16 steps passed including Deploy and Verify health (duplicate observation, already documented)
+    - All three client instruction files confirmed present (duplicate observation, already documented)
+    - Primary session re-presented the full client matrix table and snippet content to the user before pivoting to OAuth
 
-Access 316k tokens of past work via get_observations([IDs]) or mem-search skill.
+**Learned**: - The user explicitly pulled OAuth forward from Phase 1+ to immediate priority — "ASAP" and "not only rely on bearer"
+    - OAuth 2.1 + PKCE is the only path to Claude.ai connector support (Claude.ai UI only accepts Client ID + Client Secret, not custom Authorization header)
+    - Task #7 (14-day journal window) is the last in-progress task; completing it means marking it done and beginning the OAuth implementation work
+    - The single shared bearer token is a known security concern (leaked into chat transcripts during the session); OAuth would enable per-user tokens with proper revocation
+
+**Completed**: - Phase 0 build: 6/7 tasks done, CI green, production healthy at dda7010
+    - All three automatable clients fully configured (transport config + model-layer instruction snippet)
+    - 14-day journal window open (Task #7 in_progress), Day 1 fully documented
+    - Vault: 3 events from two vendors (Claude Code + Codex CLI) — I5 cross-vendor invariant proven
+
+**Next Steps**: - Immediately: close Task #7 (mark daily-use journal window as complete or transition it)
+    - Then: design and implement OAuth 2.1 + PKCE layer on the neverforget MCP server
+    - OAuth implementation scope: authorization server (or Clerk integration), token endpoint, PKCE flow, Claude.ai connector registration
+    - This enables Claude.ai as the third client, multi-user support, and eliminates the single leaked bearer token as the sole auth mechanism
+
+
+Access 448k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
