@@ -49,11 +49,25 @@ def write_interpretation(
 
     Idempotent on (event_hash, version, produced_by) — re-running the same
     extractor on the same event at the same version is a no-op that returns
-    the existing row.
+    the existing row IF the existing row is itself a success. A prior
+    ``status: failed`` row does NOT block a retry: the new row gets a fresh
+    ULID + produced_at so ``read_latest_interpretation`` (which orders
+    ``produced_at DESC``) prefers the success over the older failure. The
+    failed row stays in the table as audit trail per I3.
     """
     existing = _read_existing(conn, event.content_hash, version=version, produced_by=produced_by)
     if existing is not None:
-        return existing
+        if existing.extraction.get("status") != "failed":
+            # Already have a successful interpretation at this (event,version,
+            # producer) — idempotent no-op.
+            return existing
+        # Retry over a failed attempt. Disambiguate the producer string by
+        # appending #retryN so the UNIQUE(event_hash, version, produced_by)
+        # constraint doesn't block the new row. The failed row stays as
+        # audit. ``LIKE 'extractor:%'`` still matches both; the latest-by-
+        # ``produced_at`` order ensures the success row wins for recall.
+        retry_n = _count_extractor_attempts(conn, event.content_hash, version, produced_by)
+        produced_by = f"{produced_by}#retry{retry_n}"
 
     interp_id = str(ULID())
     produced_at = _now_iso()
@@ -117,6 +131,26 @@ def write_failed_interpretation(
         produced_by=produced_by,
         extraction=extraction,
     )
+
+
+def _count_extractor_attempts(
+    conn: sqlite3.Connection, event_hash: str, version: int, base_producer: str
+) -> int:
+    """Count rows from this extractor (including failed/#retry variants).
+
+    Used to derive the next ``#retryN`` suffix when the existing row is
+    a failed extraction and we want to write a successful retry without
+    violating the UNIQUE constraint on (event_hash, version, produced_by).
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM interpretations
+        WHERE event_hash = ? AND version = ?
+          AND (produced_by = ? OR produced_by LIKE ? || '#retry%')
+        """,
+        (event_hash, version, base_producer, base_producer),
+    ).fetchone()
+    return int(row["n"]) if row is not None else 0
 
 
 def _read_existing(
