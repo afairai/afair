@@ -378,6 +378,36 @@ def test_fts_search_finds_context_terms(
     assert len(results) == 1
 
 
+def test_fts_search_partial_token_match_returns_hits(
+    vault: tuple[sqlite3.Connection, Path],
+) -> None:
+    """Regression test for a real Claude.ai-observed quality issue (2026-05-25):
+    a multi-token natural-language query should still find documents that
+    contain only SOME of the tokens. Previously the helper joined tokens
+    with implicit AND so a 4-token query against a document containing
+    only 2 of those tokens returned 0 hits — surprising the AI and the
+    user. Now OR + rank: the document still appears, ranked by coverage.
+    """
+    db, vault_dir = vault
+    # Document contains "cross-vendor" + "verification" but not "I5" or
+    # "neutrality". Should still match a query that mentions all four.
+    write_event(
+        db,
+        origin="user",
+        kind="remember",
+        payload=build_text_payload(
+            text="first successful cross-vendor verification, 2026-05-25",
+            context=None,
+            type_hint="milestone",
+            vault_dir=vault_dir,
+            inline_text_max_bytes=64 * 1024,
+        ),
+    )
+    results = search_fts(db, "cross-vendor verification I5 vendor neutrality")
+    assert len(results) >= 1, "long natural-language query should not return empty"
+    assert "cross-vendor" in results[0].payload["text"]
+
+
 # ── init idempotency ────────────────────────────────────────────────────────
 
 
