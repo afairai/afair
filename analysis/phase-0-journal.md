@@ -123,3 +123,41 @@ These show up across multiple days; track them cumulatively:
   restart needed).
 - Whether the warm-path Extractor's quality on real (non-smoke) content is
   any good — the live-LLM smoke proved the wiring; daily use proves utility.
+
+---
+
+### Day 1 (continued) — 2026-05-25 (afternoon)
+
+**Win ✅✅✅ — I5 Vendor Neutrality proven in practice**
+
+The cross-vendor moment landed:
+
+- **Claude Code** (Anthropic-side) called `remember` at 16:17 — wrote event
+  `01KSFYV3WAGBKQCWYYQANQ20CX`.
+- **Codex CLI** (OpenAI-side) called `recall` + `observe` at 16:30 against
+  the same deployed substrate — wrote event `01KSFZJ38XMM2AKME1Q3Z1GMCD`.
+- **Claude Code** then called `recall("codex mcp list")` and found Codex's
+  event verbatim.
+
+Two AI clients from two different vendors, one Fly machine in fra, one
+SQLite file, single bearer token. The vault is the user's, not Anthropic's
+and not OpenAI's. I5 is empirically demonstrated.
+
+**Friction 🛠️**
+- Codex schema gotcha — the installer wrote `type = "http"` + `[...headers]`
+  but Codex 0.133.0 wants no `type` field + `[...http_headers]` subtable
+  (verified by checking marker-io and sentry entries on the host).
+  Fixed in commit `5163dd2`. Re-install required a manual cleanup pass
+  because the installer's idempotency check matches on the section header
+  and skipped re-writing when partial state was present.
+- Codex's initial recall queries were too narrow ("recent verification of
+  Codex MCP list neverforget enabled MCP servers"). FTS5 matched none of
+  the stored facts. Looser queries ("codex mcp list") found everything.
+  This is a Codex-prompting issue, not a substrate issue — but worth
+  noting: the recall tool's description may want a hint like "prefer
+  short, content-bearing keywords over long sentences."
+
+**Misses ⚠️**
+- Claude.ai's custom-connector UI doesn't expose a custom-header field —
+  only OAuth client id/secret. So Claude.ai is **blocked on OAuth**
+  (Phase 1+ work). Claude Code and Codex both work today.
