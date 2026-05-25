@@ -19,6 +19,9 @@ from ..substrate import (
     build_binary_payload,
     build_text_payload,
     iter_events,
+    read_event_by_hash,
+    read_event_by_id,
+    read_object,
     rrf_merge,
     search_fts,
     search_vec,
@@ -29,6 +32,7 @@ from .schemas import (
     MAX_REMEMBER_BYTES,
     ContextSummary,
     Depth,
+    GetEventResult,
     ListContextResult,
     ObserveEvent,
     ObserveResult,
@@ -64,6 +68,14 @@ class ContentTooLargeError(ValueError):
 
 class InvalidBase64Error(ValueError):
     """Raised when BinaryContent.data_b64 isn't valid base64."""
+
+
+class EventNotFoundError(LookupError):
+    """Raised by ``get_event`` when neither event_id nor content_hash matches."""
+
+
+class InvalidGetEventArgsError(ValueError):
+    """Raised by ``get_event`` when both or neither selector is provided."""
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -339,6 +351,89 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
             by_origin=by_origin,
             recent=[_event_to_hit(e, db) for e in recent_events],
         ),
+    )
+
+
+# ── get_event ───────────────────────────────────────────────────────────────
+
+
+def _materialize_full_payload(payload: dict[str, Any], vault_dir: Any) -> dict[str, Any]:
+    """Return a payload with ``text-large`` blobs read back into ``text``.
+
+    The substrate stores large text in the object store referenced by
+    ``blob_hash``. For ``get_event`` we surface the full text inline so
+    callers see one consistent shape. Binary payloads are left as-is —
+    the raw bytes stay in the object store; a future ``read_blob`` tool
+    will expose them on explicit request.
+    """
+    content_type = payload.get("content_type")
+    if content_type != "text-large":
+        return dict(payload)
+
+    blob_hash = payload.get("blob_hash")
+    if not isinstance(blob_hash, str):
+        return dict(payload)
+
+    materialized = dict(payload)
+    try:
+        raw = read_object(vault_dir, blob_hash)
+        materialized["text"] = raw.decode("utf-8")
+        # Keep blob_hash + size for traceability; the caller can verify.
+    except (OSError, UnicodeDecodeError) as e:
+        materialized["text_unavailable"] = (
+            f"failed to read object {blob_hash!s}: {type(e).__name__}: {e}"
+        )
+    return materialized
+
+
+def get_event(
+    event_id: str | None = None,
+    content_hash: str | None = None,
+) -> GetEventResult:
+    """Return the FULL untruncated payload for one specific event.
+
+    Counterpart to ``recall``, which caps each hit's payload at ~500 chars
+    for skim-many-results UX. When a caller wants the actual content of
+    one specific event (e.g., to display a long document), recall to find
+    the candidate, then ``get_event(event_id=...)`` to fetch the whole thing.
+
+    Exactly one of ``event_id`` or ``content_hash`` must be provided.
+    """
+    if (event_id is None) == (content_hash is None):
+        msg = "get_event requires exactly one of event_id or content_hash"
+        raise InvalidGetEventArgsError(msg)
+
+    ctx = get_context()
+    db = connect_for_thread()
+    event = (
+        read_event_by_id(db, event_id)
+        if event_id is not None
+        else read_event_by_hash(db, content_hash)  # type: ignore[arg-type]
+    )
+    if event is None:
+        selector = (
+            f"event_id={event_id!r}" if event_id is not None else f"content_hash={content_hash!r}"
+        )
+        msg = f"no event found for {selector}"
+        raise EventNotFoundError(msg)
+
+    payload = _materialize_full_payload(event.payload, ctx.vault_dir)
+
+    interp = read_latest_interpretation(db, event.content_hash)
+    interpretation: dict[str, Any] | None = (
+        _interpretation_summary(interp.extraction) if interp is not None else None
+    )
+
+    return GetEventResult(
+        event_id=event.id,
+        content_hash=event.content_hash,
+        created_at=event.created_at,
+        kind=event.kind,
+        origin=event.origin,
+        payload=payload,
+        interpretation=interpretation,
+        linked_event_ids=get_linked_event_ids(db, event.content_hash),
+        parent_hashes=list(event.parent_hashes or []),
     )
 
 

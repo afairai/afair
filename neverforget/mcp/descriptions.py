@@ -113,6 +113,56 @@ RETURN:
 
 If the result list is empty, the user genuinely has no relevant memory
 yet — consider asking them for context rather than guessing.
+
+NEED THE FULL CONTENT of one specific hit (e.g., the user said "show me
+the whole document" or "read me section 3")? Call ``get_event`` with the
+``event_id`` from the recall hit — it returns the untruncated payload.
+"""
+
+
+GET_EVENT = """\
+Return the FULL untruncated payload for one specific event.
+
+WHEN TO CALL:
+  - After a ``recall`` hit when the user asked for the whole document
+    or a specific portion that the 500-char preview cut off ("show me
+    the whole VISION.md", "what does section 6 say", "paste the full
+    email").
+  - When the AI needs verbatim text — quoting, summarizing a specific
+    document, comparing two events word-for-word.
+  - Programmatically, when a follow-up tool call needs the complete
+    payload (e.g., re-encoding for another vendor).
+
+WHEN NOT TO CALL:
+  - Skim-style "what's in the vault?" queries — that's ``recall`` or
+    ``list_context`` with their built-in truncation.
+  - The user just wants a one-line summary — the recall hit's
+    ``interpretation.summary`` already has that.
+
+ARGUMENTS (provide exactly one):
+  - event_id: ULID returned by ``recall``/``observe``/``remember``.
+  - content_hash: sha256-prefixed hash returned alongside event_id.
+
+RETURN:
+  {"event_id": "...",
+   "content_hash": "sha256:...",
+   "created_at": "...",
+   "kind": "remember" | "observe",
+   "origin": "...",
+   "payload": {<FULL payload — text-large blobs are inlined as "text">},
+   "interpretation": {<latest extractor output>} | null,
+   "linked_event_ids": [...],
+   "parent_hashes": [...]}
+
+  For "text" and "text-large" events, payload.text contains the entire
+  content (could be many KB). For "binary" events, the bytes themselves
+  remain in the object store; the payload metadata (mime, size,
+  filename_hint, blob_hash) is returned. Use a future ``read_blob`` tool
+  to fetch raw bytes.
+
+If neither selector matches, ``get_event`` raises an error — same shape
+as any other tool failure in MCP. Provide exactly one selector; passing
+both or neither is rejected.
 """
 
 LIST_CONTEXT = """\

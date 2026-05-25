@@ -102,6 +102,13 @@ def build_server(settings: Settings) -> FastMCP:
     def observe(event: schemas.ObserveEvent) -> schemas.ObserveResult:
         return handlers.observe(event=event)
 
+    @mcp.tool(description=descriptions.GET_EVENT, version="1")
+    def get_event(
+        event_id: str | None = None,
+        content_hash: str | None = None,
+    ) -> schemas.GetEventResult:
+        return handlers.get_event(event_id=event_id, content_hash=content_hash)
+
     # ── /health — orchestrator-facing, never goes through MCP protocol ──────
 
     @mcp.custom_route("/health", methods=["GET"])

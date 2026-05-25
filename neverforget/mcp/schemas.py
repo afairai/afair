@@ -135,3 +135,30 @@ class ObserveResult(BaseModel):
     ok: bool
     event_id: str
     content_hash: str
+
+
+# ── get_event ───────────────────────────────────────────────────────────────
+
+
+class GetEventResult(BaseModel):
+    """Full untruncated payload for one event.
+
+    Returned by ``get_event``. Unlike ``RecallHit.payload_summary`` which
+    truncates text at ~500 chars for skim-many-results UX, this carries
+    the entire payload. For ``content_type == "text-large"`` the inline
+    text is read back from the object store and surfaced in ``payload.text``
+    so callers see one consistent shape regardless of where bytes lived.
+    For ``content_type == "binary"`` the bytes stay in the object store
+    (use a future ``read_blob`` tool to fetch them); the payload still
+    carries the metadata (mime, size, filename_hint, blob_hash).
+    """
+
+    event_id: str
+    content_hash: str
+    created_at: str
+    kind: str
+    origin: str
+    payload: dict[str, Any]
+    interpretation: dict[str, Any] | None = None
+    linked_event_ids: list[str] = []
+    parent_hashes: list[str] = []
