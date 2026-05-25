@@ -14,6 +14,11 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator, model_vali
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _normalize_allowlist(raw: str) -> tuple[str, ...]:
+    """Comma-separated allowlist → lowercase tuple. Empty entries dropped."""
+    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
 class Settings(BaseSettings):
     """Process-wide configuration loaded from environment + .env file."""
 
@@ -65,18 +70,15 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
 
-    # ── Authentication (Phase 0: bearer token)
-    # When set, the MCP server requires every request to carry
-    #   Authorization: Bearer <token>
-    # /health is exempt so Fly's orchestrator can probe liveness.
-    # In production (ENVIRONMENT=fly) this MUST be set — the validator
-    # below fails boot if it isn't. Local dev may omit it; the server
-    # then runs un-authed (MCP_HOST=127.0.0.1 confines it to loopback).
-    #
-    # The env var name is intentionally prefixed so other apps' AUTH_TOKEN
-    # vars on the same host can't collide. validation_alias makes pydantic-
-    # settings read NEVERFORGET_AUTH_TOKEN from the environment instead of
-    # AUTH_TOKEN.
+    # ── Authentication
+    # Two layers, defense-in-depth:
+    #   1. Static bearer token (`auth_token`) — convenience for CI smokes
+    #      and server-to-server scripts.
+    #   2. OAuth 2.1 (issued by US, identity-backed by GitHub) — for AI
+    #      clients (Claude.ai requires this; Claude Code + Codex support both).
+    # The MCP middleware accepts EITHER form on /mcp.
+
+    # — Static bearer (Phase 0 mechanism, still supported)
     auth_token: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -85,6 +87,42 @@ class Settings(BaseSettings):
             "neverforget_auth_token",
         ),
     )
+
+    # — OAuth server signing
+    # We issue JWTs signed with this secret (HS256 for Phase 1; RS256
+    # upgrade lives in a later phase if/when we need cross-instance
+    # token verification).
+    jwt_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "jwt_secret",
+            "NEVERFORGET_JWT_SECRET",
+        ),
+    )
+    # Access token lifetime (1 hour by default; Authlib's standard).
+    access_token_ttl_seconds: int = Field(default=3600, ge=60)
+    # Refresh token lifetime (30 days).
+    refresh_token_ttl_seconds: int = Field(default=30 * 24 * 3600, ge=60)
+
+    # — OAuth issuer URL (used as the `iss` claim in JWTs we issue and
+    # the `issuer` field in oauth-authorization-server metadata).
+    # Defaults to the public URL of the server in prod; local dev falls
+    # back to http://localhost:<port>.
+    oauth_issuer: str | None = None
+
+    # — Identity backend selection. Pluggable per-deployment.
+    # "github" = OAuth dance with GitHub (Phase 1 default).
+    # Future: "magic-link", "clerk", "static-password".
+    identity_backend: Literal["github"] = "github"
+
+    # — GitHub OAuth credentials (used when identity_backend="github").
+    github_oauth_client_id: SecretStr | None = None
+    github_oauth_client_secret: SecretStr | None = None
+
+    # — Allowlist of authenticated identities. Single-tenant per I8 — only
+    # ONE GitHub login is allowed to authenticate against any given
+    # instance. Comma-separated GitHub usernames (case-insensitive).
+    identity_allowlist: str = ""
 
     # ── Embeddings
     embedding_model: str = "anthropic/voyage-3-lite"
@@ -110,11 +148,9 @@ class Settings(BaseSettings):
     def _auth_required_in_prod(self) -> Settings:
         """Fail boot if production environment lacks an auth token.
 
-        The deployed server is publicly addressable (any client on the
-        internet can hit `https://<app>.fly.dev/mcp/`). Without an auth
-        token configured the substrate would be world-readable AND
-        world-writable. Refuse to start so the misconfiguration is
-        loud instead of silent.
+        The deployed server is publicly addressable. Without an auth token
+        configured the substrate would be world-readable AND world-writable.
+        Refuse to start so the misconfiguration is loud instead of silent.
         """
         if self.environment == "fly" and self.auth_token is None:
             msg = (
@@ -124,6 +160,25 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return self
+
+    @property
+    def allowlist(self) -> tuple[str, ...]:
+        """Normalized lowercase allowlist (set of allowed GitHub usernames)."""
+        return _normalize_allowlist(self.identity_allowlist)
+
+    @property
+    def effective_oauth_issuer(self) -> str:
+        """Issuer URL for JWTs we mint.
+
+        In prod (Fly) defaults to the public app URL. Locally, derives from
+        host/port. Settable explicitly via OAUTH_ISSUER for custom-domain
+        deployments.
+        """
+        if self.oauth_issuer:
+            return self.oauth_issuer.rstrip("/")
+        if self.environment == "fly":
+            return "https://neverforget.fly.dev"
+        return f"http://{self.mcp_host}:{self.mcp_port}"
 
 
 def load_settings() -> Settings:

@@ -22,6 +22,15 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     # Time-sortable identifiers for substrate events
     "python-ulid>=3.0.0",
+    # OAuth 2.1 authorization server (we are our own IdP; GitHub OAuth as
+    # the identity backend). Authlib gives us PKCE, DCR, JWT issuance.
+    "authlib>=1.3.0",
+    # GitHub OAuth client (for the identity-backend dance)
+    "httpx-oauth>=0.15.0",
+    # JWT signing — Authlib uses these under the hood
+    "pyjwt[crypto]>=2.10.0",
+    # Templates for the minimal login redirect page
+    "jinja2>=3.1.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
     "litellm>=1.52.0",
     # Structured logging
