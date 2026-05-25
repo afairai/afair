@@ -53,17 +53,33 @@ def content_hash(
 def derive_searchable_text(payload: dict[str, Any]) -> str:
     """Compose the text body that FTS5 indexes for an event.
 
-    For inline-text payloads: the text plus any string metadata.
-    For object-store payloads: the metadata fields (context, filename_hint,
-    mime, type_hint). The blob itself is not searchable from here; a future
-    Extractor may produce searchable summaries that land in the Interpretation
-    layer instead.
+    Permissive by design (Invariant I3): unknown content types still get a
+    reasonable index from whichever recognized string keys are present. The
+    set of recognized keys is additive — new keys may be added forever,
+    never removed.
+
+    For inline-text payloads: the text plus context/metadata.
+    For object-store payloads: the metadata fields (mime, filename_hint, etc.).
+    For observe-event payloads: action/subject/result.
+    The blob bytes themselves are not searchable from here; a future
+    Extractor may produce searchable summaries via the Interpretation layer.
     """
     parts: list[str] = []
     text = payload.get("text")
     if isinstance(text, str):
         parts.append(text)
-    for key in ("context", "filename_hint", "mime", "type_hint", "language"):
+    for key in (
+        # content-payload metadata
+        "context",
+        "filename_hint",
+        "mime",
+        "type_hint",
+        "language",
+        # observe-event recognized fields
+        "action",
+        "subject",
+        "result",
+    ):
         value = payload.get(key)
         if isinstance(value, str) and value:
             parts.append(value)
