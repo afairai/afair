@@ -154,11 +154,7 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
     legacy_path = Path.home() / ".claude" / "settings.json"
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
 
-    if (
-        not primary_path.exists()
-        and not legacy_path.exists()
-        and shutil.which("claude") is None
-    ):
+    if not primary_path.exists() and not legacy_path.exists() and shutil.which("claude") is None:
         _skip("Claude Code not detected (no ~/.claude.json, no settings.json, no `claude` in PATH)")
         return []
 
@@ -226,9 +222,9 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     # `http_headers` (not `headers`). Verified against working sentry and
     # marker-io entries on the host.
     block = (
-        f'\n[mcp_servers.{SERVER_NAME}]\n'
+        f"\n[mcp_servers.{SERVER_NAME}]\n"
         f'url = "{url}"\n\n'
-        f'[mcp_servers.{SERVER_NAME}.http_headers]\n'
+        f"[mcp_servers.{SERVER_NAME}.http_headers]\n"
         f'Authorization = "Bearer {token}"\n'
     )
     marker = f"[mcp_servers.{SERVER_NAME}]"
