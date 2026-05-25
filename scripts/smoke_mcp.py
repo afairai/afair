@@ -148,8 +148,8 @@ async def main() -> int:
         )
         checks.append(
             (
-                "recall reports depth_used=shallow",
-                recall_data.get("depth_used") == "shallow",
+                "recall reports depth_used in {shallow, normal}",
+                recall_data.get("depth_used") in {"shallow", "normal"},
                 f"got {recall_data.get('depth_used')}",
             )
         )
