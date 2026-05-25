@@ -13,11 +13,17 @@
 
 - VISION.md (the constitution)
 - Repo scaffold: pyproject.toml, Dockerfile, fly.toml, .env templates, CLAUDE.md
+- Substrate layer (`neverforget/substrate/`) — append-only SQLite + FTS5 +
+  filesystem object store; events table is STRICT-mode with UPDATE/DELETE
+  triggers enforcing I2 at the DB level
+- MCP server (`neverforget/mcp/`) — four v1 tools (remember/recall/list_context/
+  observe) over Streamable HTTP, with AI-facing tool descriptions, /health
+  endpoint, and binary-via-base64 + 10 MB cap in `remember`
 
 ### 0.2 What's in flight
 
-- Task #1 — repo scaffold (this work)
-- Tasks #2–#7 — substrate, MCP server, extractor, Fly deploy, cross-vendor verification, capability-gate journal
+- Task #4 — context-aware Extractor agent (warm path)
+- Tasks #5–#7 — Fly deploy, cross-vendor verification, capability-gate journal
 
 ### 0.3 What's blocked
 
