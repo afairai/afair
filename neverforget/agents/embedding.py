@@ -270,24 +270,21 @@ def embed_text(
     automatically split into overlapping chunks; chunks are embedded in
     a single batched API call; vectors are mean-pooled and L2-normalized
     to produce one document vector. Caller doesn't need to know.
+
+    Provider dispatch:
+      - ``fastembed/<model>`` → local ONNX inference, no network. 5-30ms
+        latency, $0 ongoing cost. First call downloads the model and
+        caches in ~/.cache/fastembed.
+      - Anything else → litellm's vendor-agnostic API surface
+        (openai/, voyage/, gemini/, cohere/, anthropic/, ollama/, …).
     """
     chunks = _chunk_text(text or "(empty)")
 
-    # Lazy import — litellm is heavy at import time.
-    import litellm
+    if model.startswith("fastembed/"):
+        vectors = _embed_via_fastembed(model_name=model.removeprefix("fastembed/"), texts=chunks)
+    else:
+        vectors = _embed_via_litellm(model=model, texts=chunks, api_key=api_key, timeout=timeout)
 
-    try:
-        if api_key is not None:
-            response = litellm.embedding(
-                model=model, input=chunks, timeout=timeout, api_key=api_key
-            )
-        else:
-            response = litellm.embedding(model=model, input=chunks, timeout=timeout)
-    except Exception as e:
-        msg = f"embedding call failed: {e}"
-        raise EmbeddingError(msg) from e
-
-    vectors = _vectors_from_response(response)
     if len(vectors) != len(chunks):
         msg = f"embedding response returned {len(vectors)} vectors for {len(chunks)} chunks"
         raise EmbeddingError(msg)
@@ -295,6 +292,62 @@ def embed_text(
     if len(vectors) == 1:
         return vectors[0]
     return _mean_pool(vectors)
+
+
+def _embed_via_litellm(
+    *, model: str, texts: list[str], api_key: str | None, timeout: float
+) -> list[list[float]]:
+    """Call litellm.embedding for vendor-neutral cloud providers."""
+    # Lazy import — litellm is heavy at import time.
+    import litellm
+
+    try:
+        if api_key is not None:
+            response = litellm.embedding(model=model, input=texts, timeout=timeout, api_key=api_key)
+        else:
+            response = litellm.embedding(model=model, input=texts, timeout=timeout)
+    except Exception as e:
+        msg = f"embedding call failed: {e}"
+        raise EmbeddingError(msg) from e
+
+    return _vectors_from_response(response)
+
+
+# ── fastembed (local ONNX) — lazy-loaded singleton per model name ─────────
+# fastembed.TextEmbedding constructs an ONNX session that takes ~1-3 seconds
+# the first time (download + load), so we keep it process-resident. Threadsafe
+# via the lock; multiple recall threads share one model instance.
+_fastembed_lock = threading.Lock()
+_fastembed_models: dict[str, object] = {}
+
+
+def _embed_via_fastembed(*, model_name: str, texts: list[str]) -> list[list[float]]:
+    """Run ONNX embedding inference in-process. No network."""
+    try:
+        from fastembed import TextEmbedding
+    except ImportError as e:
+        msg = "fastembed not installed; pip install fastembed or remove fastembed/ prefix"
+        raise EmbeddingError(msg) from e
+
+    with _fastembed_lock:
+        emb_model = _fastembed_models.get(model_name)
+        if emb_model is None:
+            try:
+                emb_model = TextEmbedding(model_name=model_name)
+            except Exception as e:
+                msg = f"fastembed model {model_name!r} failed to load: {e}"
+                raise EmbeddingError(msg) from e
+            _fastembed_models[model_name] = emb_model
+
+    try:
+        raw = list(emb_model.embed(texts))  # type: ignore[attr-defined]
+    except Exception as e:
+        msg = f"fastembed inference failed: {e}"
+        raise EmbeddingError(msg) from e
+
+    # fastembed returns numpy arrays — convert to plain list[float] so the
+    # rest of the code (mean-pool, serialize_vector) sees a uniform type.
+    return [[float(x) for x in vec] for vec in raw]
 
 
 def _vectors_from_response(response: object) -> list[list[float]]:

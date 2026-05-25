@@ -13,6 +13,14 @@ Commands:
                     at all). Useful after deploying extractor fixes — old
                     failures get a second chance against the new pipeline.
   reprocess-dry  — same flow, no writes.
+  switch-embedding-model NEW_MODEL NEW_DIM
+                 — atomically swap embedding models. Drops the existing
+                    events_vec table, recreates it at the new dimension,
+                    re-embeds every event with the new model, re-runs the
+                    Bind agent. Interpretations + substrate untouched
+                    (I2/I3). After this completes, update EMBEDDING_MODEL
+                    and EMBEDDING_DIM env vars to match so the running
+                    server uses the same provider on subsequent calls.
 """
 
 from __future__ import annotations
@@ -252,25 +260,171 @@ def reprocess_failed_extractions(*, dry_run: bool = False) -> dict[str, int]:
     return stats
 
 
+def switch_embedding_model(
+    *, new_model: str, new_dim: int, dry_run: bool = False
+) -> dict[str, object]:
+    """Atomically migrate the vector store to a new embedding model.
+
+    Steps:
+      1. Drop the existing events_vec table (no-op if absent).
+      2. Recreate it at the new dimension.
+      3. For every event, embed with NEW_MODEL and insert the vector.
+      4. Re-run the Bind agent on every event so the link graph reflects
+         the new embedding space.
+
+    Substrate rows are NEVER touched (I2). Interpretations are NEVER
+    rewritten — they live in the Extractor's space, independent of the
+    similarity model.
+
+    After this completes, update EMBEDDING_MODEL/EMBEDDING_DIM in your
+    env (or Fly secrets) so the running server uses the same model on
+    subsequent calls. Forgetting to do that means new events embed with
+    the old model and break the index.
+    """
+    settings = load_settings()
+    db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
+
+    # Pick the right API key for the NEW model — switching providers
+    # often means switching keys too. We piggy-back on the embedding
+    # settings dispatch.
+    new_api_key: str | None = None
+    if new_model.startswith("openai/") and settings.openai_api_key is not None:
+        new_api_key = settings.openai_api_key.get_secret_value()
+    elif new_model.startswith("voyage/") and settings.voyage_api_key is not None:
+        new_api_key = settings.voyage_api_key.get_secret_value()
+    elif new_model.startswith("gemini/") and settings.gemini_api_key is not None:
+        new_api_key = settings.gemini_api_key.get_secret_value()
+    elif new_model.startswith("anthropic/") and settings.anthropic_api_key is not None:
+        new_api_key = settings.anthropic_api_key.get_secret_value()
+    # fastembed/* needs no API key (local ONNX).
+
+    stats: dict[str, object] = {
+        "from_model": settings.embedding_model,
+        "from_dim": settings.embedding_dim,
+        "to_model": new_model,
+        "to_dim": new_dim,
+        "events_total": 0,
+        "events_embedded": 0,
+        "events_failed": 0,
+        "binds_added": 0,
+        "binds_skipped_no_neighbors": 0,
+        "dry_run": dry_run,
+    }
+
+    log.info(
+        "switch_embedding.start",
+        from_model=settings.embedding_model,
+        to_model=new_model,
+        from_dim=settings.embedding_dim,
+        to_dim=new_dim,
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        # Count what we'd do, but don't touch anything.
+        for _ in iter_events(db, order="asc"):
+            stats["events_total"] += 1  # type: ignore[operator]
+        log.info("switch_embedding.done", **stats)
+        return stats
+
+    # Drop + recreate the vec table at the new dim. Interpretations
+    # (including binder:v0 rows) stay — we'll overwrite the binder rows
+    # below by re-running the Bind agent, which uses #retry-suffix logic
+    # to break the UNIQUE constraint when a row exists.
+    with db:
+        db.execute("DROP TABLE IF EXISTS events_vec")
+        db.execute(
+            "CREATE VIRTUAL TABLE events_vec USING "
+            f"vec0(content_hash TEXT PRIMARY KEY, embedding FLOAT[{new_dim}])"
+        )
+
+    # Pass 1: embed every event with the new model.
+    for event in iter_events(db, order="asc"):
+        stats["events_total"] += 1  # type: ignore[operator]
+        interp = read_latest_interpretation(db, event.content_hash)
+        extraction: dict[str, Any] = interp.extraction if interp is not None else {}
+        text = _embedding_text_for_event(event, extraction)
+
+        try:
+            vec = embed_text(model=new_model, text=text, api_key=new_api_key)
+        except EmbeddingError as e:
+            log.warning("switch_embedding.embed_failed", event_id=event.id, error=str(e))
+            stats["events_failed"] += 1  # type: ignore[operator]
+            continue
+        if len(vec) != new_dim:
+            log.warning(
+                "switch_embedding.dim_mismatch",
+                event_id=event.id,
+                got=len(vec),
+                expected=new_dim,
+            )
+            stats["events_failed"] += 1  # type: ignore[operator]
+            continue
+
+        with db:
+            db.execute(
+                "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+                (event.content_hash, serialize_vector(vec)),
+            )
+        stats["events_embedded"] += 1  # type: ignore[operator]
+
+    # Pass 2: re-run Bind on every event so link graph reflects new space.
+    for event in iter_events(db, order="asc"):
+        row = db.execute(
+            "SELECT embedding FROM events_vec WHERE content_hash = ?",
+            (event.content_hash,),
+        ).fetchone()
+        if row is None:
+            continue
+        vec = list(struct.unpack(f"<{new_dim}f", row["embedding"]))
+        result = find_and_record_links(db, event=event, embedding=vec)
+        if result is None:
+            stats["binds_skipped_no_neighbors"] += 1  # type: ignore[operator]
+        else:
+            stats["binds_added"] += 1  # type: ignore[operator]
+
+    log.info("switch_embedding.done", **stats)
+    return stats
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neverforget.admin")
-    parser.add_argument(
-        "command",
-        choices=["backfill", "backfill-dry", "reprocess", "reprocess-dry"],
-        help=(
-            "backfill        = embed + bind missing events. "
-            "reprocess       = re-extract events with failed/missing interpretations. "
-            "*-dry           = report what would change without writing."
-        ),
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("backfill", help="embed + bind missing events")
+    sub.add_parser("backfill-dry", help="report what backfill would change")
+    sub.add_parser("reprocess", help="re-extract events with failed interpretations")
+    sub.add_parser("reprocess-dry", help="report what reprocess would change")
+
+    switch = sub.add_parser(
+        "switch-embedding-model",
+        help="atomically swap embedding models (drops vec table, re-embeds, re-binds)",
     )
+    switch.add_argument("model", help="new model string, e.g. fastembed/BAAI/bge-small-en-v1.5")
+    switch.add_argument("dim", type=int, help="new dimension, e.g. 384")
+    switch.add_argument(
+        "--dry-run", action="store_true", help="report what would change, no writes"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command in {"backfill", "backfill-dry"}:
-        stats = backfill_vectors_and_links(dry_run=args.command.endswith("-dry"))
+        result: dict[str, object] = backfill_vectors_and_links(  # type: ignore[assignment]
+            dry_run=args.command.endswith("-dry")
+        )
+    elif args.command in {"reprocess", "reprocess-dry"}:
+        result = reprocess_failed_extractions(  # type: ignore[assignment]
+            dry_run=args.command.endswith("-dry")
+        )
+    elif args.command == "switch-embedding-model":
+        result = switch_embedding_model(
+            new_model=args.model, new_dim=args.dim, dry_run=args.dry_run
+        )
     else:
-        stats = reprocess_failed_extractions(dry_run=args.command.endswith("-dry"))
+        parser.print_help()
+        return 1
 
-    print(json.dumps(stats, indent=2))
+    print(json.dumps(result, indent=2))
     return 0
 
 
