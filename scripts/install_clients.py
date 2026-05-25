@@ -201,6 +201,89 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
         _ok(f"Claude Code: {action} snippet to {claude_md}")
         changes.append(snippet_change)
 
+    # Phase 2 #3 — SessionStart lifecycle hook for auto-loaded vault context.
+    hook_changes = _install_session_start_hook(token=token, url=url, dry=dry)
+    changes.extend(hook_changes)
+
+    return changes
+
+
+def _install_session_start_hook(*, token: str, url: str, dry: bool) -> list[Change]:
+    """Register the scripts/claude_code_hooks/session_start.py hook in
+    ``~/.claude/settings.json`` under ``hooks.SessionStart``. The hook
+    auto-loads a vault summary into every new Claude Code session so the
+    AI starts each session aware of what's in the vault.
+
+    Also writes ``~/.neverforget.env`` with the URL + token so the hook
+    can read them without leaking secrets into shell rc files. The env
+    file is chmod 600.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    hook_script = repo_root / "scripts" / "claude_code_hooks" / "session_start.py"
+    settings_path = Path.home() / ".claude" / "settings.json"
+    env_path = Path.home() / ".neverforget.env"
+    changes: list[Change] = []
+
+    if not hook_script.exists():
+        _err(f"Claude Code hook: script not found at {hook_script}")
+        return changes
+
+    # 1) write ~/.neverforget.env (gitignored, chmod 600)
+    env_content = f"NEVERFORGET_URL={url}\nNEVERFORGET_AUTH_TOKEN={token}\n"
+    if not (env_path.exists() and env_path.read_text() == env_content):
+        backup = _backup(env_path, dry)
+        if not dry:
+            env_path.write_text(env_content)
+            env_path.chmod(0o600)
+        action = "would write" if dry else "wrote"
+        msg = f"Claude Code: {action} ~/.neverforget.env (chmod 600)"
+        if backup:
+            msg += f" (backup: {backup.name})"
+        _ok(msg)
+        changes.append(Change("env", env_path, action))
+    else:
+        _ok("Claude Code: ~/.neverforget.env already up to date")
+
+    # 2) register the SessionStart hook
+    settings: dict[str, Any] = {}
+    if settings_path.exists():
+        text = settings_path.read_text().strip()
+        if text:
+            try:
+                settings = json.loads(text)
+            except json.JSONDecodeError as e:
+                _err(f"Claude Code settings.json malformed: {e}")
+                return changes
+
+    hooks = settings.setdefault("hooks", {})
+    session_hooks = hooks.setdefault("SessionStart", [])
+    hook_command = f"python3 {hook_script}"
+    # Idempotency — look for our exact command among existing hooks.
+    already = any(
+        any(h.get("command") == hook_command for h in entry.get("hooks", []))
+        for entry in session_hooks
+        if isinstance(entry, dict)
+    )
+    if already:
+        _ok("Claude Code: SessionStart hook already registered")
+        return changes
+
+    session_hooks.append(
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": hook_command, "timeout": 10}],
+        }
+    )
+    backup = _backup(settings_path, dry)
+    if not dry:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    action = "would register" if dry else "registered"
+    msg = f"Claude Code: {action} SessionStart hook → {hook_script}"
+    if backup:
+        msg += f" (backup: {backup.name})"
+    _ok(msg)
+    changes.append(Change("hook", settings_path, action))
     return changes
 
 
