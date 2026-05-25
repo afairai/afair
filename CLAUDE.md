@@ -67,6 +67,42 @@
 | Logging | structlog | JSON with PII redaction |
 | Deployment | Docker → Fly machine | Single binary across local / self-hosted / managed |
 
+## 2.5 Public-repo discipline (binding until VISION.md §16 resolves)
+
+The repo is **not** open source today. The licensing decision is deferred
+to a Phase-6 review (`VISION.md` §16). Until then the operational rule:
+
+> **Build as if the repo goes public tomorrow.**
+
+Concretely:
+
+- No secrets, credentials, tokens, or API keys in committed files.
+  Use `.env.local` (gitignored) + `.env.secrets.backup` (also gitignored,
+  see global CLAUDE.md "Secrets-Backup-File Konvention").
+- No internal jokes, no slurs against competitors, no offhand snark
+  in code, comments, or commit messages.
+- No proprietary algorithmic tricks that depend on staying secret for
+  their value. The moat is single-tenant + cross-vendor + brand —
+  not hidden code.
+- No lock-in mechanisms: no anti-export, no phone-home, no kill-switch
+  patterns. I4 says the user owns the substrate; the code must reflect
+  that even when it is our own running production code.
+- Telemetry minimal, off-by-default, anonymized when on. If we add
+  Sentry/PostHog/observability later, document it in the README and
+  provide an opt-out.
+- Tests + docs at every layer. A stranger reading the repo for the
+  first time should be able to understand what each module does and
+  why it exists.
+- Commit messages reviewable by a stranger — conventional commits,
+  imperative voice, no "fix the thing" subjects.
+- Transitive dependencies stay Apache2/MIT/BSD-compatible. Avoids
+  accidentally tainting the codebase with copyleft we cannot undo
+  if we later choose Apache2, or accidentally absorbing AGPL deps
+  if we later choose closed.
+
+This rule does NOT prejudge §16's licensing decision. It just ensures
+we can EXECUTE either decision in Phase 6 without rewrites or churn.
+
 ## 3. Trust ladder (binding for all phases)
 
 Per VISION.md §9 Phase 0:
