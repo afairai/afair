@@ -51,11 +51,16 @@ CONFLICT_KIND = "conflict_flag"
 """content_type marker in the interpretation row's extraction blob —
 not a new SQLite column. Recall + GetEvent surface this as ``conflicts[]``."""
 
-MAX_PAIRS_PER_CYCLE = 20
-"""Hard cap on LLM calls per scheduled run. At ~$0.0005/call with Haiku
-that's ~$0.01 per cycle worst-case. Hourly cadence → ~$0.24/day if the
-vault is full of new conflicts. Realistically lower because most pairs
-are reinforcing and we cache the verdict."""
+MAX_PAIRS_PER_CYCLE = 8
+"""Hard cap on LLM calls per scheduled run. Down from 20 after the first
+real run hit Anthropic's 50K-tok/min org rate limit on a single cycle —
+8 pairs × ~600 input tokens + a sleep between calls keeps us well under
+the per-minute cap even when the warm-path Extractor is also active."""
+
+INTER_CALL_SLEEP_SECONDS = 3.0
+"""Sleep between LLM calls inside a single cycle. With 8 pairs and 3s
+spacing, a cycle runs ~25s and the LLM-token-per-minute usage stays
+roughly half of the cap, leaving headroom for the warm-path Extractor."""
 
 
 def read_conflicts_for_event(conn: sqlite3.Connection, event_hash: str) -> list[dict[str, Any]]:
@@ -199,11 +204,18 @@ class ConflictResolver(ColdPathWorker):
         api_key = _api_key_for_model(model, settings)
 
         pairs = _enumerate_candidate_pairs(conn, max_pairs=MAX_PAIRS_PER_CYCLE)
+        llm_call_count = 0
         for event_a, event_b in pairs:
             if _already_judged(conn, event_a.content_hash, event_b.content_hash):
                 stats["skipped_already_judged"] += 1
                 continue
+            # Throttle between LLM calls to stay under the Anthropic
+            # per-minute organization rate limit even when the warm-path
+            # Extractor is also firing. First call has no sleep.
+            if llm_call_count > 0:
+                time.sleep(INTER_CALL_SLEEP_SECONDS)
             stats["pairs_examined"] += 1
+            llm_call_count += 1
             try:
                 verdict = _judge_pair(
                     event_a=event_a, event_b=event_b, model=model, api_key=api_key
@@ -215,7 +227,6 @@ class ConflictResolver(ColdPathWorker):
             stats[verdict.verdict] = stats.get(verdict.verdict, 0) + 1
             _write_verdict(conn, event_a=event_a, pair=verdict)
 
-        _ = time  # imported but conceptually used (timestamps come via interpretation)
         return stats
 
 
