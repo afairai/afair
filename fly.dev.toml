@@ -1,0 +1,60 @@
+# Fly app config — DEV environment.
+# Mirror of fly.toml with three differences:
+#   1. app name → afair-dev
+#   2. min_machines_running = 0 + auto_stop_machines = "stop" — dev sleeps
+#      when idle to save money; the warmup cost on next request is ~5s,
+#      acceptable for a non-production environment.
+#   3. memory_mb = 512 — half the prod headroom; dev runs lighter loads
+#      and the OOM scenario that drove prod to 1024 (large doc embed)
+#      isn't expected to recur in dev where data is test fixtures.
+#
+# Everything else matches fly.toml — same Dockerfile, same mount, same
+# health check, same strategy. Single-tenant per I8 still applies — the
+# dev app has its OWN dedicated vault volume separate from prod's.
+
+app = "afair-dev"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ENVIRONMENT = "fly"
+  LOG_LEVEL = "INFO"
+  VAULT_DIR = "/data/vault"
+  MCP_HOST = "0.0.0.0"
+  MCP_PORT = "8080"
+  EXTRACTOR_MODEL = "anthropic/claude-haiku-4-5"
+
+[mounts]
+  source = "vault"
+  destination = "/data"
+
+[deploy]
+  strategy = "immediate"
+  wait_timeout = "5m"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Sleep when idle (dev-only). Cold-start cost on first request ~5s
+  # — acceptable trade for cost savings on a low-traffic env.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 100
+    soft_limit = 50
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory_mb = 512

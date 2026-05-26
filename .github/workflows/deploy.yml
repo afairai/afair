@@ -1,25 +1,44 @@
 name: Deploy to Fly
 
+# Branch-based environments:
+#   push to `main` → afair (prod)        — uses FLY_API_TOKEN
+#   push to `dev`  → afair-dev (staging) — uses FLY_API_TOKEN_DEV
+# Both branches share the same workflow file; the matrix below selects
+# config + token + URL per branch. Concurrency groups per env keep
+# in-flight deploys from racing themselves.
+
 on:
   push:
-    branches: [main]
-  # Manual trigger from the GitHub UI is handy for re-deploys
-  # without an actual code change.
+    branches: [main, dev]
   workflow_dispatch:
-
-concurrency:
-  group: deploy-prod
-  cancel-in-progress: false
+    inputs:
+      target:
+        description: "Which env to deploy to"
+        required: true
+        type: choice
+        options:
+          - prod
+          - dev
 
 jobs:
   test-and-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment:
-      name: prod
-      url: https://afair.fly.dev
     permissions:
       contents: read
+    concurrency:
+      group: deploy-${{ github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev' && 'dev' || 'prod' }}
+      cancel-in-progress: false
+    env:
+      # Resolve env-specific values once per job. The expression chain
+      # below works for both push events (uses github.ref) and
+      # workflow_dispatch (uses the input).
+      IS_DEV: ${{ github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev' }}
+    environment:
+      # GitHub Environments are gated by branch protection rules + can
+      # carry env-scoped secrets. We use two: `prod` and `dev`.
+      name: ${{ (github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev') && 'dev' || 'prod' }}
+      url: ${{ (github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev') && 'https://afair-dev.fly.dev' || 'https://afair.fly.dev' }}
 
     steps:
       - name: Checkout
@@ -57,25 +76,43 @@ jobs:
 
       - name: Deploy
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # Per-env Fly deploy token — different scope per app so a leaked
+          # dev token can't reach prod. Both tokens rotate annually via
+          # the recipe in .env.secrets.backup.
+          FLY_API_TOKEN: ${{ env.IS_DEV == 'true' && secrets.FLY_API_TOKEN_DEV || secrets.FLY_API_TOKEN }}
         run: |
+          if [ "$IS_DEV" = "true" ]; then
+            APP=afair-dev
+            CFG=fly.dev.toml
+            URL=https://afair-dev.fly.dev
+          else
+            APP=afair
+            CFG=fly.toml
+            URL=https://afair.fly.dev
+          fi
+          echo "Deploying to $APP using $CFG"
           flyctl deploy \
-            --app afair \
-            --config fly.toml \
+            --app "$APP" \
+            --config "$CFG" \
             --remote-only \
             --wait-timeout 300
 
       # ── Post-deploy verification ────────────────────────────────────
       - name: Verify health
         run: |
+          if [ "$IS_DEV" = "true" ]; then
+            URL=https://afair-dev.fly.dev
+          else
+            URL=https://afair.fly.dev
+          fi
           for i in 1 2 3 4 5; do
-            status=$(curl -s -o /dev/null -w "%{http_code}" https://afair.fly.dev/health || echo "000")
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health" || echo "000")
             if [ "$status" = "200" ]; then
-              echo "✓ /health returned 200"
+              echo "✓ $URL/health returned 200"
               exit 0
             fi
             echo "Attempt $i: status=$status; retrying in 5s..."
             sleep 5
           done
-          echo "✗ /health did not return 200 after 5 attempts"
+          echo "✗ $URL/health did not return 200 after 5 attempts"
           exit 1
