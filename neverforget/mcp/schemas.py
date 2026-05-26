@@ -66,6 +66,28 @@ Depth = Literal["auto", "shallow", "normal", "deep"]
 """
 
 
+class ConflictFlag(BaseModel):
+    """One verdict pair from the cold-path Conflict-Resolver (Phase 3).
+
+    Surfaces on a recall hit when a later cycle of the Conflict-Resolver
+    judged this event against some other event in the vault. The
+    ``verdict`` is the LLM's call: ``contradicts`` / ``compatible`` /
+    ``unclear``. The AI client uses these to decide whether to surface
+    or suppress conflicting facts when answering the user.
+    """
+
+    with_event_id: str
+    """Event id of the other side of the pair — fetch via ``get_event``."""
+
+    with_content_hash: str
+
+    verdict: str
+    """One of: contradicts, compatible, unclear."""
+
+    reason: str = ""
+    confidence: float = 0.0
+
+
 class InvalidationSummary(BaseModel):
     """Surfacing of a fact's bi-temporal invalidation status.
 
@@ -116,6 +138,7 @@ class RecallHit(BaseModel):
     interpretation: dict[str, Any] | None = None
     linked_event_ids: list[str] = []
     invalidation: InvalidationSummary | None = None
+    conflicts: list[ConflictFlag] = []
 
 
 class RecallResult(BaseModel):
@@ -198,6 +221,7 @@ class GetEventResult(BaseModel):
     linked_event_ids: list[str] = []
     parent_hashes: list[str] = []
     invalidation: InvalidationSummary | None = None
+    conflicts: list[ConflictFlag] = []
 
 
 # ── invalidate ──────────────────────────────────────────────────────────────

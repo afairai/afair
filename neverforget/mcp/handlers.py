@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids
+from ..agents.conflict_resolver import read_conflicts_batch, read_conflicts_for_event
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.invalidation import (
     InvalidationInfo,
@@ -37,6 +38,7 @@ from ..substrate import (
 from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
+    ConflictFlag,
     ContextSummary,
     Depth,
     GetEventResult,
@@ -160,12 +162,17 @@ def _invalidation_to_summary(info: InvalidationInfo | None) -> InvalidationSumma
 
 
 def _event_to_hit(
-    event: Event, db: Any, *, invalidation: InvalidationInfo | None = None
+    event: Event,
+    db: Any,
+    *,
+    invalidation: InvalidationInfo | None = None,
+    conflicts: list[dict[str, Any]] | None = None,
 ) -> RecallHit:
     interp = read_latest_interpretation(db, event.content_hash)
     interpretation: dict[str, Any] | None = (
         _interpretation_summary(interp.extraction) if interp is not None else None
     )
+    conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
         event_id=event.id,
         content_hash=event.content_hash,
@@ -176,6 +183,7 @@ def _event_to_hit(
         interpretation=interpretation,
         linked_event_ids=get_linked_event_ids(db, event.content_hash),
         invalidation=_invalidation_to_summary(invalidation),
+        conflicts=conflict_flags,
     )
 
 
@@ -189,6 +197,14 @@ def _attach_invalidations(events: list[Event], db: Any) -> dict[str, Invalidatio
         return {}
     hashes = [e.content_hash for e in events]
     return read_invalidations_batch(db, hashes)
+
+
+def _attach_conflicts(events: list[Event], db: Any) -> dict[str, list[dict[str, Any]]]:
+    """Batch-fetch conflict-resolver verdicts for a list of events."""
+    if not events:
+        return {}
+    hashes = [e.content_hash for e in events]
+    return read_conflicts_batch(db, hashes)
 
 
 def _api_key_for_embedding(ctx: Any) -> str | None:
@@ -398,8 +414,17 @@ def recall(
                 )
 
     invalidations = _attach_invalidations(events, db)
+    conflicts = _attach_conflicts(events, db)
     return RecallResult(
-        hits=[_event_to_hit(e, db, invalidation=invalidations.get(e.content_hash)) for e in events],
+        hits=[
+            _event_to_hit(
+                e,
+                db,
+                invalidation=invalidations.get(e.content_hash),
+                conflicts=conflicts.get(e.content_hash),
+            )
+            for e in events
+        ],
         depth_used=depth_used,
         note=note,
     )
@@ -429,13 +454,19 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
     }
 
     invalidations = _attach_invalidations(recent_events, db)
+    conflicts = _attach_conflicts(recent_events, db)
     return ListContextResult(
         summary=ContextSummary(
             total_events=total,
             by_kind=by_kind,
             by_origin=by_origin,
             recent=[
-                _event_to_hit(e, db, invalidation=invalidations.get(e.content_hash))
+                _event_to_hit(
+                    e,
+                    db,
+                    invalidation=invalidations.get(e.content_hash),
+                    conflicts=conflicts.get(e.content_hash),
+                )
                 for e in recent_events
             ],
         ),
@@ -523,6 +554,7 @@ def get_event(
         linked_event_ids=get_linked_event_ids(db, event.content_hash),
         parent_hashes=list(event.parent_hashes or []),
         invalidation=_invalidation_to_summary(read_invalidation(db, event.content_hash)),
+        conflicts=[ConflictFlag(**c) for c in read_conflicts_for_event(db, event.content_hash)],
     )
 
 
