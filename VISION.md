@@ -207,6 +207,16 @@ LLMs make this faster than biology. The model already encodes most human categor
 
 **Critical architectural rule:** Nothing writes to the Substrate without passing through the Router → Salience → Swarm pipeline. External ingestion is not a privileged path. Like the thalamus in the brain: every sensory input is routed and filtered before it affects the cortex. The only exception is the system's own audit log of its meta-actions (recorded directly to Substrate as system events), analogous to the few brain pathways that bypass the thalamus (e.g., olfactory) — small, well-defined exceptions, never the default.
 
+### 6.1a Theoretical Grounding
+
+The CEN/DMN/Salience labels are taken from Menon's Triple Network Model (2011) and used as architectural metaphor — they communicate intent ("task work vs. reflection" / "salience as mode switcher") in language familiar to anyone with a neuroscience background. The Triple Network Model is well-validated but not cutting-edge; it describes *what* each module does, not *why* the architecture is shaped this way. Two deeper frameworks carry that load:
+
+1. **Predictive Processing / Active Inference** (Friston, Free Energy Principle). The substrate is treated as a generative model of the user's world; every agent (extractor, bind, salience, recall, consolidator) is an inference process minimizing prediction error. Surprise — the divergence between predicted and observed substrate state — is the *intended* load-bearing salience signal (Phase 4 implementation), not engineered priority scores. The `open_threads` field emitted by `consolidator:v0` is already a proto-instance of this: explicit unresolved prediction errors handed forward.
+
+2. **Complementary Learning Systems** (McClelland, McNaughton & O'Reilly 1995; updated in Kumaran, Hassabis & McClelland 2016). Memory is split between a fast, sparse, episodic store (hippocampus-like — our hot path and append-only substrate) and a slow, distributed, semantic store (neocortex-like — our interpretation layer and the consolidator's abstraction events). The hot/warm/cold tiering is biologically motivated: the brain runs two systems because one cannot simultaneously learn fast (catastrophic interference) and generalize well. Same constraint applies here. `consolidator:v0` (event 01KSHNPH37BGHTJMMAYK3H3S2N, 2026-05-26) is CLS replay: samples episodic events, generates abstractions with parent_hashes to sources, emits themes as emergent semantic tags. This component was built before the theory was named; CLS is a retroactive justification, not a forward design constraint.
+
+Together: Triple Network = the visible architecture. CLS + PP = the load-bearing theory that says it has to be this shape.
+
 ### 6.2 MCP Surface (Invariant I1)
 
 The external contract. Whatever changes underneath, these signatures hold.
@@ -376,13 +386,20 @@ Every self-modification is itself an event in the substrate. The full history of
 **Capability gate:** System distinguishes hot/warm/cold paths automatically; user experiences no perceptible thrashing.
 **Ships:** Salience agent, three-path execution model, idle-detection.
 
-### Phase 3 — Sleep Swarm
+### Phase 3 — Sleep Swarm (CLS replay)
 **Capability gate:** Quality of retrievals visibly improves after idle periods compared to before.
-**Ships:** Consolidator, basic Conflict-Resolver, Pruner. Background operation over interpretation layer.
+**Ships:** Consolidator (CLS-replay), Conflict-Resolver, Pruner. Background operation over interpretation layer.
+**Status:** `consolidator:v0` is shipped (daily-scheduled, scopes to a `target_day`, samples episodic events, emits abstraction events with `parent_hashes`, themes, and `open_threads`). Phase 3 expands this:
+  (a) **Cross-domain consolidation** — v0 clusters thematically within a day but does not bridge domains; add a higher-level consolidator that samples across topics to generate structural abstractions.
+  (b) **`open_threads` consumer agent** — v0 emits unresolved prediction errors but nothing picks them up. Wire a follow-up agent (DMN sleep swarm) that takes `open_threads` and queues them as low-priority recall or as user-facing prompts.
+  (c) **Auto-linking on consolidations** — `linked_event_ids` is currently empty on consolidation events. Decide: do consolidations participate in the top-3 NN graph like other events, or do they form their own abstraction layer with different linking semantics?
+  (d) **Surprise-triggered consolidation** — currently only daily. Add a trigger when cumulative surprise from recall queries exceeds threshold, indicating the user's working context has drifted enough that re-abstraction is warranted.
 
-### Phase 4 — Emergent Ontology
-**Capability gate:** Categories I never explicitly defined appear in `list_context` and feel correct.
-**Ships:** Schema-Evolver, ontology versioning, emergent category bootstrapping from substrate patterns.
+### Phase 4 — Emergent Ontology + Active Inference Salience
+**Capability gate:** Categories I never explicitly defined appear in `list_context` and feel correct, AND the Salience agent switches modes based on substrate-side surprise rather than engineered heuristics.
+**Ships:**
+- Schema-Evolver, ontology versioning, emergent category bootstrapping from substrate patterns (the Emergent-Ontology track, binding I6).
+- Active-Inference Salience: recall returns a surprise score per hit (specific metric TBD — KL-divergence between expected and observed result distributions is one candidate). The Salience agent uses cumulative surprise to decide when to switch from CEN-mode (exploitation of current task) to DMN-mode (re-indexing, consolidation, exploration). Surprise above threshold triggers an `observe()` event automatically — the system journals its own moments of being-wrong, the substrate for recursive self-improvement (I7).
 
 ### Phase 5 — Cross-Vendor Polish
 **Capability gate:** Equally usable from Claude Code, Codex CLI, and Cursor with no functional gap.
@@ -487,6 +504,14 @@ These are not memory products, but their business model is what we replicate: op
 
 What unites them: **the architecture is the promise**. They don't claim privacy/ownership; they structurally provide it. Result: high customer trust, low churn, defensible against larger competitors who cannot match the architecture without rebuilding their entire stack.
 
+### 10.4a Theoretical depth as one axis of differentiation
+
+Mem0, Letta, Graphiti, Cognee, LangMem, and Supermemory all operate at the storage-extraction layer: better chunking, better graph topology, better retrieval ranking. None of them publicly grounds the architecture in a coherent theory of cognition. This isn't a knock — it's how the market matured around benchmark performance. But it leaves an axis open: when asked "why is your system shaped this way?" the honest answer from most competitors today is "because it benchmarks well."
+
+Ours can be: append-only-with-consolidation is CLS; tiered latency is hippocampus-neocortex; salience is prediction-error. That's the foundation for the recursive self-improvement story (I7) — you can't recursively improve what you can't theoretically justify. `consolidator:v0` demonstrates this isn't post-hoc rationalization: the implementation came first, the theory recognized it.
+
+**The honest framing**: theory is a *complement* to benchmarks, not a substitute. Mem0 wins LongMemEval today; we don't yet have public benchmark numbers. Once Phase 4+ benchmarks land alongside the existing CLS+PP grounding, "we measured AND we can explain why this shape" becomes a stronger combined position than either alone. Until then, theoretical depth is a brand pillar that quietly raises the bar competitors have to meet — not a winning argument on its own.
+
 ### 10.5 Structural Analysis: Why None Of Them Wins This
 
 Four structural facts that close the field:
@@ -555,6 +580,8 @@ Honest list of what is not yet figured out:
 ## 14. Source Material
 
 ### Papers
+- McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). [Why there are complementary learning systems in the hippocampus and neocortex: insights from the successes and failures of connectionist models of learning and memory](https://stanford.edu/~jlmcc/papers/McClellandMcNaughtonOReilly95.pdf). *Psychological Review*, 102(3), 419–457. — Foundational CLS paper. Justifies our hot/warm/cold tiering biologically.
+- Kumaran, D., Hassabis, D., & McClelland, J. L. (2016). [What learning systems do intelligent agents need? Complementary Learning Systems Theory updated](https://www.cell.com/trends/cognitive-sciences/fulltext/S1364-6613(16)30043-2). *Trends in Cognitive Sciences*, 20(7), 512–534. — DeepMind-era CLS update; Hassabis explicitly bridges CLS to deep-RL architectures. Directly relevant: `consolidator:v0` IS CLS replay.
 - [Mem0: ECAI 2025 (arXiv:2504.19413)](https://arxiv.org/abs/2504.19413) — Production memory benchmarks.
 - [Zep: A Temporal Knowledge Graph Architecture for Agent Memory (arXiv:2501.13956)](https://arxiv.org/abs/2501.13956) — Bi-temporal graph memory.
 - [H-MEM: Hierarchical Memory for High-Efficiency Long-Term Reasoning (arXiv:2507.22925)](https://arxiv.org/abs/2507.22925)
