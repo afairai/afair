@@ -161,3 +161,86 @@ and not OpenAI's. I5 is empirically demonstrated.
 - Claude.ai's custom-connector UI doesn't expose a custom-header field —
   only OAuth client id/secret. So Claude.ai is **blocked on OAuth**
   (Phase 1+ work). Claude Code and Codex both work today.
+
+---
+
+### Day 2 — 2026-05-26 (build day, not a use day)
+
+**Note:** Today was a heavy building day, not daily-use validation. The
+14-day capability gate window pauses where shipping ate the day; real
+daily-use observations resume tomorrow. Logging the shipped work here
+so future-me has the architectural context when reading later entries.
+
+**Shipped today (briefly):**
+
+- MCP surface collapsed `6 → 3` tools (`remember`, `recall`, `observe`).
+  The old `list_context` / `get_event` / `invalidate` verbs are now
+  kwargs on the survivors. Done pre-release so I1 freezes at the
+  intended forever-shape.
+- **Phase 4 Track 1 — Emergent Entity Graph** (Stages 1-6 + live
+  backfill of existing 59 events). Five new append-only substrate
+  tables, EntityCanonicalizer cold-path worker (3-stage match with
+  Sonnet escalation), recall enrichment via
+  `interpretation.canonical_entities` + `entity_edges`, entity-aware
+  query routing.
+- **Phase 4 Track 2 v0 — per-hit surprise score** based on entity-novelty
+  against the recent-context window (last 20 events). Track 2 mode-
+  switching deferred (depends on Phase 2 Salience agent).
+- **Rebrand:** codename `neverforget` → product name `afair` (`afair.ai`
+  brand). Python package, env vars, MCP server name, Fly app, GitHub
+  repo, local directory, Claude Code config — all carried over.
+- **Multi-env Fly setup:** `afair` (prod) + `afair-dev` (dev) with
+  branch-based GH Actions CI. Old `neverforget` app destroyed after
+  verification.
+- **Substrate/landing decoupled:** `/` on the substrate machine now
+  returns a JSON pointer, not HTML. Marketing site comes later on
+  afair.ai (separate deployment).
+
+**Live verification 🟢**
+- 10/10 smoke on both afair.fly.dev and afair-dev.fly.dev
+- Entity graph queryable via MCP: 58 events, canonical entities surface
+  on recall hits, surprise score gives meaningful signal (Sajinth-context
+  hits score ~1.0 = older / surprising, elvah-context hits score 0.0 =
+  current focus).
+- Claude Code (local config) + Claude.ai (web UI connector) both
+  reconnected to the new endpoint.
+
+**Architecture pressure 🏗️**
+- One real bug surfaced during the live backfill: canonicalizer looped
+  over events whose extractor returned all-filtered entities (empty
+  names → no mentions written → NOT EXISTS query never settled). Fixed
+  same-session with a NO_MENTIONS marker pattern (commit `4115f6c`).
+  This is the kind of "architecture survives contact with reality"
+  signal the gate is asking for — patch was a 15-line, non-disruptive
+  fix in the existing cold-path-marker pattern.
+- The decision to ship surprise score as a v0 observability slice
+  (without mode-switching yet) felt right in retrospect: I can now
+  WATCH surprise distributions before committing to a threshold-based
+  agent. Data first, agent second.
+
+**Friction 🛠️**
+- GitHub Actions push-trigger silently dropped 5 consecutive pushes
+  mid-morning (transient outage). Recovery: `gh workflow run` manual
+  dispatch worked. Runbook §2 in docs/operations.md updated to capture
+  the recovery path.
+- Initial `flyctl deploy` after the rebrand failed because the
+  Dockerfile had two leftover `neverforget` strings the sed didn't
+  catch (`COPY afair ./neverforget` + `CMD ["python", "-m", "neverforget"]`).
+  Caught in the first deploy attempt, fixed in `0d0d160`. Lesson: sed
+  is good for identifier-level renames but every `string-literal`
+  context deserves a follow-up grep.
+
+**What to watch starting tomorrow (Day 3+)**
+- Surprise score distribution in real recalls — when does 0.8+ correspond
+  to actual context-switches vs noise?
+- Entity-graph hit-rate — when does the canonical_entities overlay help
+  the AI client disambiguate vs when is it just clutter?
+- Whether the rebrand introduced any subtle regression that wasn't caught
+  by the 281 tests (cross-vendor reconnect, OAuth flow, daily-use latency).
+- The Phase-0 gate's actual question — does the architecture still feel
+  right after 2 weeks of using it for real?
+
+**Self-writing journal pattern:** going forward, user dictates
+observations during daily use, I (Claude) append them here in
+formatted entries. Append-only, never rewrite past entries. Marker
+this entry as the start of the user-dictated portion.
