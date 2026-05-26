@@ -25,6 +25,14 @@
 - Extractor agent (`neverforget/agents/`) — warm-path LLM extraction via
   litellm; default `anthropic/claude-haiku-4-5`; failed extractions stored
   as `status: failed` rows for retry/diagnosis
+- **Phase 4 Track 1 Emergent Entity Graph** — five append-only substrate
+  tables (`entities`, `entity_mentions`, `entity_edges`, `entity_merges`,
+  `edge_invalidations`) materialized by the `EntityCanonicalizer` cold-path
+  worker. Three-stage match (exact → LLM with Sonnet escalation → new),
+  cascade-invalidation through edges, recall enrichment via
+  `interpretation.canonical_entities` + `interpretation.entity_edges`,
+  entity-aware query routing for `recall(query=)`. One-shot backfill at
+  `scripts/backfill_entities.py`.
 - **Fly deployment live at https://neverforget.fly.dev** — single-tenant
   machine in `fra`, 1 GB volume `vault` with 5-day auto-snapshots,
   `strategy = "immediate"`, `min_machines_running = 1`
@@ -38,6 +46,7 @@
 
 - Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
+- Phase 4 Track 2 (Active-Inference Salience) — surprise-score per recall hit + CEN↔DMN mode-switching agent; depends on Phase 2 Salience agent which doesn't exist yet
 
 ### 0.3 What's blocked
 
