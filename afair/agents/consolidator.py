@@ -282,11 +282,46 @@ def _summarize_day(
     # far more themes/open_threads than asked. First production cycle
     # wrote 225 themes for one day; truncate here so the cap is enforced
     # server-side regardless of model compliance.
+    #
+    # Additional defense (bug discovered 2026-05-26 via vault audit, event
+    # 01KSJX608Q63GJ6TP9TY5A8XZ7): Haiku also sometimes returns themes /
+    # open_threads as a SINGLE STRING instead of a JSON array. Without
+    # type-guarding, ``[str(t) for t in <string>]`` iterates over the
+    # CHARACTERS, producing a list-of-single-chars that looks like a
+    # valid list to Pydantic but corrupts downstream when joined. The
+    # corruption surfaces in the consolidation event's ``context`` field
+    # as ``"v, e, n, d, o, r, ..."`` instead of ``"vendor neutrality, ..."``.
     return _DaySummary(
         narrative=str(data.get("narrative", "")),
-        themes=[str(t) for t in (data.get("themes") or [])][:6],
-        open_threads=[str(t) for t in (data.get("open_threads") or [])][:4],
+        themes=_coerce_to_string_list(data.get("themes"), field="themes")[:6],
+        open_threads=_coerce_to_string_list(data.get("open_threads"), field="open_threads")[:4],
     )
+
+
+def _coerce_to_string_list(value: Any, *, field: str) -> list[str]:
+    """Normalize an LLM-returned field into a list of strings.
+
+    Accepts:
+      - list / tuple of items → str-cast each item
+      - single string → wrap as a one-element list (with a warning,
+        since a JSON-array was requested; one-element fallback is
+        better than character-iteration)
+      - None or anything else → empty list
+
+    The warning lets us audit how often Haiku violates the schema and
+    decide whether to retry or escalate to Sonnet at this stage.
+    """
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        log.warning(
+            "consolidator.field_returned_as_string",
+            field=field,
+            sample=value[:120],
+            length=len(value),
+        )
+        return [value] if value.strip() else []
+    return []
 
 
 def _event_brief(event: Event) -> dict[str, Any]:
