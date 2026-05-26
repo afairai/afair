@@ -64,6 +64,7 @@ from ..substrate import (
     search_vec,
     write_event,
 )
+from ..substrate.events import row_to_event
 from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
@@ -390,6 +391,36 @@ def _attach_conflicts(events: list[Event], db: Any) -> dict[str, list[dict[str, 
     return read_conflicts_batch(db, hashes)
 
 
+def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
+    """Find events whose canonical entities or surface forms match the query.
+
+    Phase 4 Track 1 Stage 4 — entity-aware routing. Auto-detects when a
+    query is "really" an entity reference by checking both canonical
+    names AND historical surface forms (so ``recall(query="Saji")``
+    still finds events even though the canonical is "Sajinth").
+
+    Returns most-recent-first events, capped at ``limit``. Empty result
+    when nothing matches — caller treats this as "no entity boost" and
+    falls back to plain FTS+vec.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return []
+    rows = db.execute(
+        """
+        SELECT DISTINCT events.* FROM events
+        JOIN entity_mentions em ON em.event_id = events.id
+        LEFT JOIN entities ent ON ent.id = em.entity_id
+        WHERE LOWER(ent.canonical_name) = LOWER(?)
+           OR LOWER(em.surface_form) = LOWER(?)
+        ORDER BY events.created_at DESC
+        LIMIT ?
+        """,
+        (stripped, stripped, limit),
+    ).fetchall()
+    return [row_to_event(r) for r in rows]
+
+
 def _api_key_for_embedding(ctx: Any) -> str | None:
     """Return the right API key for the configured embedding model."""
     model = ctx.embedding_model
@@ -623,8 +654,16 @@ def recall(
             depth = _auto_route_depth(query)
             depth_used = depth
 
+        # Phase 4 Track 1 Stage 4 — entity-aware routing. Auto-detect: if
+        # the query string matches a canonical entity name or a known
+        # surface form, pull those events as a third ranking signal.
+        # Returns [] when nothing matches — pure no-op for non-entity
+        # queries.
+        entity_hits = _events_via_entity_match(db, query, limit=limit)
+
         if depth == "shallow" or not ctx.semantic_recall_enabled:
-            events = search_fts(db, query, limit=limit)
+            fts_hits = search_fts(db, query, limit=limit)
+            events = rrf_merge(fts_hits, entity_hits, limit=limit) if entity_hits else fts_hits
             depth_used = "shallow"
         else:
             api_key = _api_key_for_embedding(ctx)
@@ -635,12 +674,17 @@ def recall(
             try:
                 embedding = emb_future.result()
             except EmbeddingError:
-                events = fts_hits
+                events = rrf_merge(fts_hits, entity_hits, limit=limit) if entity_hits else fts_hits
                 depth_used = "shallow"
                 note = "semantic recall unavailable; returned FTS-only results"
             else:
                 vec_hits = search_vec(db, embedding, limit=limit)
-                events = rrf_merge(fts_hits, vec_hits, limit=limit)
+                # Fuse FTS+vec first (hybrid baseline), then layer in the
+                # entity-match boost. Double-counted appearances naturally
+                # rank higher — events that BOTH match by name AND match
+                # by text/embedding deserve the front of the list.
+                hybrid = rrf_merge(fts_hits, vec_hits, limit=limit)
+                events = rrf_merge(hybrid, entity_hits, limit=limit) if entity_hits else hybrid
                 depth_used = "normal"
                 if depth == "deep":
                     note = (
