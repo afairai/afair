@@ -533,6 +533,68 @@ def find_edges_for_source_event(conn: sqlite3.Connection, source_event_id: str) 
     return [_row_to_edge(r) for r in rows]
 
 
+def read_edges_by_source_event_ids(
+    conn: sqlite3.Connection,
+    event_ids: list[str],
+    *,
+    include_invalidated: bool = False,
+) -> dict[str, list[EntityEdge]]:
+    """Batch variant — used by recall to attach edges to many hits at once.
+
+    Filters out invalidated edges by default (decision #6) via a LEFT JOIN
+    on edge_invalidations. Returns a dict keyed by source_event_id;
+    event_ids with no edges are absent from the result.
+    """
+    if not event_ids:
+        return {}
+    placeholders = ",".join("?" for _ in event_ids)
+    if include_invalidated:
+        sql = (
+            "SELECT * FROM entity_edges "
+            f"WHERE source_event_id IN ({placeholders}) "
+            "ORDER BY discovered_at"
+        )
+    else:
+        sql = (
+            "SELECT e.* FROM entity_edges e "
+            "LEFT JOIN edge_invalidations i ON i.edge_id = e.id "
+            f"WHERE e.source_event_id IN ({placeholders}) "
+            "AND i.id IS NULL "
+            "ORDER BY e.discovered_at"
+        )
+    rows = conn.execute(sql, event_ids).fetchall()
+    result: dict[str, list[EntityEdge]] = {}
+    for row in rows:
+        result.setdefault(row["source_event_id"], []).append(_row_to_edge(row))
+    return result
+
+
+def read_entities_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, Entity]:
+    """Bulk-fetch entities by ID. Used by recall to materialize the
+    canonical_entities surface on many hits in one query."""
+    if not entity_ids:
+        return {}
+    unique_ids = list({e for e in entity_ids if e})
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = conn.execute(
+        f"SELECT * FROM entities WHERE id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    return {row["id"]: _row_to_entity(row) for row in rows}
+
+
+def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, str]:
+    """Bulk variant of resolve_canonical — one map call per recall.
+
+    Falls through to per-id resolve_canonical since the merge chain is
+    rarely deep enough to justify a single recursive CTE. With SQLite's
+    prepared-statement cache + per-connection page cache, this is cheap.
+    """
+    return {eid: resolve_canonical(conn, eid) for eid in entity_ids}
+
+
 # ── row mappers ───────────────────────────────────────────────────────────
 
 
