@@ -48,7 +48,7 @@ conversation's tools/connectors menu), ask:
 
 > Use the neverforget connector to list the available tools.
 
-Expected: four tools — `remember`, `recall`, `list_context`, `observe`.
+Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip:
 

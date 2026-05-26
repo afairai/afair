@@ -73,34 +73,38 @@ class _FakeMCP(BaseHTTPRequestHandler):
             override = type(self).response_for.get("tools/call")
             if override is not None:
                 return {"jsonrpc": "2.0", "id": request_id, "result": override}
+            # Post-collapse RecallResult shape: hits at top level, summary as sibling
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
                     "structuredContent": {
+                        "hits": [
+                            {
+                                "event_id": "01ABCDEF0123456789",
+                                "content_hash": "sha256:deadbeef",
+                                "created_at": "2026-05-26T00:00:00Z",
+                                "kind": "remember",
+                                "origin": "user",
+                                "payload": {
+                                    "content_type": "text",
+                                    "text": "hello world",
+                                },
+                                "truncated": False,
+                                "interpretation": {
+                                    "best_guess_kind": "fact",
+                                    "summary": "A canary fact saved at midnight.",
+                                },
+                                "linked_event_ids": [],
+                                "parent_hashes": [],
+                            },
+                        ],
+                        "depth_used": "shallow",
                         "summary": {
                             "total_events": 3,
                             "by_kind": {"remember": 2, "observe": 1},
                             "by_origin": {"user": 3},
-                            "recent": [
-                                {
-                                    "event_id": "01ABCDEF0123456789",
-                                    "content_hash": "sha256:deadbeef",
-                                    "created_at": "2026-05-26T00:00:00Z",
-                                    "kind": "remember",
-                                    "origin": "user",
-                                    "payload_summary": {
-                                        "content_type": "text",
-                                        "text": "hello world",
-                                    },
-                                    "interpretation": {
-                                        "best_guess_kind": "fact",
-                                        "summary": "A canary fact saved at midnight.",
-                                    },
-                                    "linked_event_ids": [],
-                                },
-                            ],
-                        }
+                        },
                     }
                 },
             }
@@ -185,12 +189,13 @@ def test_hook_skips_when_vault_is_empty() -> None:
     _FakeMCP.response_for = {
         "tools/call": {
             "structuredContent": {
+                "hits": [],
+                "depth_used": "shallow",
                 "summary": {
                     "total_events": 0,
                     "by_kind": {},
                     "by_origin": {},
-                    "recent": [],
-                }
+                },
             }
         }
     }
@@ -208,28 +213,31 @@ def test_hook_marks_invalidated_events_in_summary() -> None:
     _FakeMCP.response_for = {
         "tools/call": {
             "structuredContent": {
+                "hits": [
+                    {
+                        "event_id": "01XYZ",
+                        "content_hash": "sha256:zzz",
+                        "created_at": "2026-05-26T00:00:00Z",
+                        "kind": "remember",
+                        "origin": "user",
+                        "payload": {"content_type": "text", "text": "old fact"},
+                        "truncated": False,
+                        "interpretation": {"summary": "Sajinth is CEO"},
+                        "linked_event_ids": [],
+                        "parent_hashes": [],
+                        "invalidation": {
+                            "at": "2026-05-26T01:00:00Z",
+                            "by_event_id": "01ABC",
+                            "reason": "he stepped down",
+                        },
+                    }
+                ],
+                "depth_used": "shallow",
                 "summary": {
                     "total_events": 1,
                     "by_kind": {"remember": 1},
                     "by_origin": {"user": 1},
-                    "recent": [
-                        {
-                            "event_id": "01XYZ",
-                            "content_hash": "sha256:zzz",
-                            "created_at": "2026-05-26T00:00:00Z",
-                            "kind": "remember",
-                            "origin": "user",
-                            "payload_summary": {"content_type": "text", "text": "old fact"},
-                            "interpretation": {"summary": "Sajinth is CEO"},
-                            "linked_event_ids": [],
-                            "invalidation": {
-                                "at": "2026-05-26T01:00:00Z",
-                                "by_event_id": "01ABC",
-                                "reason": "he stepped down",
-                            },
-                        }
-                    ],
-                }
+                },
             }
         }
     }

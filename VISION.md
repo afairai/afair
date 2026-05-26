@@ -221,11 +221,18 @@ Together: Triple Network = the visible architecture. CLS + PP = the load-bearing
 
 The external contract. Whatever changes underneath, these signatures hold.
 
-Initial tools (v1):
-- `remember(content, context?, type_hint?)` — explicit note. Type hint is advisory only; system ignores it if better classification emerges.
-- `recall(query, scope?, depth?)` — retrieval. Depth controls reasoning effort (cheap lookup → full swarm consultation).
-- `list_context(about?)` — what the system currently knows, optionally scoped to a subject.
+v1 tools (frozen 2026-05-26, before any external user adopted the API):
+
+- `remember(content, context?, type_hint?, parent_hashes?, invalidates?)` — explicit note. `type_hint` is advisory; the extractor ignores it if a better classification emerges. `invalidates` supersedes prior facts in one call (each target gets an append-only invalidation event; I2 preserved).
+- `recall(query?, scope?, depth?, limit?, by_id?, by_content_hash?, full_payload?, stats?)` — the single retrieval verb. Five call modes coexist behind one signature:
+  - `recall(query=...)` — semantic + FTS hybrid (default).
+  - `recall(by_id=...)` or `recall(by_content_hash=...)` — single-event fetch.
+  - `recall(stats=True)` — vault overview (totals, kind/origin breakdown, recent hits). Replaces what was briefly a separate `list_context`.
+  - `recall(full_payload=True)` — return un-truncated text/payload for the matched hits.
+  - `depth` controls reasoning effort (cheap lookup → full swarm consultation).
 - `observe(event)` — structured logging of agent actions. Used by Claude Code, Codex, etc. to log their own work.
+
+Three verbs is the forever-surface. The pre-release window (Phase 0–early 3) absorbed earlier sketches that proposed `list_context`, `get_event`, and `invalidate` as separate tools — they now live as call modes / kwargs on the three above. I1's append-only freeze activates from this point: future capability is added via new tools or new optional kwargs, never via signature changes to these three.
 
 Versioning policy: additive only. New tools appear with version suffixes. Old signatures keep working. When a tool is genuinely obsolete, it stays callable but emits a deprecation notice; removal requires two major versions of overlap.
 
@@ -373,7 +380,7 @@ Every self-modification is itself an event in the substrate. The full history of
 
 ### Phase 0 — Substrate + MCP Surface (cross-vendor, zero automated ingestion)
 **Capability gate:** Daily use from **Claude Code, Codex CLI, and Claude.ai chat** for two weeks without rebuilding. Trust the system enough to keep calling it because nothing reaches into your life uninvited.
-**Ships:** Append-only substrate, MCP server (Streamable HTTP) with `remember` / `recall` / `list_context` / `observe`, a default **context-aware Extractor** on the warm path (richer extraction — entities, relations, time references, source attribution, best-guess-kind inferred from the call's context rather than a fixed enum). Deployed to the user's own Fly machine from day one (HTTPS required for Claude.ai connectivity; same binary exercises the eventual managed path).
+**Ships:** Append-only substrate, MCP server (Streamable HTTP) with the three v1 tools `remember` / `recall` / `observe` (surface frozen 2026-05-26; `recall` carries vault-survey, single-fetch, and full-payload modes as kwargs; `remember` carries `invalidates` for supersession). A default **context-aware Extractor** on the warm path (richer extraction — entities, relations, time references, source attribution, best-guess-kind inferred from the call's context rather than a fixed enum). Deployed to the user's own Fly machine from day one (HTTPS required for Claude.ai connectivity; same binary exercises the eventual managed path).
 **Explicitly out of scope:** Gmail, Calendar, Drive, Slack, GitHub, or any external connector. Zero automated sensing. The only way data enters the substrate in Phase 0 is via deliberate `remember` / `observe` calls made by the user or by an AI agent the user is actively talking to.
 **Trust ladder (binding for all phases):** Phase 0 — explicit calls only. Phase 1+ — user-initiated manual import (paste, drag a file, "ingest this URL"). Phase 2+ — opt-in connectors, one source at a time, with the Salience filter inspectable before enable. Continuous sensing (Gmail, Calendar, etc.) is earned, not assumed.
 **Also out of scope for Phase 0:** No swarm. No emergent ontology. No consolidation. The Salience-Router-Swarm pipeline from §6 is built as a single linear pass; later phases progressively fan it out.
@@ -396,7 +403,7 @@ Every self-modification is itself an event in the substrate. The full history of
   (d) **Surprise-triggered consolidation** — currently only daily. Add a trigger when cumulative surprise from recall queries exceeds threshold, indicating the user's working context has drifted enough that re-abstraction is warranted.
 
 ### Phase 4 — Emergent Ontology + Active Inference Salience
-**Capability gate:** Categories I never explicitly defined appear in `list_context` and feel correct, AND the Salience agent switches modes based on substrate-side surprise rather than engineered heuristics.
+**Capability gate:** Categories I never explicitly defined appear in `recall(stats=True)` (and in the broader system's grouping) and feel correct, AND the Salience agent switches modes based on substrate-side surprise rather than engineered heuristics.
 **Ships:**
 - Schema-Evolver, ontology versioning, emergent category bootstrapping from substrate patterns (the Emergent-Ontology track, binding I6).
 - Active-Inference Salience: recall returns a surprise score per hit (specific metric TBD — KL-divergence between expected and observed result distributions is one candidate). The Salience agent uses cumulative surprise to decide when to switch from CEN-mode (exploitation of current task) to DMN-mode (re-indexing, consolidation, exploration). Surprise above threshold triggers an `observe()` event automatically — the system journals its own moments of being-wrong, the substrate for recursive self-improvement (I7).

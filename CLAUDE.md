@@ -16,9 +16,12 @@
 - Substrate layer (`neverforget/substrate/`) — append-only SQLite + FTS5 +
   filesystem object store; events table is STRICT-mode with UPDATE/DELETE
   triggers enforcing I2 at the DB level
-- MCP server (`neverforget/mcp/`) — four v1 tools (remember/recall/list_context/
-  observe) over Streamable HTTP, with AI-facing tool descriptions, /health
-  endpoint, and binary-via-base64 + 10 MB cap in `remember`
+- MCP server (`neverforget/mcp/`) — three v1 tools (remember/recall/observe)
+  over Streamable HTTP, surface frozen 2026-05-26. `recall` is the single
+  retrieval verb (survey, by-id, full-payload modes are kwargs);
+  `remember(..., invalidates=[...])` supersedes prior facts. AI-facing
+  tool descriptions, /health endpoint, binary-via-base64 + 10 MB cap in
+  `remember`.
 - Extractor agent (`neverforget/agents/`) — warm-path LLM extraction via
   litellm; default `anthropic/claude-haiku-4-5`; failed extractions stored
   as `status: failed` rows for retry/diagnosis

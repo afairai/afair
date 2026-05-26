@@ -53,8 +53,7 @@ Then ask:
 
 > Use the neverforget MCP server to list the tools available.
 
-Expected: four tools listed — `remember`, `recall`, `list_context`,
-`observe`.
+Expected: three tools listed — `remember`, `recall`, `observe`.
 
 Now exercise the round-trip:
 
