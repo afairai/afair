@@ -52,9 +52,13 @@ from ..substrate import (
     build_binary_payload,
     build_text_payload,
     iter_events,
+    read_edges_by_source_event_ids,
+    read_entities_batch,
     read_event_by_hash,
     read_event_by_id,
+    read_mentions_batch,
     read_object,
+    resolve_canonical_batch,
     rrf_merge,
     search_fts,
     search_vec,
@@ -223,10 +227,17 @@ def _event_to_hit(
     full_payload: bool,
     invalidation: InvalidationInfo | None = None,
     conflicts: list[dict[str, Any]] | None = None,
+    entity_overlay: dict[str, Any] | None = None,
 ) -> RecallHit:
     """Build one RecallHit. When ``full_payload`` is True the payload is
     materialized in full (text-large blobs read back from the object
-    store); when False, the payload is the truncated summary view."""
+    store); when False, the payload is the truncated summary view.
+
+    ``entity_overlay`` carries the Phase 4 Track 1 enrichment —
+    pre-computed ``canonical_entities`` + ``entity_edges`` for this
+    event's content_hash. The recall handler batch-fetches these once
+    per call and threads the per-event slice in here, so this function
+    stays I/O-free besides interpretation + bind reads."""
     if full_payload:
         ctx = get_context()
         payload_view = _materialize_full_payload(event.payload, ctx.vault_dir)
@@ -239,6 +250,17 @@ def _event_to_hit(
     interpretation: dict[str, Any] | None = (
         _interpretation_summary(interp.extraction) if interp is not None else None
     )
+    # Layer in canonical entities + edges. We keep them inside the
+    # ``interpretation`` dict so no new RecallHit fields are needed (the
+    # surface freeze from 2026-05-26 stays intact — Phase 4 enrichment is
+    # additive within an existing dict shape).
+    if entity_overlay:
+        if interpretation is None:
+            interpretation = {}
+        for key, value in entity_overlay.items():
+            if value:
+                interpretation[key] = value
+
     conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
         event_id=event.id,
@@ -254,6 +276,102 @@ def _event_to_hit(
         invalidation=_invalidation_to_summary(invalidation),
         conflicts=conflict_flags,
     )
+
+
+def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, Any]]:
+    """For every event in ``events``, compute the per-hit entity overlay.
+
+    Three batched reads (one per logical concern):
+      1. mentions per event_hash
+      2. canonical-entity rows for every mentioned entity_id, resolved
+         through the merge chain so superseded entities surface as their
+         current canonical (decision #6)
+      3. edges sourced from every event_id, filtered to non-invalidated
+         (decision #6 again — hide superseded by default)
+
+    Returns ``{content_hash → {canonical_entities, entity_edges}}``.
+    Events with neither mentions nor edges are absent from the result;
+    the caller treats that as "no overlay" and leaves interpretation as-is.
+    """
+    if not events:
+        return {}
+
+    event_hashes = [e.content_hash for e in events]
+    event_ids = [e.id for e in events]
+
+    mentions_by_hash = read_mentions_batch(db, event_hashes)
+    edges_by_event_id = read_edges_by_source_event_ids(db, event_ids)
+
+    if not mentions_by_hash and not edges_by_event_id:
+        return {}
+
+    # Gather every raw entity_id referenced, then resolve through merges
+    # and bulk-fetch the resolved canonicals in one query.
+    raw_ids: set[str] = set()
+    for mentions in mentions_by_hash.values():
+        for m in mentions:
+            raw_ids.add(m.entity_id)
+    for edges in edges_by_event_id.values():
+        for e in edges:
+            raw_ids.add(e.subject_id)
+            raw_ids.add(e.object_id)
+
+    resolved_map = resolve_canonical_batch(db, list(raw_ids))
+    canonical_entities = read_entities_batch(db, list(set(resolved_map.values())))
+
+    overlay: dict[str, dict[str, Any]] = {}
+    for content_hash, mentions in mentions_by_hash.items():
+        # Dedupe canonical entities — multiple surface forms can map to
+        # one canonical (e.g., "Sajinth" + "Saji" both → same entity).
+        seen: set[str] = set()
+        ents: list[dict[str, Any]] = []
+        for m in mentions:
+            canonical_id = resolved_map.get(m.entity_id, m.entity_id)
+            if canonical_id in seen:
+                continue
+            seen.add(canonical_id)
+            entity = canonical_entities.get(canonical_id)
+            if entity is None:
+                continue
+            ents.append(
+                {
+                    "id": entity.id,
+                    "canonical_name": entity.canonical_name,
+                    "kind": entity.kind,
+                    "surface_form": m.surface_form,
+                    "match_method": m.match_method,
+                }
+            )
+        if ents:
+            overlay.setdefault(content_hash, {})["canonical_entities"] = ents
+
+    # Attach edges keyed by content_hash via event_id reverse-map.
+    event_id_to_hash = {e.id: e.content_hash for e in events}
+    for source_event_id, edges in edges_by_event_id.items():
+        edge_content_hash = event_id_to_hash.get(source_event_id)
+        if edge_content_hash is None:
+            continue
+        edge_views: list[dict[str, Any]] = []
+        for edge in edges:
+            subj_canonical = canonical_entities.get(
+                resolved_map.get(edge.subject_id, edge.subject_id)
+            )
+            obj_canonical = canonical_entities.get(resolved_map.get(edge.object_id, edge.object_id))
+            if subj_canonical is None or obj_canonical is None:
+                continue
+            edge_views.append(
+                {
+                    "subject": subj_canonical.canonical_name,
+                    "predicate": edge.predicate,
+                    "object": obj_canonical.canonical_name,
+                    "valid_from": edge.valid_from,
+                    "valid_to": edge.valid_to,
+                }
+            )
+        if edge_views:
+            overlay.setdefault(edge_content_hash, {})["entity_edges"] = edge_views
+
+    return overlay
 
 
 def _attach_invalidations(events: list[Event], db: Any) -> dict[str, InvalidationInfo]:
@@ -475,6 +593,7 @@ def recall(
             )
         invalidations = _attach_invalidations([target], db)
         conflicts = _attach_conflicts([target], db)
+        overlay = _build_entity_overlay([target], db)
         return RecallResult(
             hits=[
                 _event_to_hit(
@@ -483,6 +602,7 @@ def recall(
                     full_payload=True,  # lookup-by-id always returns the full event
                     invalidation=invalidations.get(target.content_hash),
                     conflicts=conflicts.get(target.content_hash),
+                    entity_overlay=overlay.get(target.content_hash),
                 )
             ],
             depth_used="shallow",
@@ -530,6 +650,7 @@ def recall(
 
     invalidations = _attach_invalidations(events, db)
     conflicts = _attach_conflicts(events, db)
+    overlay = _build_entity_overlay(events, db)
     return RecallResult(
         hits=[
             _event_to_hit(
@@ -538,6 +659,7 @@ def recall(
                 full_payload=full_payload,
                 invalidation=invalidations.get(e.content_hash),
                 conflicts=conflicts.get(e.content_hash),
+                entity_overlay=overlay.get(e.content_hash),
             )
             for e in events
         ],
