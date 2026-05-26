@@ -128,6 +128,183 @@ SCHEMA_DDL: tuple[str, ...] = (
         created_at            TEXT NOT NULL
     ) STRICT
     """,
+    # ── Phase 4 Track 1: Emergent Entity Graph (I6 — Emergent over Imposed) ─
+    # All five tables below are STRICT append-only per I2 — no mutable
+    # columns. Supersession (entity merges) and edge invalidation are
+    # represented as additional rows in dedicated lookup tables, never as
+    # in-place updates. Identity is content-derived so a rebuild from
+    # substrate is deterministic. Added 2026-05-26; pre-existing rows in
+    # events/interpretations are unaffected (I3 — old data stays readable).
+    #
+    # entity-id scheme: ``entity:<sha256(lowercase(canonical_name)|kind)>``
+    # gives reproducible IDs across rebuilds from substrate.
+    """
+    CREATE TABLE IF NOT EXISTS entities (
+        id              TEXT PRIMARY KEY,
+        canonical_name  TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        created_by      TEXT NOT NULL,
+        confidence      REAL NOT NULL,
+        source_event_id TEXT NOT NULL REFERENCES events(id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entities_kind_canonical_idx ON entities(kind, canonical_name)",
+    "CREATE INDEX IF NOT EXISTS entities_canonical_idx ON entities(canonical_name)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entities_no_update
+    BEFORE UPDATE ON entities
+    BEGIN
+        SELECT RAISE(ABORT, 'entities is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entities_no_delete
+    BEFORE DELETE ON entities
+    BEGIN
+        SELECT RAISE(ABORT, 'entities is append-only (Invariant I2)');
+    END
+    """,
+    # ── entity_mentions: one row per (event, surface form → entity) ─────────
+    # The link from a raw event to a canonical entity. UNIQUE constraint
+    # makes the canonicalizer idempotent — re-running on the same event
+    # is a no-op rather than a duplicate-row write.
+    """
+    CREATE TABLE IF NOT EXISTS entity_mentions (
+        id                  TEXT PRIMARY KEY,
+        entity_id           TEXT NOT NULL REFERENCES entities(id),
+        event_id            TEXT NOT NULL REFERENCES events(id),
+        event_hash          TEXT NOT NULL,
+        surface_form        TEXT NOT NULL,
+        canonicalized_at    TEXT NOT NULL,
+        canonicalized_by    TEXT NOT NULL,
+        match_method        TEXT NOT NULL,
+        confidence          REAL NOT NULL,
+        UNIQUE(entity_id, event_id, surface_form)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_mentions_event_idx ON entity_mentions(event_id)",
+    "CREATE INDEX IF NOT EXISTS entity_mentions_event_hash_idx ON entity_mentions(event_hash)",
+    "CREATE INDEX IF NOT EXISTS entity_mentions_entity_idx ON entity_mentions(entity_id)",
+    "CREATE INDEX IF NOT EXISTS entity_mentions_surface_idx ON entity_mentions(surface_form)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_mentions_no_update
+    BEFORE UPDATE ON entity_mentions
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_mentions is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_mentions_no_delete
+    BEFORE DELETE ON entity_mentions
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_mentions is append-only (Invariant I2)');
+    END
+    """,
+    # ── entity_edges: subject-predicate-object triples between entities ─────
+    # Bi-temporal: valid_from/valid_to track when the fact was true (NULL
+    # valid_to = open-ended, still believed true). discovered_at is OUR
+    # timeline (when we learned it). Edge-invalidation lives in its own
+    # table so the substrate stays append-only.
+    """
+    CREATE TABLE IF NOT EXISTS entity_edges (
+        id              TEXT PRIMARY KEY,
+        subject_id      TEXT NOT NULL REFERENCES entities(id),
+        predicate       TEXT NOT NULL,
+        object_id       TEXT NOT NULL REFERENCES entities(id),
+        valid_from      TEXT,
+        valid_to        TEXT,
+        discovered_at   TEXT NOT NULL,
+        discovered_by   TEXT NOT NULL,
+        source_event_id TEXT NOT NULL REFERENCES events(id),
+        confidence      REAL NOT NULL,
+        UNIQUE(subject_id, predicate, object_id, source_event_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_edges_subject_idx ON entity_edges(subject_id)",
+    "CREATE INDEX IF NOT EXISTS entity_edges_object_idx ON entity_edges(object_id)",
+    "CREATE INDEX IF NOT EXISTS entity_edges_source_event_idx ON entity_edges(source_event_id)",
+    "CREATE INDEX IF NOT EXISTS entity_edges_predicate_idx ON entity_edges(predicate)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_edges_no_update
+    BEFORE UPDATE ON entity_edges
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_edges is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_edges_no_delete
+    BEFORE DELETE ON entity_edges
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_edges is append-only (Invariant I2)');
+    END
+    """,
+    # ── entity_merges: when canonicalizer realizes two entities are one ─────
+    # "Sajinth" was first canonicalized as kind=person from the elvah
+    # context, later evidence shows it's the same Sajinth in the Athara
+    # context — write a merge row pointing from_entity_id → into_entity_id.
+    # The "current canonical" for any entity is the transitive closure
+    # through this table; reads compose the view at query time.
+    """
+    CREATE TABLE IF NOT EXISTS entity_merges (
+        id              TEXT PRIMARY KEY,
+        from_entity_id  TEXT NOT NULL REFERENCES entities(id),
+        into_entity_id  TEXT NOT NULL REFERENCES entities(id),
+        merged_at       TEXT NOT NULL,
+        merged_by       TEXT NOT NULL,
+        reason          TEXT NOT NULL,
+        confidence      REAL NOT NULL,
+        CHECK (from_entity_id != into_entity_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_merges_from_idx ON entity_merges(from_entity_id)",
+    "CREATE INDEX IF NOT EXISTS entity_merges_into_idx ON entity_merges(into_entity_id)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_merges_no_update
+    BEFORE UPDATE ON entity_merges
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_merges is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_merges_no_delete
+    BEFORE DELETE ON entity_merges
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_merges is append-only (Invariant I2)');
+    END
+    """,
+    # ── edge_invalidations: when an entity_edge is later superseded ─────────
+    # Cascade target from remember(..., invalidates=[hash]): when the
+    # source event of an edge is invalidated, the edge gets its own
+    # invalidation row referencing that event. Bi-temporal: valid_to on
+    # the edge itself can also mark "the fact stopped being true on date
+    # X" without a downstream invalidate event.
+    """
+    CREATE TABLE IF NOT EXISTS edge_invalidations (
+        id                TEXT PRIMARY KEY,
+        edge_id           TEXT NOT NULL REFERENCES entity_edges(id),
+        invalidated_at    TEXT NOT NULL,
+        invalidated_by    TEXT NOT NULL,
+        reason            TEXT NOT NULL,
+        source_event_id   TEXT REFERENCES events(id),
+        UNIQUE(edge_id, source_event_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS edge_invalidations_edge_idx ON edge_invalidations(edge_id)",
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_invalidations_no_update
+    BEFORE UPDATE ON edge_invalidations
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_invalidations is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_invalidations_no_delete
+    BEFORE DELETE ON edge_invalidations
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_invalidations is append-only (Invariant I2)');
+    END
+    """,
 )
 
 
