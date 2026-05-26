@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.agents import entity_canonicalizer as ec
-from neverforget.agents.entity_canonicalizer import EntityCanonicalizer
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.agents.llm import LLMResult
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.settings import Settings
-from neverforget.substrate import open_db, write_event
+from afair.agents import entity_canonicalizer as ec
+from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.agents.interpretation import write_interpretation
+from afair.agents.llm import LLMResult
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.settings import Settings
+from afair.substrate import open_db, write_event
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -51,7 +51,7 @@ def ctx(tmp_path: Path) -> Iterator[ServerContext]:
 
 @pytest.fixture(autouse=True)
 def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", lambda _id: None)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", lambda _id: None)
 
 
 @pytest.fixture(autouse=True)

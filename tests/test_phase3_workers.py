@@ -8,20 +8,20 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from neverforget.agents.binder import BINDER_PRODUCED_BY
-from neverforget.agents.conflict_resolver import (
+from afair.agents.binder import BINDER_PRODUCED_BY
+from afair.agents.conflict_resolver import (
     ConflictResolver,
 )
-from neverforget.agents.consolidator import (
+from afair.agents.consolidator import (
     CONSOLIDATION_KIND,
     Consolidator,
 )
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.agents.invalidation import write_invalidation
-from neverforget.agents.llm import LLMResult
-from neverforget.agents.pruner import Pruner
-from neverforget.settings import Settings
-from neverforget.substrate import open_db, write_event
+from afair.agents.interpretation import write_interpretation
+from afair.agents.invalidation import write_invalidation
+from afair.agents.llm import LLMResult
+from afair.agents.pruner import Pruner
+from afair.settings import Settings
+from afair.substrate import open_db, write_event
 
 if TYPE_CHECKING:
     import sqlite3
@@ -129,7 +129,7 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
             raw="",
         )
 
-    monkeypatch.setattr("neverforget.agents.conflict_resolver.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.conflict_resolver.call_tool", fake_call)
 
     stats = ConflictResolver().run(db, settings_local)
     assert stats["pairs_examined"] == 1
@@ -161,7 +161,7 @@ def test_conflict_resolver_skips_already_judged_pairs(
             data={"verdict": "compatible", "reason": "x", "confidence": 0.7}, model="m", raw=""
         )
 
-    monkeypatch.setattr("neverforget.agents.conflict_resolver.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.conflict_resolver.call_tool", fake_call)
 
     ConflictResolver().run(db, settings_local)
     ConflictResolver().run(db, settings_local)
@@ -195,7 +195,7 @@ def test_conflict_resolver_skips_invalidate_events(
             data={"verdict": "contradicts", "reason": "x", "confidence": 0.9}, model="m", raw=""
         )
 
-    monkeypatch.setattr("neverforget.agents.conflict_resolver.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.conflict_resolver.call_tool", fake_call)
 
     stats = ConflictResolver().run(db, settings_local)
     assert stats["pairs_examined"] == 0
@@ -215,7 +215,7 @@ def test_consolidator_skips_day_below_min_threshold(
         msg = "consolidator should not have called the LLM"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("neverforget.agents.consolidator.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call)
 
     stats = Consolidator().run(db, settings_local)
     assert stats["days_consolidated"] == 0
@@ -246,7 +246,7 @@ def test_consolidator_writes_consolidation_event_for_full_day(
             raw="",
         )
 
-    monkeypatch.setattr("neverforget.agents.consolidator.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call)
 
     stats = Consolidator().run(db, settings_local)
     assert stats["days_consolidated"] >= 1
@@ -275,7 +275,7 @@ def test_consolidator_idempotent_skips_already_consolidated_days(
             data={"narrative": "x", "themes": ["t"], "open_threads": []}, model="m", raw=""
         )
 
-    monkeypatch.setattr("neverforget.agents.consolidator.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call)
 
     Consolidator().run(db, settings_local)
     Consolidator().run(db, settings_local)
@@ -303,13 +303,13 @@ def test_consolidator_does_not_consume_its_own_output(
             data={"narrative": "n", "themes": ["t"], "open_threads": []}, model="m", raw=""
         )
 
-    monkeypatch.setattr("neverforget.agents.consolidator.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call)
 
     Consolidator().run(db, settings_local)
     # Use _events_for_day directly to confirm the consolidation is excluded.
     from datetime import UTC, datetime
 
-    from neverforget.agents.consolidator import _events_for_day
+    from afair.agents.consolidator import _events_for_day
 
     events = _events_for_day(db, datetime.now(UTC).date())
     kinds = {e.kind for e in events}

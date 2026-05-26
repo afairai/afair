@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Install the neverforget MCP server into every detected MCP client.
+"""Install the afair MCP server into every detected MCP client.
 
 Detects and configures (only when the client looks installed):
 
   - Claude Code  → ~/.claude/settings.json + ~/.claude/CLAUDE.md
   - Codex CLI    → ~/.codex/config.toml    + ~/.codex/AGENTS.md
-  - Cursor       → ~/.cursor/mcp.json      + ~/.cursor/rules/neverforget.md
+  - Cursor       → ~/.cursor/mcp.json      + ~/.cursor/rules/afair.md
   - Claude.ai    → UI only; prints manual steps
 
-Idempotent: running again replaces the existing neverforget entry and does
+Idempotent: running again replaces the existing afair entry and does
 not duplicate the instruction snippet. Always backs up any file it changes
 to ``<path>.bak.<timestamp>`` so revert is one ``mv`` away.
 
@@ -32,12 +32,12 @@ from typing import Any
 
 # ── config ──────────────────────────────────────────────────────────────────
 
-SERVER_NAME = "neverforget"
-DEFAULT_URL = "https://neverforget.fly.dev/mcp"
+SERVER_NAME = "afair"
+DEFAULT_URL = "https://afair.fly.dev/mcp"
 
-SNIPPET_MARKER = "## neverforget MCP"
+SNIPPET_MARKER = "## afair MCP"
 SNIPPET_BODY = """\
-You have access to a `neverforget` MCP server providing persistent memory
+You have access to a `afair` MCP server providing persistent memory
 across sessions, AI clients, and devices. Use it daily:
 
 1. **Before answering** questions that benefit from history (preferences,
@@ -122,12 +122,9 @@ def _load_token() -> str:
     env_local = Path(".env.local")
     if env_local.exists():
         for line in env_local.read_text().splitlines():
-            if line.startswith("NEVERFORGET_AUTH_TOKEN="):
+            if line.startswith("AFAIR_AUTH_TOKEN="):
                 return line.split("=", 1)[1].strip()
-    msg = (
-        "could not find token. Set TOKEN env var, or ensure .env.local "
-        "has NEVERFORGET_AUTH_TOKEN=..."
-    )
+    msg = "could not find token. Set TOKEN env var, or ensure .env.local has AFAIR_AUTH_TOKEN=..."
     raise SystemExit(msg)
 
 
@@ -143,7 +140,7 @@ def _append_snippet_if_missing(
     block = f"\n\n{SNIPPET_MARKER}\n\n{SNIPPET_BODY}\n"
     if not indent_under_h2:
         # For .cursorrules (no Markdown headers convention), drop the H2 line
-        block = "\n\n# neverforget MCP\n\n" + SNIPPET_BODY + "\n"
+        block = "\n\n# afair MCP\n\n" + SNIPPET_BODY + "\n"
     if dry:
         return Change("snippet", path, "would append")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,35 +221,35 @@ def _install_session_start_hook(*, token: str, url: str, dry: bool) -> list[Chan
     auto-loads a vault summary into every new Claude Code session so the
     AI starts each session aware of what's in the vault.
 
-    Also writes ``~/.neverforget.env`` with the URL + token so the hook
+    Also writes ``~/.afair.env`` with the URL + token so the hook
     can read them without leaking secrets into shell rc files. The env
     file is chmod 600.
     """
     repo_root = Path(__file__).resolve().parent.parent
     hook_script = repo_root / "scripts" / "claude_code_hooks" / "session_start.py"
     settings_path = Path.home() / ".claude" / "settings.json"
-    env_path = Path.home() / ".neverforget.env"
+    env_path = Path.home() / ".afair.env"
     changes: list[Change] = []
 
     if not hook_script.exists():
         _err(f"Claude Code hook: script not found at {hook_script}")
         return changes
 
-    # 1) write ~/.neverforget.env (gitignored, chmod 600)
-    env_content = f"NEVERFORGET_URL={url}\nNEVERFORGET_AUTH_TOKEN={token}\n"
+    # 1) write ~/.afair.env (gitignored, chmod 600)
+    env_content = f"AFAIR_URL={url}\nAFAIR_AUTH_TOKEN={token}\n"
     if not (env_path.exists() and env_path.read_text() == env_content):
         backup = _backup(env_path, dry)
         if not dry:
             env_path.write_text(env_content)
             env_path.chmod(0o600)
         action = "would write" if dry else "wrote"
-        msg = f"Claude Code: {action} ~/.neverforget.env (chmod 600)"
+        msg = f"Claude Code: {action} ~/.afair.env (chmod 600)"
         if backup:
             msg += f" (backup: {backup.name})"
         _ok(msg)
         changes.append(Change("env", env_path, action))
     else:
-        _ok("Claude Code: ~/.neverforget.env already up to date")
+        _ok("Claude Code: ~/.afair.env already up to date")
 
     # 2) register the SessionStart hook
     settings: dict[str, Any] = {}
@@ -356,7 +353,7 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
 
 def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
     mcp_path = Path.home() / ".cursor" / "mcp.json"
-    rule_path = Path.home() / ".cursor" / "rules" / "neverforget.md"
+    rule_path = Path.home() / ".cursor" / "rules" / "afair.md"
 
     cursor_app = Path("/Applications/Cursor.app")
     if not mcp_path.parent.exists() and not cursor_app.exists():
@@ -431,7 +428,7 @@ def print_claude_ai_instructions(url: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Install neverforget MCP server config into detected clients."
+        description="Install afair MCP server config into detected clients."
     )
     parser.add_argument(
         "--dry-run",
@@ -445,7 +442,7 @@ def main() -> int:
     dry = bool(args.dry_run)
 
     mode = f"{YELLOW}DRY RUN{RESET}" if dry else f"{GREEN}APPLY{RESET}"
-    print(f"=== neverforget client installer ({mode}) ===")
+    print(f"=== afair client installer ({mode}) ===")
     print(f"  url:   {url}")
     print(f"  token: {DIM}from .env.local / TOKEN env (not echoed){RESET}")
     print()

@@ -7,7 +7,7 @@ that Claude Code parses as ``hookSpecificOutput.additionalContext``.
 
 These tests exercise the script as a subprocess so the actual stdout
 contract is verified end-to-end. Network is mocked by pointing
-NEVERFORGET_URL at a tiny local HTTP server we spin up here.
+AFAIR_URL at a tiny local HTTP server we spin up here.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def _fake_server() -> Iterator[str]:
 def _run_hook(env_extra: dict[str, str], stdin: str = "{}") -> dict:
     """Invoke the hook script as a subprocess; parse its JSON stdout."""
     # HOME defaults to a non-existent path so the file-fallback discovery
-    # ('~/.neverforget.env') doesn't pick up the developer's real config.
+    # ('~/.afair.env') doesn't pick up the developer's real config.
     # Tests that exercise the file path explicitly override HOME.
     env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home-for-hook-tests", **env_extra}
     proc = subprocess.run(
@@ -149,7 +149,7 @@ def test_hook_emits_valid_json_when_no_token_present() -> None:
     """Without credentials the hook MUST still emit valid JSON so Claude
     Code doesn't log a parse error. The session continues without any
     vault context."""
-    out = _run_hook(env_extra={})  # no NEVERFORGET_AUTH_TOKEN
+    out = _run_hook(env_extra={})  # no AFAIR_AUTH_TOKEN
     assert out == {"continue": True}
 
 
@@ -159,8 +159,8 @@ def test_hook_emits_valid_json_when_server_unreachable() -> None:
     layer is down."""
     out = _run_hook(
         env_extra={
-            "NEVERFORGET_URL": "http://127.0.0.1:1/mcp",  # connection refused
-            "NEVERFORGET_AUTH_TOKEN": "anything",
+            "AFAIR_URL": "http://127.0.0.1:1/mcp",  # connection refused
+            "AFAIR_AUTH_TOKEN": "anything",
         }
     )
     assert out == {"continue": True}
@@ -172,7 +172,7 @@ def test_hook_returns_additional_context_with_vault_summary() -> None:
     markdown brief that the AI will see as part of the session prompt."""
     _FakeMCP.response_for = {}  # use default response
     with _fake_server() as url:
-        out = _run_hook(env_extra={"NEVERFORGET_URL": url, "NEVERFORGET_AUTH_TOKEN": "tok"})
+        out = _run_hook(env_extra={"AFAIR_URL": url, "AFAIR_AUTH_TOKEN": "tok"})
     assert out["continue"] is True
     hook_out = out["hookSpecificOutput"]
     assert hook_out["hookEventName"] == "SessionStart"
@@ -201,7 +201,7 @@ def test_hook_skips_when_vault_is_empty() -> None:
     }
     try:
         with _fake_server() as url:
-            out = _run_hook(env_extra={"NEVERFORGET_URL": url, "NEVERFORGET_AUTH_TOKEN": "tok"})
+            out = _run_hook(env_extra={"AFAIR_URL": url, "AFAIR_AUTH_TOKEN": "tok"})
     finally:
         _FakeMCP.response_for = {}
     assert out == {"continue": True}
@@ -243,7 +243,7 @@ def test_hook_marks_invalidated_events_in_summary() -> None:
     }
     try:
         with _fake_server() as url:
-            out = _run_hook(env_extra={"NEVERFORGET_URL": url, "NEVERFORGET_AUTH_TOKEN": "tok"})
+            out = _run_hook(env_extra={"AFAIR_URL": url, "AFAIR_AUTH_TOKEN": "tok"})
     finally:
         _FakeMCP.response_for = {}
     ctx = out["hookSpecificOutput"]["additionalContext"]
@@ -251,13 +251,13 @@ def test_hook_marks_invalidated_events_in_summary() -> None:
     assert "(invalidated)" in ctx
 
 
-def test_hook_reads_token_from_neverforget_env_file(tmp_path: Path) -> None:
+def test_hook_reads_token_from_afair_env_file(tmp_path: Path) -> None:
     """Fallback path — when env vars are missing, hook reads
-    ~/.neverforget.env (the file the installer writes). We override
+    ~/.afair.env (the file the installer writes). We override
     HOME to a temp dir to keep the test hermetic."""
-    config = tmp_path / ".neverforget.env"
+    config = tmp_path / ".afair.env"
     with _fake_server() as url:
-        config.write_text(f"NEVERFORGET_URL={url}\nNEVERFORGET_AUTH_TOKEN=tok\n")
+        config.write_text(f"AFAIR_URL={url}\nAFAIR_AUTH_TOKEN=tok\n")
         out = _run_hook(env_extra={"HOME": str(tmp_path)})
     assert out["continue"] is True
     assert "Vault context" in out["hookSpecificOutput"]["additionalContext"]

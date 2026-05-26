@@ -23,24 +23,24 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from neverforget.agents import entity_canonicalizer as ec
-from neverforget.agents.entity_canonicalizer import (
+from afair.agents import entity_canonicalizer as ec
+from afair.agents.entity_canonicalizer import (
     CANONICALIZER_PRODUCED_BY,
     CASCADE_PRODUCED_BY,
     EntityCanonicalizer,
 )
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.agents.invalidation import write_invalidation
-from neverforget.agents.llm import LLMError, LLMResult
-from neverforget.settings import Settings
-from neverforget.substrate import (
+from afair.agents.interpretation import write_interpretation
+from afair.agents.invalidation import write_invalidation
+from afair.agents.llm import LLMError, LLMResult
+from afair.settings import Settings
+from afair.substrate import (
     iter_edges_for_entity,
     iter_mentions_for_event,
     open_db,
     read_edge_invalidations,
     write_event,
 )
-from neverforget.substrate.entities import find_edges_for_source_event
+from afair.substrate.entities import find_edges_for_source_event
 
 if TYPE_CHECKING:
     import sqlite3

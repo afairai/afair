@@ -8,16 +8,16 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.handlers import InvalidRecallArgsError
-from neverforget.mcp.schemas import (
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.mcp.handlers import InvalidRecallArgsError
+from afair.mcp.schemas import (
     MAX_REMEMBER_BYTES,
     BinaryContent,
     ObserveEvent,
     TextContent,
 )
-from neverforget.substrate import open_db
+from afair.substrate import open_db
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -32,7 +32,7 @@ def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     in CI. The extractor itself is tested separately in test_extractor.py.
     """
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         lambda _event_id: None,
     )
 
@@ -130,7 +130,7 @@ def test_remember_binary_basic(ctx: ServerContext) -> None:
     assert p["filename_hint"] == "screenshot.png"
     assert p["blob_hash"].startswith("sha256:")
     # Blob is reachable from disk via the substrate's object store.
-    from neverforget.substrate import read_object
+    from afair.substrate import read_object
 
     assert read_object(ctx.vault_dir, p["blob_hash"]) == raw
 
@@ -210,8 +210,8 @@ def test_recall_normal_depth_with_mocked_embedding_uses_hybrid(
 ) -> None:
     """When semantic_recall is enabled and the embedding API works, normal
     depth runs the hybrid FTS+vector pipeline and surfaces depth_used=normal."""
-    from neverforget.mcp.context import ServerContext as SC
-    from neverforget.mcp.context import set_context
+    from afair.mcp.context import ServerContext as SC
+    from afair.mcp.context import set_context
 
     # Replace context with one that has semantic_recall enabled
     set_context(
@@ -227,7 +227,7 @@ def test_recall_normal_depth_with_mocked_embedding_uses_hybrid(
     # Mock the embedding call to return a 1536-dim zero vector.
     # handlers.recall uses embed_query (the cached variant) since 2026-05-25.
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.embed_query",
+        "afair.mcp.handlers.embed_query",
         lambda **_: [0.0] * 1536,
     )
 
@@ -329,7 +329,7 @@ def test_observe_preserves_extra_fields(ctx: ServerContext) -> None:
     event = ObserveEvent.model_validate(
         {
             "action": "deployed",
-            "subject": "neverforget-prod",
+            "subject": "afair-prod",
             "result": "v0.1.3",
             "duration_s": 47,
             "branch": "main",

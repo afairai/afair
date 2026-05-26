@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.substrate import (
+from afair.substrate import (
     Event,
     build_binary_payload,
     build_text_payload,

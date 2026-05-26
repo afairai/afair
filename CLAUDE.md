@@ -1,4 +1,4 @@
-# Project memory — neverforget
+# Project memory — afair
 
 > Read `VISION.md` first. It is the operating constitution. The invariants in §4 are inviolable.
 > This file is for project-specific working rules that complement (never override) the constitution.
@@ -13,16 +13,16 @@
 
 - VISION.md (the constitution)
 - Repo scaffold: pyproject.toml, Dockerfile, fly.toml, .env templates, CLAUDE.md
-- Substrate layer (`neverforget/substrate/`) — append-only SQLite + FTS5 +
+- Substrate layer (`afair/substrate/`) — append-only SQLite + FTS5 +
   filesystem object store; events table is STRICT-mode with UPDATE/DELETE
   triggers enforcing I2 at the DB level
-- MCP server (`neverforget/mcp/`) — three v1 tools (remember/recall/observe)
+- MCP server (`afair/mcp/`) — three v1 tools (remember/recall/observe)
   over Streamable HTTP, surface frozen 2026-05-26. `recall` is the single
   retrieval verb (survey, by-id, full-payload modes are kwargs);
   `remember(..., invalidates=[...])` supersedes prior facts. AI-facing
   tool descriptions, /health endpoint, binary-via-base64 + 10 MB cap in
   `remember`.
-- Extractor agent (`neverforget/agents/`) — warm-path LLM extraction via
+- Extractor agent (`afair/agents/`) — warm-path LLM extraction via
   litellm; default `anthropic/claude-haiku-4-5`; failed extractions stored
   as `status: failed` rows for retry/diagnosis
 - **Phase 4 Track 1 Emergent Entity Graph** — five append-only substrate
@@ -38,7 +38,7 @@
   the recent context window (last N events, default 20, configurable via
   `SURPRISE_CONTEXT_WINDOW`). Plus `surprise_components` audit dict.
   Mode-switching agent (Phase 2 dependency) still deferred.
-- **Fly deployment live at https://neverforget.fly.dev** — single-tenant
+- **Fly deployment live at https://afair.fly.dev** — single-tenant
   machine in `fra`, 1 GB volume `vault` with 5-day auto-snapshots,
   `strategy = "immediate"`, `min_machines_running = 1`
 - **GitHub Actions deploy pipeline** at `.github/workflows/deploy.yml` —
@@ -59,12 +59,12 @@
 
 ## 1. Codename and renaming discipline
 
-`neverforget` is the **codename**. Final product name is deferred to Phase 6–7 (see VISION.md §15).
+`afair` is the **codename**. Final product name is deferred to Phase 6–7 (see VISION.md §15).
 
 **Rule for code:** keep external surface configurable so the rename touches metadata, not prose.
 
-- Internal Python imports are **relative** (`from . import substrate`), never `from neverforget.substrate import ...`.
-- The package directory `neverforget/` is fine — it's one mechanical rename when the time comes.
+- Internal Python imports are **relative** (`from . import substrate`), never `from afair.substrate import ...`.
+- The package directory `afair/` is fine — it's one mechanical rename when the time comes.
 - Avoid hardcoding the codename in docstrings, log messages, error strings, README body text. Write generically.
 - The MCP server name surface (visible to clients), Fly app name, Docker image, repo name — keep the codename for now, accept that renaming these means a one-shot find-replace + redeploy.
 
@@ -164,9 +164,9 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 
 ## 6. Path-scoped rules (when added)
 
-- `neverforget/substrate/` — see `.claude/rules/substrate.md` (forthcoming, task #2)
-- `neverforget/mcp/` — see `.claude/rules/mcp.md` (forthcoming, task #3)
-- `neverforget/agents/` — see `.claude/rules/agents.md` (forthcoming, task #4)
+- `afair/substrate/` — see `.claude/rules/substrate.md` (forthcoming, task #2)
+- `afair/mcp/` — see `.claude/rules/mcp.md` (forthcoming, task #3)
+- `afair/agents/` — see `.claude/rules/agents.md` (forthcoming, task #4)
 
 ## 7. Quick commands
 
@@ -175,20 +175,20 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 uv sync
 
 # run server locally
-uv run python -m neverforget
+uv run python -m afair
 
 # run tests
 uv run pytest
 
 # type check
-uv run mypy neverforget
+uv run mypy afair
 
 # lint
 uv run ruff check
 uv run ruff format
 
 # build docker image
-docker build -t neverforget .
+docker build -t afair .
 
 # deploy to Fly (after fly.toml is configured)
 fly deploy

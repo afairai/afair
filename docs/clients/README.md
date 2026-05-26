@@ -1,10 +1,10 @@
 # MCP client integration
 
-Connect any MCP-speaking AI client to the deployed neverforget server.
+Connect any MCP-speaking AI client to the deployed afair server.
 
-**Server endpoint:** `https://neverforget.fly.dev/mcp`
-**Auth:** `Authorization: Bearer <NEVERFORGET_AUTH_TOKEN>` on every request
-**Health:** `https://neverforget.fly.dev/health` (no auth required)
+**Server endpoint:** `https://afair.fly.dev/mcp`
+**Auth:** `Authorization: Bearer <AFAIR_AUTH_TOKEN>` on every request
+**Health:** `https://afair.fly.dev/health` (no auth required)
 
 ## The easy path — one command
 
@@ -48,20 +48,20 @@ The first one establishes the surface; the second one establishes the habit. Bot
 
 ```bash
 # From your local checkout — never echo it to a terminal you don't trust
-grep '^NEVERFORGET_AUTH_TOKEN=' .env.local | cut -d= -f2-
+grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-
 ```
 
-Copy that value where the client's config says `<NEVERFORGET_AUTH_TOKEN>`. If you've never opened `.env.local`, the token is also visible in the Fly dashboard at `https://fly.io/apps/neverforget/secrets` (digest only, not the value).
+Copy that value where the client's config says `<AFAIR_AUTH_TOKEN>`. If you've never opened `.env.local`, the token is also visible in the Fly dashboard at `https://fly.io/apps/afair/secrets` (digest only, not the value).
 
 ## Verification
 
 After setting up a client, in that client ask:
 
-> "Use the neverforget MCP server to list the tools available."
+> "Use the afair MCP server to list the tools available."
 
 You should see three tools: `remember`, `recall`, `observe`. Then:
 
-> "Use neverforget to remember: 'first cross-vendor verification on 2026-05-25'"
+> "Use afair to remember: 'first cross-vendor verification on 2026-05-25'"
 
 Then (in the same client OR a different one):
 

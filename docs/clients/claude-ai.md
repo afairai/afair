@@ -1,4 +1,4 @@
-# Claude.ai (web + desktop) — connecting to neverforget
+# Claude.ai (web + desktop) — connecting to afair
 
 Claude.ai connects to custom MCP servers via the **Connectors** UI, not a
 config file. The exact path varies by surface but the steps are the same.
@@ -19,12 +19,12 @@ config file. The exact path varies by surface but the steps are the same.
 In Claude.ai (web or desktop):
 
 1. **Settings** → **Connectors** → **Add custom connector**
-2. **Name:** `neverforget`
-3. **Server URL:** `https://neverforget.fly.dev/mcp`
+2. **Name:** `afair`
+3. **Server URL:** `https://afair.fly.dev/mcp`
 4. **Authentication:** "Bearer Token" / "API Key" / "Custom Header" (the
    label varies between Claude.ai versions). Use:
    - Header name: `Authorization`
-   - Header value: `Bearer <NEVERFORGET_AUTH_TOKEN>`
+   - Header value: `Bearer <AFAIR_AUTH_TOKEN>`
 5. **Save**
 
 If your Claude.ai version doesn't expose a custom-header field and only
@@ -46,13 +46,13 @@ field.
 In a new conversation, with the connector enabled (toggle it on in the
 conversation's tools/connectors menu), ask:
 
-> Use the neverforget connector to list the available tools.
+> Use the afair connector to list the available tools.
 
 Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip:
 
-> Use neverforget to remember: "Claude.ai web verification 2026-05-25"
+> Use afair to remember: "Claude.ai web verification 2026-05-25"
 
 Open a new conversation:
 
@@ -79,9 +79,9 @@ The connector connected but `tools/list` returned empty. Verify the
 server has tools registered:
 
 ```bash
-TOKEN=$(grep '^NEVERFORGET_AUTH_TOKEN=' .env.local | cut -d= -f2-)
+TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-)
 # Initialize MCP session, then list tools
-curl -X POST https://neverforget.fly.dev/mcp \
+curl -X POST https://afair.fly.dev/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \

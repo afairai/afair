@@ -1,6 +1,6 @@
 """Extractor agent tests — mocked LLM, no live network calls.
 
-Live-LLM smoke is gated behind NEVERFORGET_LIVE_LLM=1; off by default so
+Live-LLM smoke is gated behind AFAIR_LIVE_LLM=1; off by default so
 CI stays deterministic and unit tests stay fast.
 """
 
@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from neverforget.agents import extractor, interpretation
-from neverforget.agents.llm import LLMRateLimit, LLMResponseError, LLMResult, LLMTimeout
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.schemas import ObserveEvent, TextContent
-from neverforget.substrate import open_db
+from afair.agents import extractor, interpretation
+from afair.agents.llm import LLMRateLimit, LLMResponseError, LLMResult, LLMTimeout
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.mcp.schemas import ObserveEvent, TextContent
+from afair.substrate import open_db
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -72,7 +72,7 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch, response: dict[str, Any]) -> Non
             raw=json.dumps(response),
         )
 
-    monkeypatch.setattr("neverforget.agents.extractor.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.extractor.call_tool", fake_call)
 
 
 def _patch_llm_raises(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
@@ -81,7 +81,7 @@ def _patch_llm_raises(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
     def fake_call(**_: object) -> LLMResult:
         raise exc
 
-    monkeypatch.setattr("neverforget.agents.extractor.call_tool", fake_call)
+    monkeypatch.setattr("afair.agents.extractor.call_tool", fake_call)
 
 
 def _count_interpretations(ctx: ServerContext) -> int:
@@ -101,7 +101,7 @@ def test_extract_sync_writes_successful_interpretation(
 ) -> None:
     _patch_llm(monkeypatch, GOOD_EXTRACTION)
     # Write an event directly (bypass handler) then run extraction.
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -130,7 +130,7 @@ def test_extract_llm_timeout_writes_failed_interpretation(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_llm_raises(monkeypatch, LLMTimeout("upstream timed out"))
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -151,7 +151,7 @@ def test_extract_rate_limit_writes_failed_interpretation(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_llm_raises(monkeypatch, LLMRateLimit("rate limited"))
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -170,7 +170,7 @@ def test_extract_malformed_response_writes_failed_interpretation(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_llm_raises(monkeypatch, LLMResponseError("non-JSON response: line 1 col 1 char 0"))
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -191,7 +191,7 @@ def test_extract_missing_required_field_writes_failed_interpretation(
     # Returns JSON but missing best_guess_kind → validation failure.
     bad = {"summary": "..."}
     _patch_llm(monkeypatch, bad)
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -219,7 +219,7 @@ def test_remember_handler_triggers_extraction(
     """
     _patch_llm(monkeypatch, GOOD_EXTRACTION)
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         extractor.extract_sync,
     )
     handlers.remember(
@@ -242,7 +242,7 @@ def test_dedup_does_not_re_extract(ctx: ServerContext, monkeypatch: pytest.Monke
         call_count["n"] += 1
         extractor.extract_sync(event_id)
 
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", counting_sync)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", counting_sync)
     handlers.remember(content=TextContent(type="text", text="same content"))
     handlers.remember(content=TextContent(type="text", text="same content"))
     assert call_count["n"] == 1
@@ -253,7 +253,7 @@ def test_observe_handler_triggers_extraction(
 ) -> None:
     _patch_llm(monkeypatch, GOOD_EXTRACTION)
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         extractor.extract_sync,
     )
     handlers.observe(event=ObserveEvent(action="edit_file", subject="x.py"))
@@ -265,11 +265,11 @@ def test_observe_handler_triggers_extraction(
 
 def test_user_message_truncates_over_long_text(ctx: ServerContext) -> None:
     """A 60KB text field gets truncated with a marker so the LLM stays in budget."""
-    from neverforget.agents.prompts import (
+    from afair.agents.prompts import (
         MAX_USER_MESSAGE_CHARS,
         build_user_message,
     )
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     big = "abcde" * 12_000  # 60_000 chars, well above MAX_USER_MESSAGE_CHARS (30_000)
     assert len(big) > MAX_USER_MESSAGE_CHARS
@@ -295,8 +295,8 @@ def test_user_message_truncates_over_long_text(ctx: ServerContext) -> None:
 
 def test_user_message_for_normal_size_is_not_truncated(ctx: ServerContext) -> None:
     """Below the threshold, the text passes through untouched."""
-    from neverforget.agents.prompts import build_user_message
-    from neverforget.substrate import write_event
+    from afair.agents.prompts import build_user_message
+    from afair.substrate import write_event
 
     normal = "hello world " * 100  # ~1200 chars, well under threshold
     e = write_event(
@@ -312,7 +312,7 @@ def test_user_message_for_normal_size_is_not_truncated(ctx: ServerContext) -> No
 
 def test_tool_schema_required_fields_present() -> None:
     """The schema we ship to the model must include the mandatory fields."""
-    from neverforget.agents.prompts import EXTRACTOR_TOOL_SCHEMA
+    from afair.agents.prompts import EXTRACTOR_TOOL_SCHEMA
 
     required = EXTRACTOR_TOOL_SCHEMA["required"]
     assert "best_guess_kind" in required
@@ -323,8 +323,8 @@ def test_tool_schema_required_fields_present() -> None:
 
 
 def test_user_message_includes_text_for_inline_text(ctx: ServerContext) -> None:
-    from neverforget.agents.prompts import build_user_message
-    from neverforget.substrate import write_event
+    from afair.agents.prompts import build_user_message
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -343,8 +343,8 @@ def test_user_message_includes_text_for_inline_text(ctx: ServerContext) -> None:
 
 
 def test_user_message_for_binary_uses_metadata_only(ctx: ServerContext) -> None:
-    from neverforget.agents.prompts import build_user_message
-    from neverforget.substrate import write_event
+    from afair.agents.prompts import build_user_message
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -374,12 +374,12 @@ def test_recall_surfaces_interpretation_when_present(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A2: recall hits include the latest successful Extractor output."""
-    from neverforget.mcp import handlers
-    from neverforget.mcp.schemas import TextContent
+    from afair.mcp import handlers
+    from afair.mcp.schemas import TextContent
 
     _patch_llm(monkeypatch, GOOD_EXTRACTION)
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         extractor.extract_sync,
     )
     handlers.remember(
@@ -400,12 +400,12 @@ def test_recall_omits_interpretation_when_extraction_failed(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Failed extractions don't surface — recall hits return interpretation=None."""
-    from neverforget.mcp import handlers
-    from neverforget.mcp.schemas import TextContent
+    from afair.mcp import handlers
+    from afair.mcp.schemas import TextContent
 
     _patch_llm_raises(monkeypatch, LLMTimeout("upstream timed out"))
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         extractor.extract_sync,
     )
     handlers.remember(content=TextContent(type="text", text="anything"))
@@ -420,8 +420,8 @@ def test_recall_omits_interpretation_when_extraction_failed(
 def test_binder_links_semantically_similar_events(ctx: ServerContext) -> None:
     """Three events with similar embeddings — binder should link them
     in each direction."""
-    from neverforget.agents.binder import find_and_record_links, get_linked_event_ids
-    from neverforget.substrate import write_event
+    from afair.agents.binder import find_and_record_links, get_linked_event_ids
+    from afair.substrate import write_event
 
     # Build three events with controlled embeddings (3-dim for simplicity).
     e1 = write_event(
@@ -479,8 +479,8 @@ def test_binder_links_semantically_similar_events(ctx: ServerContext) -> None:
 
 def test_binder_skips_when_no_neighbors(ctx: ServerContext) -> None:
     """A single isolated event has no neighbors → binder records nothing."""
-    from neverforget.agents.binder import find_and_record_links, get_linked_event_ids
-    from neverforget.substrate import write_event
+    from afair.agents.binder import find_and_record_links, get_linked_event_ids
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -498,15 +498,15 @@ def test_recall_surfaces_linked_event_ids(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """RecallHit carries linked_event_ids when the Bind agent has run."""
-    from neverforget.agents.binder import find_and_record_links
-    from neverforget.mcp import handlers
-    from neverforget.mcp.schemas import TextContent
+    from afair.agents.binder import find_and_record_links
+    from afair.mcp import handlers
+    from afair.mcp.schemas import TextContent
 
     _patch_llm(monkeypatch, GOOD_EXTRACTION)
     # Skip the embedding+binder path inside extract_sync — we'll set up
     # the bind record manually for determinism.
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         lambda _id: None,
     )
 
@@ -521,7 +521,7 @@ def test_recall_surfaces_linked_event_ids(
     )
     import struct
 
-    from neverforget.substrate import iter_events
+    from afair.substrate import iter_events
 
     events = list(iter_events(ctx.db, kind="remember", order="asc"))
     for ev, vec in zip(events, [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]], strict=False):
@@ -542,7 +542,7 @@ def test_recall_surfaces_linked_event_ids(
 
 def test_interpretation_write_is_idempotent(ctx: ServerContext) -> None:
     """Running the same extractor twice on the same event produces one row."""
-    from neverforget.substrate import write_event
+    from afair.substrate import write_event
 
     e = write_event(
         ctx.db,
@@ -573,13 +573,13 @@ def test_interpretation_write_is_idempotent(ctx: ServerContext) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NEVERFORGET_LIVE_LLM") != "1",
-    reason="set NEVERFORGET_LIVE_LLM=1 to hit the real Anthropic API",
+    os.environ.get("AFAIR_LIVE_LLM") != "1",
+    reason="set AFAIR_LIVE_LLM=1 to hit the real Anthropic API",
 )
 def test_live_extraction_against_anthropic(tmp_path: Path) -> None:
     """End-to-end smoke against the real Anthropic API. Costs ~1¢, skipped by default."""
-    from neverforget.settings import load_settings
-    from neverforget.substrate import write_event
+    from afair.settings import load_settings
+    from afair.substrate import write_event
 
     settings = load_settings()
     assert settings.anthropic_api_key is not None, "needs ANTHROPIC_API_KEY in .env.local"

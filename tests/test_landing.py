@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from neverforget.mcp import landing
+from afair.mcp import landing
 
 
 def test_landing_html_contains_manifesto() -> None:
@@ -86,7 +86,7 @@ async def test_landing_handler_returns_html_with_cache_header() -> None:
     cache = response.headers.get("Cache-Control", "")
     assert "max-age=300" in cache, cache
     body = response.body.decode("utf-8")
-    assert "<title>neverforget — vision</title>" in body
+    assert "<title>afair — vision</title>" in body
 
 
 def test_landing_html_has_no_outbound_links() -> None:

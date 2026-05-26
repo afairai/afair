@@ -1,4 +1,4 @@
-# Phase 0 capability-gate journal — neverforget
+# Phase 0 capability-gate journal — afair
 
 > **Status:** In execution
 > **Window opens:** 2026-05-25  (Day 1)
@@ -15,7 +15,7 @@ Per `VISION.md §9 Phase 0`:
 
 Concretely, the gate passes when:
 
-- I (Gowrynath) use neverforget in my normal flow on most of those 14 days, AND
+- I (Gowrynath) use afair in my normal flow on most of those 14 days, AND
 - The architecture survives contact with daily reality without me wanting to bulldoze it.
 
 Passing isn't binary "I used it every day." It's: **the architecture earned its keep, the four MCP tools feel like the right shape, and the recall actually saved work at least a few times.**
@@ -37,9 +37,9 @@ Append a `## Day N — YYYY-MM-DD` section. Inside, jot whatever's relevant. Sug
 
 Entries are **append-only** — don't rewrite past days. If you change your mind, write a new entry that references the old one.
 
-You can also use neverforget itself to remember these moments:
+You can also use afair itself to remember these moments:
 
-> *Use neverforget to remember: "today recall surfaced the Sajinth roadmap fact perfectly — saved me 5 minutes of scrolling."*
+> *Use afair to remember: "today recall surfaced the Sajinth roadmap fact perfectly — saved me 5 minutes of scrolling."*
 
 That makes the journal partially self-writing — and proves the system is useful for its own meta-narrative.
 
@@ -151,7 +151,7 @@ and not OpenAI's. I5 is empirically demonstrated.
   because the installer's idempotency check matches on the section header
   and skipped re-writing when partial state was present.
 - Codex's initial recall queries were too narrow ("recent verification of
-  Codex MCP list neverforget enabled MCP servers"). FTS5 matched none of
+  Codex MCP list afair enabled MCP servers"). FTS5 matched none of
   the stored facts. Looser queries ("codex mcp list") found everything.
   This is a Codex-prompting issue, not a substrate issue — but worth
   noting: the recall tool's description may want a hint like "prefer

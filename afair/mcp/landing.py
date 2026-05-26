@@ -35,7 +35,7 @@ _LANDING_HTML = """\
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>neverforget — vision</title>
+  <title>afair — vision</title>
   <meta name="description" content="A user-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents.">
   <meta name="robots" content="noindex">
   <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
@@ -206,7 +206,7 @@ _LANDING_HTML = """\
 </head>
 <body>
   <main>
-    <p class="eyebrow">Codename · neverforget</p>
+    <p class="eyebrow">Codename · afair</p>
 
     <blockquote>
       Every individual owns a digital extension of their mind &mdash;

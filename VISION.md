@@ -1,8 +1,8 @@
-# neverforget — Operational Constitution
+# afair — Operational Constitution
 
 > *A user-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — built behind a stable MCP surface, free to mutate beneath it.*
 
-> **Note on naming:** `neverforget` is a working codename. It is used for repo names, file paths, internal references, and conversation while building. The final product name is deferred to Phase 6-7, once the product has shape and audience is clearer. See §15.
+> **Note on naming:** `afair` is a working codename. It is used for repo names, file paths, internal references, and conversation while building. The final product name is deferred to Phase 6-7, once the product has shape and audience is clearer. See §15.
 
 ---
 
@@ -646,13 +646,13 @@ Honest list of what is not yet figured out:
 
 ### Current Status
 
-**Codename: `neverforget`** — used throughout development for repo, file paths, internal references. Says what the product does. Tippable. Will be retired when the final name is chosen.
+**Codename: `afair`** — used throughout development for repo, file paths, internal references. Says what the product does. Tippable. Will be retired when the final name is chosen.
 
 ### Why the final name is deferred
 
 Naming attempts during pre-build phase exhausted the `.ai` namespace and most short English words. Lesson: the `.ai` TLD is saturated (every reasonable 2024-era memory/mind/brain word is taken by squatters or dead projects). Naming was consuming energy that should go into building.
 
-Decision: **defer final naming to Phase 6-7**, when the product has shape, audience is clearer, and the right name will be more obvious. Until then, `neverforget` is sufficient.
+Decision: **defer final naming to Phase 6-7**, when the product has shape, audience is clearer, and the right name will be more obvious. Until then, `afair` is sufficient.
 
 ### Naming criteria for the final name
 

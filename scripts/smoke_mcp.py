@@ -49,9 +49,9 @@ def _load_token() -> str:
         msg = "TOKEN env var unset and .env.local not found"
         raise SystemExit(msg)
     for line in env_local.read_text().splitlines():
-        if line.startswith("NEVERFORGET_AUTH_TOKEN="):
+        if line.startswith("AFAIR_AUTH_TOKEN="):
             return line.split("=", 1)[1].strip()
-    msg = "NEVERFORGET_AUTH_TOKEN not in .env.local"
+    msg = "AFAIR_AUTH_TOKEN not in .env.local"
     raise SystemExit(msg)
 
 
@@ -60,7 +60,7 @@ def _expected_tool_names() -> set[str]:
 
 
 async def main() -> int:
-    url = os.environ.get("URL", "https://neverforget.fly.dev")
+    url = os.environ.get("URL", "https://afair.fly.dev")
     token = _load_token()
     # FastMCP serves at /mcp (no trailing slash). A trailing-slash request
     # triggers a 307 redirect which httpx (under the MCP client) strips the
