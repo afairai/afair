@@ -29,7 +29,7 @@ session:
 
 > Use the neverforget MCP server to list the tools available.
 
-Expected: four tools — `remember`, `recall`, `list_context`, `observe`.
+Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip test — first save, then recall in a new session:
 

@@ -14,7 +14,7 @@ The constitutional invariants are documented in `VISION.md §4`. Read those firs
 
 **Phase 0 — Substrate + MCP Surface (cross-vendor, zero automated ingestion).**
 
-The four MCP tools — `remember`, `recall`, `list_context`, `observe` — are the forever contract per Invariant I1. Nothing reaches into your life uninvited; data enters the substrate only via explicit calls.
+The three MCP tools — `remember`, `recall`, `observe` — are the forever contract per Invariant I1. Nothing reaches into your life uninvited; data enters the substrate only via explicit calls. (`recall` is the single retrieval verb; survey, single-fetch, and full-payload modes are kwargs, not separate tools.)
 
 ## Local dev
 

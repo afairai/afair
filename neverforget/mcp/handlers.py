@@ -3,6 +3,31 @@
 These functions are unit-testable directly without spinning up a server.
 The MCP server wrapper in `server.py` registers them with FastMCP and
 maps validation errors to MCP error responses.
+
+Three handlers, three verbs:
+  - remember(content, *, context, type_hint, parent_hashes, invalidates)
+  - recall(query=None, *, scope, depth, limit, by_id, by_content_hash,
+           full_payload, stats)
+  - observe(event)
+
+Decision history: the surface was collapsed from 6 → 3 tools in
+pre-release (2026-05-26, vault decision event 01KSHW6Q0EB1BBPKZ4Q2QT20NT)
+to lock in the cleanest forever-API before any external user adopted it.
+The old list_context, get_event, and invalidate verbs are absorbed:
+
+  list_context(about=X, limit=N)
+    →  recall(query=X, stats=True, limit=N)      (with X)
+    →  recall(stats=True, limit=N)               (without X)
+
+  get_event(event_id=X)
+    →  recall(by_id=X, full_payload=True)
+
+  get_event(content_hash=X)
+    →  recall(by_content_hash=X, full_payload=True)
+
+  invalidate(target_hash=X, reason=Y)
+    →  remember(content={"type":"text","text":Y or "(no replacement)"},
+                invalidates=[X])
 """
 
 from __future__ import annotations
@@ -15,11 +40,11 @@ from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids
-from ..agents.conflict_resolver import read_conflicts_batch, read_conflicts_for_event
+from ..agents.conflict_resolver import read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.invalidation import (
+    INVALIDATE_KIND,
     InvalidationInfo,
-    read_invalidation,
     read_invalidations_batch,
     write_invalidation,
 )
@@ -41,10 +66,7 @@ from .schemas import (
     ConflictFlag,
     ContextSummary,
     Depth,
-    GetEventResult,
-    InvalidateResult,
     InvalidationSummary,
-    ListContextResult,
     ObserveEvent,
     ObserveResult,
     RecallHit,
@@ -63,13 +85,12 @@ if TYPE_CHECKING:
 # therefore does not violate I1.
 DEFAULT_ORIGIN = "agent"
 
-# Snippet length for text in recall/list_context summaries.
+# Snippet length for text in recall summaries (when full_payload=False).
 SUMMARY_TEXT_CHARS = 500
 
-# Background pool used to overlap the OpenAI embedding API call with the
-# (cheap) local FTS query during recall. Pool is process-level so it
-# survives across requests. max_workers=4 covers a handful of concurrent
-# recalls; embedding is the dominant cost so this rarely saturates.
+# Background pool used to overlap the embedding call with the (cheap)
+# local FTS query during recall. Pool is process-level so it survives
+# across requests. max_workers=4 covers a handful of concurrent recalls.
 _RECALL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recall-parallel")
 
 
@@ -81,17 +102,14 @@ class InvalidBase64Error(ValueError):
     """Raised when BinaryContent.data_b64 isn't valid base64."""
 
 
-class EventNotFoundError(LookupError):
-    """Raised by ``get_event`` when neither event_id nor content_hash matches."""
-
-
-class InvalidGetEventArgsError(ValueError):
-    """Raised by ``get_event`` when both or neither selector is provided."""
+class InvalidRecallArgsError(ValueError):
+    """Raised when recall is called with a contradictory mix of selectors
+    (e.g., both ``by_id`` and ``by_content_hash`` provided)."""
 
 
 class InvalidateTargetError(ValueError):
-    """Raised when ``invalidate`` is called with a target that doesn't exist
-    or is itself an invalidation event (no nested invalidations)."""
+    """Raised when an invalidates target doesn't resolve to an event or
+    points at an existing invalidation event (no nested invalidations)."""
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -111,7 +129,6 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         text = payload.get("text", "")
         if isinstance(text, str):
             summary["text"] = text[:SUMMARY_TEXT_CHARS]
-            summary["truncated"] = len(text) > SUMMARY_TEXT_CHARS
     elif content_type == "text-large":
         for k in ("blob_hash", "size_bytes", "mime"):
             if k in payload:
@@ -126,11 +143,49 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
                 summary[k] = payload[k]
 
     # Common metadata across content types
-    for k in ("context", "type_hint", "language"):
+    for k in ("context", "type_hint", "language", "target_hash", "reason"):
         if payload.get(k) is not None:
             summary[k] = payload[k]
 
     return summary
+
+
+def _materialize_full_payload(payload: dict[str, Any], vault_dir: Any) -> dict[str, Any]:
+    """Return a payload with ``text-large`` blobs read back into ``text``.
+
+    The substrate stores large text in the object store referenced by
+    ``blob_hash``. For ``full_payload=True`` calls we surface the full
+    text inline so callers see one consistent shape. Binary payloads
+    are left as-is — the raw bytes stay in the object store; the
+    payload metadata (mime, size, filename_hint, blob_hash) is enough
+    for most callers, and a dedicated blob-fetch capability is left
+    for later phases.
+    """
+    content_type = payload.get("content_type")
+    if content_type != "text-large":
+        return dict(payload)
+
+    blob_hash = payload.get("blob_hash")
+    if not isinstance(blob_hash, str):
+        return dict(payload)
+
+    materialized = dict(payload)
+    try:
+        raw = read_object(vault_dir, blob_hash)
+        materialized["text"] = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        materialized["text_unavailable"] = (
+            f"failed to read object {blob_hash!s}: {type(e).__name__}: {e}"
+        )
+    return materialized
+
+
+def _text_was_truncated(payload: dict[str, Any]) -> bool:
+    """True iff the payload-summary form would clip the text."""
+    if payload.get("content_type") != "text":
+        return False
+    text = payload.get("text", "")
+    return isinstance(text, str) and len(text) > SUMMARY_TEXT_CHARS
 
 
 _INTERPRETATION_SURFACE_KEYS = (
@@ -165,9 +220,21 @@ def _event_to_hit(
     event: Event,
     db: Any,
     *,
+    full_payload: bool,
     invalidation: InvalidationInfo | None = None,
     conflicts: list[dict[str, Any]] | None = None,
 ) -> RecallHit:
+    """Build one RecallHit. When ``full_payload`` is True the payload is
+    materialized in full (text-large blobs read back from the object
+    store); when False, the payload is the truncated summary view."""
+    if full_payload:
+        ctx = get_context()
+        payload_view = _materialize_full_payload(event.payload, ctx.vault_dir)
+        truncated = False
+    else:
+        payload_view = _payload_summary(event.payload)
+        truncated = _text_was_truncated(event.payload)
+
     interp = read_latest_interpretation(db, event.content_hash)
     interpretation: dict[str, Any] | None = (
         _interpretation_summary(interp.extraction) if interp is not None else None
@@ -179,20 +246,18 @@ def _event_to_hit(
         created_at=event.created_at,
         kind=event.kind,
         origin=event.origin,
-        payload_summary=_payload_summary(event.payload),
+        payload=payload_view,
+        truncated=truncated,
         interpretation=interpretation,
         linked_event_ids=get_linked_event_ids(db, event.content_hash),
+        parent_hashes=list(event.parent_hashes or []),
         invalidation=_invalidation_to_summary(invalidation),
         conflicts=conflict_flags,
     )
 
 
 def _attach_invalidations(events: list[Event], db: Any) -> dict[str, InvalidationInfo]:
-    """Batch-fetch invalidation info for a list of events.
-
-    Returns a dict keyed by ``content_hash`` for use when building hits.
-    Avoids N+1 lookups when recall returns many results.
-    """
+    """Batch-fetch invalidation info for a list of events."""
     if not events:
         return {}
     hashes = [e.content_hash for e in events]
@@ -208,12 +273,7 @@ def _attach_conflicts(events: list[Event], db: Any) -> dict[str, list[dict[str, 
 
 
 def _api_key_for_embedding(ctx: Any) -> str | None:
-    """Return the right API key for the configured embedding model.
-
-    Provider selection follows the model-string prefix (litellm convention)
-    so this stays I5-neutral — adding a new provider is a settings change
-    plus one line here.
-    """
+    """Return the right API key for the configured embedding model."""
     model = ctx.embedding_model
     key = None
     if model.startswith("openai/"):
@@ -225,9 +285,7 @@ def _api_key_for_embedding(ctx: Any) -> str | None:
     elif model.startswith("anthropic/"):
         key = ctx.anthropic_api_key
     else:
-        # Unknown provider — try the OpenAI key as least-bad default; if
-        # the call fails, the EmbeddingError fallback in recall serves
-        # FTS-only results.
+        # Unknown provider — try the OpenAI key as least-bad default.
         key = ctx.openai_api_key
     return key.get_secret_value() if key is not None else None
 
@@ -240,7 +298,15 @@ def remember(
     context: str | None = None,
     type_hint: str | None = None,
     parent_hashes: list[str] | None = None,
+    invalidates: list[str] | None = None,
 ) -> RememberResult:
+    """Write a fact to the substrate, optionally invalidating prior facts.
+
+    The ``invalidates`` kwarg supersedes prior facts in the same call
+    (bi-temporal correction). Each target hash gets its own invalidation
+    event with ``kind='invalidate'`` and ``parent_hashes=[target]`` for
+    lineage. The new ``content`` is written first; invalidations follow.
+    """
     ctx = get_context()
     db = connect_for_thread()
 
@@ -275,10 +341,7 @@ def remember(
         )
 
     # Detect dedup BEFORE writing so we can report it in the result.
-    # write_event() is idempotent on content_hash, so this is safe even if
-    # concurrent calls race — both end up returning the same row.
     from ..substrate import content_hash as compute_content_hash
-    from ..substrate import read_event_by_hash
 
     sorted_parents = sorted(parent_hashes) if parent_hashes else None
     preview_hash = compute_content_hash(
@@ -296,48 +359,50 @@ def remember(
         payload=payload,
         parent_hashes=parent_hashes,
     )
-    # Fire the warm-path Extractor — never on dedup (the existing event
-    # already had its chance) and never blocking the user-facing tool call.
     if not already_existed:
         schedule_extraction(event.id)
+
+    # Process invalidations AFTER the main write. Each target must:
+    #   - exist in the substrate
+    #   - not be itself an invalidation event (no nested invalidations)
+    invalidated_ok: list[str] = []
+    for target_hash in invalidates or []:
+        target = read_event_by_hash(db, target_hash)
+        if target is None:
+            msg = f"invalidates target not found: {target_hash!r}"
+            raise InvalidateTargetError(msg)
+        if target.kind == INVALIDATE_KIND:
+            msg = (
+                f"invalidates target {target_hash!r} is itself an "
+                "invalidation event; nested invalidations are not supported"
+            )
+            raise InvalidateTargetError(msg)
+        # Reason: pull from the new event's content if text, else generic.
+        reason = (
+            content.text if isinstance(content, TextContent) else f"superseded by event {event.id}"
+        )
+        write_invalidation(db, target_hash=target_hash, reason=reason, origin=DEFAULT_ORIGIN)
+        invalidated_ok.append(target_hash)
 
     return RememberResult(
         ok=True,
         event_id=event.id,
         content_hash=event.content_hash,
         deduplicated=already_existed,
+        invalidated=invalidated_ok,
     )
 
 
 # ── recall ──────────────────────────────────────────────────────────────────
 
 
-# Compiled at import time; matches ULID-shaped strings (26 chars of the
-# Crockford base32 alphabet, ULIDs are uppercase but be tolerant).
+# Compiled at import time; matches ULID-shaped strings.
 _ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
 _IDENTIFIER_PREFIXES = ("sha256:", "http://", "https://", "file://")
 
 
 def _auto_route_depth(query: str) -> Depth:
-    """Pick the optimal recall depth without bothering the caller.
-
-    Heuristics (stolen-and-improved from Cognee, who route between graph
-    and vector; we route between FTS and hybrid since FastEmbed made the
-    semantic path essentially free):
-
-      - Exact identifiers (sha256: prefix, http(s) URLs, file:// paths,
-        bare ULIDs): vector adds nothing because there is no semantic
-        neighborhood. FTS exact-match wins on speed and precision.
-      - Single tokens after FTS sanitization: usually a name, ID, or
-        rare term; FTS5 already ranks these well, embedding similarity
-        risks pulling in loosely-related noise.
-      - Everything else: hybrid normal. Since FastEmbed turned the
-        embedding cost into ~5ms in-process inference, the broader
-        coverage is free.
-
-    Returns the concrete depth ("shallow"|"normal") — never "auto" or
-    "deep" so the downstream code only sees the resolved value.
-    """
+    """Pick the optimal recall depth without bothering the caller."""
     stripped = query.strip()
     if not stripped:
         return "shallow"
@@ -345,7 +410,6 @@ def _auto_route_depth(query: str) -> Depth:
         return "shallow"
     if _ULID_RE.match(stripped):
         return "shallow"
-    # Token count after FTS sanitization (mirrors search_fts's behavior).
     tokens = re.sub(r'[-+*"():^]', " ", stripped).split()
     if len(tokens) <= 1:
         return "shallow"
@@ -353,65 +417,116 @@ def _auto_route_depth(query: str) -> Depth:
 
 
 def recall(
-    query: str,
+    query: str | None = None,
     scope: str | None = None,
     depth: Depth = "auto",
     limit: int = 20,
+    by_id: str | None = None,
+    by_content_hash: str | None = None,
+    full_payload: bool = False,
+    stats: bool = False,
 ) -> RecallResult:
-    """Retrieve relevant events.
+    """Read the vault. Six call modes share this signature:
 
-    Depth semantics (Phase 2):
-      - ``auto``    — system picks based on query shape (default).
-                      Exact identifiers or single tokens → shallow;
-                      multi-token natural language → normal hybrid.
-                      Callers rarely need anything else.
-      - ``shallow`` — FTS5 only. No LLM/embedding API call. Cheapest.
-      - ``normal``  — Hybrid FTS5 + vector recall via Reciprocal Rank
-                      Fusion. The embedding call runs concurrently with
-                      the FTS query; cached query strings hit instantly.
-      - ``deep``    — Not yet richer than normal; returns hybrid + note
-                      until the Phase 3+ reasoning agent lands.
+      recall(query=...)                          → semantic search
+      recall(by_id=...)                          → single-event lookup
+      recall(by_content_hash=...)                → single-event lookup
+      recall(stats=True)                         → summary + recent hits
+      recall(query=..., full_payload=True)       → search, untruncated
+      recall()                                   → most-recent N hits
+
+    ``stats=True`` can combine with any of the above to add a
+    ContextSummary to the response.
+
+    Lookup modes (``by_id``/``by_content_hash``) imply ``full_payload=True``
+    semantically — when you ask for one specific event you want it whole.
+
+    ``scope`` is a free-text substring matched against the interpretation's
+    topic_signal (Phase 3.5 — currently no-op until topic_signal lands).
     """
-    ctx = get_context()
+    if by_id is not None and by_content_hash is not None:
+        msg = "recall accepts at most one of by_id, by_content_hash"
+        raise InvalidRecallArgsError(msg)
+
     db = connect_for_thread()
+    ctx = get_context()
     note: str | None = None
+
+    summary: ContextSummary | None = None
+    if stats:
+        summary = _build_stats_summary(db)
+
+    # ── Single-event lookup mode ───────────────────────────────────────────
+    if by_id is not None or by_content_hash is not None:
+        target = (
+            read_event_by_id(db, by_id)
+            if by_id is not None
+            else read_event_by_hash(db, by_content_hash)  # type: ignore[arg-type]
+        )
+        if target is None:
+            selector = (
+                f"by_id={by_id!r}" if by_id is not None else f"by_content_hash={by_content_hash!r}"
+            )
+            return RecallResult(
+                hits=[],
+                depth_used="shallow",
+                note=f"no event found for {selector}",
+                summary=summary,
+            )
+        invalidations = _attach_invalidations([target], db)
+        conflicts = _attach_conflicts([target], db)
+        return RecallResult(
+            hits=[
+                _event_to_hit(
+                    target,
+                    db,
+                    full_payload=True,  # lookup-by-id always returns the full event
+                    invalidation=invalidations.get(target.content_hash),
+                    conflicts=conflicts.get(target.content_hash),
+                )
+            ],
+            depth_used="shallow",
+            summary=summary,
+        )
+
+    # ── Search / browse mode ───────────────────────────────────────────────
+    events: list[Event]
     depth_used: Depth = depth
 
-    # Resolve auto BEFORE branching, so the downstream logic only sees
-    # the concrete depth. Keep depth_used reflecting the resolved value
-    # so the caller can observe which path actually ran.
-    if depth == "auto":
-        depth = _auto_route_depth(query)
-        depth_used = depth
-
-    if depth == "shallow" or not ctx.semantic_recall_enabled:
-        events = search_fts(db, query, limit=limit)
+    if query is None or not query.strip():
+        # No query, no by_id — return most-recent N events (browse mode).
+        events = list(iter_events(db, limit=limit))
         depth_used = "shallow"
     else:
-        # Overlap embedding API call (network-bound, 100-300ms) with the
-        # FTS query (CPU-bound, <10ms). If the embedding succeeds we merge
-        # via RRF; if it fails we fall back to FTS-only without surfacing
-        # the error to the AI client.
-        api_key = _api_key_for_embedding(ctx)
-        emb_future = _RECALL_POOL.submit(
-            embed_query, model=ctx.embedding_model, text=query, api_key=api_key
-        )
-        fts_hits = search_fts(db, query, limit=limit)
-        try:
-            embedding = emb_future.result()
-        except EmbeddingError:
-            events = fts_hits
+        # Real query — resolve depth, run FTS+vec if normal.
+        if depth == "auto":
+            depth = _auto_route_depth(query)
+            depth_used = depth
+
+        if depth == "shallow" or not ctx.semantic_recall_enabled:
+            events = search_fts(db, query, limit=limit)
             depth_used = "shallow"
-            note = "semantic recall unavailable; returned FTS-only results"
         else:
-            vec_hits = search_vec(db, embedding, limit=limit)
-            events = rrf_merge(fts_hits, vec_hits, limit=limit)
-            depth_used = "normal"
-            if depth == "deep":
-                note = (
-                    "deep depth is not yet richer than normal "
-                    "(Phase 3+ reasoning agent pending); returned hybrid results"
-                )
+            api_key = _api_key_for_embedding(ctx)
+            emb_future = _RECALL_POOL.submit(
+                embed_query, model=ctx.embedding_model, text=query, api_key=api_key
+            )
+            fts_hits = search_fts(db, query, limit=limit)
+            try:
+                embedding = emb_future.result()
+            except EmbeddingError:
+                events = fts_hits
+                depth_used = "shallow"
+                note = "semantic recall unavailable; returned FTS-only results"
+            else:
+                vec_hits = search_vec(db, embedding, limit=limit)
+                events = rrf_merge(fts_hits, vec_hits, limit=limit)
+                depth_used = "normal"
+                if depth == "deep":
+                    note = (
+                        "deep depth is not yet richer than normal "
+                        "(Phase 3+ reasoning agent pending); returned hybrid results"
+                    )
 
     invalidations = _attach_invalidations(events, db)
     conflicts = _attach_conflicts(events, db)
@@ -420,6 +535,7 @@ def recall(
             _event_to_hit(
                 e,
                 db,
+                full_payload=full_payload,
                 invalidation=invalidations.get(e.content_hash),
                 conflicts=conflicts.get(e.content_hash),
             )
@@ -427,23 +543,14 @@ def recall(
         ],
         depth_used=depth_used,
         note=note,
+        summary=summary,
     )
 
 
-# ── list_context ────────────────────────────────────────────────────────────
-
-
-def list_context(about: str | None = None, limit: int = 50) -> ListContextResult:
-    db = connect_for_thread()
-
-    if about:
-        recent_events = search_fts(db, about, limit=limit)
-    else:
-        recent_events = list(iter_events(db, limit=limit))
-
+def _build_stats_summary(db: Any) -> ContextSummary:
+    """Compute the vault-wide totals + breakdowns for stats=True."""
     total_row = db.execute("SELECT COUNT(*) FROM events").fetchone()
     total: int = total_row[0] if total_row else 0
-
     by_kind: dict[str, int] = {
         row["kind"]: row["c"]
         for row in db.execute("SELECT kind, COUNT(*) AS c FROM events GROUP BY kind")
@@ -452,167 +559,7 @@ def list_context(about: str | None = None, limit: int = 50) -> ListContextResult
         row["origin"]: row["c"]
         for row in db.execute("SELECT origin, COUNT(*) AS c FROM events GROUP BY origin")
     }
-
-    invalidations = _attach_invalidations(recent_events, db)
-    conflicts = _attach_conflicts(recent_events, db)
-    return ListContextResult(
-        summary=ContextSummary(
-            total_events=total,
-            by_kind=by_kind,
-            by_origin=by_origin,
-            recent=[
-                _event_to_hit(
-                    e,
-                    db,
-                    invalidation=invalidations.get(e.content_hash),
-                    conflicts=conflicts.get(e.content_hash),
-                )
-                for e in recent_events
-            ],
-        ),
-    )
-
-
-# ── get_event ───────────────────────────────────────────────────────────────
-
-
-def _materialize_full_payload(payload: dict[str, Any], vault_dir: Any) -> dict[str, Any]:
-    """Return a payload with ``text-large`` blobs read back into ``text``.
-
-    The substrate stores large text in the object store referenced by
-    ``blob_hash``. For ``get_event`` we surface the full text inline so
-    callers see one consistent shape. Binary payloads are left as-is —
-    the raw bytes stay in the object store; a future ``read_blob`` tool
-    will expose them on explicit request.
-    """
-    content_type = payload.get("content_type")
-    if content_type != "text-large":
-        return dict(payload)
-
-    blob_hash = payload.get("blob_hash")
-    if not isinstance(blob_hash, str):
-        return dict(payload)
-
-    materialized = dict(payload)
-    try:
-        raw = read_object(vault_dir, blob_hash)
-        materialized["text"] = raw.decode("utf-8")
-        # Keep blob_hash + size for traceability; the caller can verify.
-    except (OSError, UnicodeDecodeError) as e:
-        materialized["text_unavailable"] = (
-            f"failed to read object {blob_hash!s}: {type(e).__name__}: {e}"
-        )
-    return materialized
-
-
-def get_event(
-    event_id: str | None = None,
-    content_hash: str | None = None,
-) -> GetEventResult:
-    """Return the FULL untruncated payload for one specific event.
-
-    Counterpart to ``recall``, which caps each hit's payload at ~500 chars
-    for skim-many-results UX. When a caller wants the actual content of
-    one specific event (e.g., to display a long document), recall to find
-    the candidate, then ``get_event(event_id=...)`` to fetch the whole thing.
-
-    Exactly one of ``event_id`` or ``content_hash`` must be provided.
-    """
-    if (event_id is None) == (content_hash is None):
-        msg = "get_event requires exactly one of event_id or content_hash"
-        raise InvalidGetEventArgsError(msg)
-
-    ctx = get_context()
-    db = connect_for_thread()
-    event = (
-        read_event_by_id(db, event_id)
-        if event_id is not None
-        else read_event_by_hash(db, content_hash)  # type: ignore[arg-type]
-    )
-    if event is None:
-        selector = (
-            f"event_id={event_id!r}" if event_id is not None else f"content_hash={content_hash!r}"
-        )
-        msg = f"no event found for {selector}"
-        raise EventNotFoundError(msg)
-
-    payload = _materialize_full_payload(event.payload, ctx.vault_dir)
-
-    interp = read_latest_interpretation(db, event.content_hash)
-    interpretation: dict[str, Any] | None = (
-        _interpretation_summary(interp.extraction) if interp is not None else None
-    )
-
-    return GetEventResult(
-        event_id=event.id,
-        content_hash=event.content_hash,
-        created_at=event.created_at,
-        kind=event.kind,
-        origin=event.origin,
-        payload=payload,
-        interpretation=interpretation,
-        linked_event_ids=get_linked_event_ids(db, event.content_hash),
-        parent_hashes=list(event.parent_hashes or []),
-        invalidation=_invalidation_to_summary(read_invalidation(db, event.content_hash)),
-        conflicts=[ConflictFlag(**c) for c in read_conflicts_for_event(db, event.content_hash)],
-    )
-
-
-# ── invalidate ──────────────────────────────────────────────────────────────
-
-
-def invalidate(target_hash: str, reason: str | None = None) -> InvalidateResult:
-    """Mark a substrate event as superseded by later evidence.
-
-    Append-only bi-temporal model (stolen from Graphiti, implemented at
-    the substrate layer instead of in a graph DB):
-
-      - The target event is NOT touched. I2 forbids it.
-      - A new event with ``kind='invalidate'`` is written, with the
-        target hash recorded in its payload and in ``parent_hashes`` for
-        lineage.
-      - Subsequent recall calls surface the target with a non-null
-        ``invalidation`` field — but DO NOT filter it out. The AI
-        client decides based on whether the query is about current
-        state or history.
-      - Re-validation is not modelled. To "undo" an invalidation,
-        write a new fact and (optionally) invalidate the invalidation
-        itself; latest-by-created_at wins on the read side.
-
-    Rejects:
-      - target_hash that doesn't resolve to any substrate event
-      - target_hash that points at an existing invalidate event
-        (no nested invalidations in v0; future Phase could add them)
-    """
-    db = connect_for_thread()
-
-    target = read_event_by_hash(db, target_hash)
-    if target is None:
-        msg = f"no event found for target_hash={target_hash!r}"
-        raise InvalidateTargetError(msg)
-    if target.kind == "invalidate":
-        msg = (
-            f"target {target_hash!r} is itself an invalidation event; "
-            "nested invalidations are not supported in v1"
-        )
-        raise InvalidateTargetError(msg)
-
-    prior = read_invalidation(db, target_hash)
-    already = prior is not None
-
-    new_event = write_invalidation(
-        db,
-        target_hash=target_hash,
-        reason=reason,
-        origin=DEFAULT_ORIGIN,
-    )
-    return InvalidateResult(
-        ok=True,
-        event_id=new_event.id,
-        content_hash=new_event.content_hash,
-        target_hash=target_hash,
-        target_already_invalidated=already,
-    )
+    return ContextSummary(total_events=total, by_kind=by_kind, by_origin=by_origin)
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
@@ -621,13 +568,10 @@ def invalidate(target_hash: str, reason: str | None = None) -> InvalidateResult:
 def observe(event: ObserveEvent) -> ObserveResult:
     db = connect_for_thread()
 
-    # Dump back to a plain dict, preserving any extra fields the client set.
     event_dict = event.model_dump(exclude_none=False)
     payload: dict[str, Any] = {"content_type": "event", **event_dict}
 
-    # Dedup-detection for parity with remember — same I3-clean idempotency.
     from ..substrate import content_hash as compute_content_hash
-    from ..substrate import read_event_by_hash
 
     preview_hash = compute_content_hash(
         kind="observe",

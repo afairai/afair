@@ -1,7 +1,18 @@
 """Pydantic schemas for MCP tool inputs and outputs.
 
-These shapes are part of the v1 contract per Invariant I1. New optional
-fields may be added forever; existing fields are locked.
+These shapes are the v1 forever-contract per Invariant I1.
+
+Three tools, three response shapes:
+  - remember  →  RememberResult     (write a fact, optionally invalidate older facts)
+  - recall    →  RecallResult       (read: search / by-id / stats — all one verb)
+  - observe   →  ObserveResult      (log an action/event)
+
+The 6-tool design (remember/recall/list_context/observe/get_event/invalidate)
+was collapsed to 3 during pre-release (2026-05-26, decision event
+01KSHW6Q0EB1BBPKZ4Q2QT20NT) before any external user adopted the
+surface. After this point, I1 freezes these signatures — new optional
+parameters and new response fields are still allowed, but no tool may
+be added or removed.
 """
 
 from __future__ import annotations
@@ -44,10 +55,20 @@ RememberContent = Annotated[
 
 
 class RememberResult(BaseModel):
+    """Result of a `remember` call.
+
+    ``invalidated`` carries the content_hashes that were marked superseded
+    in this call (via the ``invalidates`` kwarg). Empty list when none
+    were invalidated. Invalidation is append-only (I2-conformant) — the
+    target events stay in the substrate, the invalidation is a new event
+    with ``kind='invalidate'`` referencing them.
+    """
+
     ok: bool
     event_id: str
     content_hash: str
     deduplicated: bool
+    invalidated: list[str] = []
 
 
 # ── recall ──────────────────────────────────────────────────────────────────
@@ -56,11 +77,10 @@ class RememberResult(BaseModel):
 Depth = Literal["auto", "shallow", "normal", "deep"]
 """Recall depth selector.
 
-- ``auto``     — system picks based on the query shape (default since
-                 2026-05-26 ; stolen from Cognee's auto-routing concept).
+- ``auto``     — system picks based on the query shape (default).
                  Exact identifiers, single words → shallow; otherwise normal.
                  Caller doesn't have to think about it.
-- ``shallow``  — FTS5 keyword only. No embedding API call.
+- ``shallow``  — FTS5 keyword only. No embedding inference.
 - ``normal``   — Hybrid FTS5 + vector via Reciprocal Rank Fusion.
 - ``deep``     — Same as normal until the Phase 3+ reasoning agent lands.
 """
@@ -77,7 +97,7 @@ class ConflictFlag(BaseModel):
     """
 
     with_event_id: str
-    """Event id of the other side of the pair — fetch via ``get_event``."""
+    """Event id of the other side of the pair — fetch via ``recall(by_id=...)``."""
 
     with_content_hash: str
 
@@ -102,8 +122,8 @@ class InvalidationSummary(BaseModel):
     """ISO 8601 timestamp when the invalidation was recorded (t_invalid)."""
 
     by_event_id: str
-    """Event id of the invalidation — fetch via ``get_event`` for full
-    reason + context."""
+    """Event id of the invalidation — fetch via ``recall(by_id=...)`` for
+    full reason + context."""
 
     reason: str | None = None
 
@@ -111,22 +131,36 @@ class InvalidationSummary(BaseModel):
 class RecallHit(BaseModel):
     """One match returned by `recall`.
 
-    ``payload_summary`` is the truncation-safe view of the raw substrate
-    payload (text snippet, mime, etc.).
-    ``interpretation`` is the latest successful Extractor output for the
-    event when one is available — best_guess_kind, summary, entities,
-    salient_facts, language, confidence, source_attribution. Optional;
-    will be ``None`` for events whose extraction failed or is still in
-    flight.
+    ``payload`` is either the truncated summary view (default — for
+    skim-many-results UX) or the full untruncated payload, depending on
+    whether the caller passed ``full_payload=True``. ``truncated``
+    tells the caller which form they got. For ``content_type ==
+    'text-large'`` with ``full_payload=True``, the inline text is read
+    back from the object store and surfaced in ``payload.text`` so
+    callers see one consistent shape regardless of where bytes lived.
+
+    ``interpretation`` is the latest successful Extractor output —
+    best_guess_kind, summary, entities, salient_facts, language,
+    confidence, source_attribution. Null when extraction failed or is
+    in flight.
+
     ``linked_event_ids`` are content_hashes the Bind agent automatically
-    found to be semantically similar to this hit at extraction time.
-    Useful for "show me events related to this one" — empty list when
-    the Bind agent hasn't (yet) processed this event or found no
-    neighbors.
+    found to be semantically similar to this hit. Empty list when the
+    Bind agent hasn't processed this event yet or found no neighbors.
+
     ``invalidation`` is non-null when a later event recorded a
     contradiction or supersession for this hit. Recall does NOT filter
     invalidated hits — they surface alongside current ones so the AI
     can decide based on query intent (current state vs history).
+
+    ``conflicts`` lists Conflict-Resolver verdicts touching this event
+    (cold-path output). Each entry references the OTHER event in the
+    pair plus the verdict + reason.
+
+    ``parent_hashes`` is the lineage list set at write time (empty for
+    most events). Populated for events with explicit ``parent_hashes``
+    in the original write OR for invalidation events (which carry the
+    target's hash there).
     """
 
     event_id: str
@@ -134,32 +168,46 @@ class RecallHit(BaseModel):
     created_at: str
     kind: str
     origin: str
-    payload_summary: dict[str, Any]
+    payload: dict[str, Any]
+    truncated: bool
     interpretation: dict[str, Any] | None = None
     linked_event_ids: list[str] = []
+    parent_hashes: list[str] = []
     invalidation: InvalidationSummary | None = None
     conflicts: list[ConflictFlag] = []
 
 
-class RecallResult(BaseModel):
-    hits: list[RecallHit]
-    depth_used: Depth
-    note: str | None = None
-
-
-# ── list_context ────────────────────────────────────────────────────────────
-
-
 class ContextSummary(BaseModel):
+    """Vault-wide summary populated when ``recall(stats=True)`` is called.
+
+    Standalone counts give the AI a sense of vault size + composition
+    without having to enumerate hits. Useful at session start ("what's
+    the lay of the land") and for periodic check-ins.
+    """
+
     total_events: int
     by_kind: dict[str, int]
     by_origin: dict[str, int]
-    recent: list[RecallHit]
 
 
-class ListContextResult(BaseModel):
-    summary: ContextSummary
+class RecallResult(BaseModel):
+    """Result of any `recall` call.
+
+    Six call modes share this shape:
+      - ``recall(query=...)``                      → search via FTS+vector
+      - ``recall(by_id=...)``                      → single-event lookup
+      - ``recall(by_content_hash=...)``            → single-event lookup
+      - ``recall(stats=True)``                     → summary + recent hits
+      - ``recall(query=..., full_payload=True)``   → search, untruncated
+      - ``recall()``                               → most-recent N hits
+
+    ``summary`` is only populated when ``stats=True`` was requested.
+    """
+
+    hits: list[RecallHit]
+    depth_used: Depth
     note: str | None = None
+    summary: ContextSummary | None = None
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
@@ -193,59 +241,3 @@ class ObserveResult(BaseModel):
     ok: bool
     event_id: str
     content_hash: str
-
-
-# ── get_event ───────────────────────────────────────────────────────────────
-
-
-class GetEventResult(BaseModel):
-    """Full untruncated payload for one event.
-
-    Returned by ``get_event``. Unlike ``RecallHit.payload_summary`` which
-    truncates text at ~500 chars for skim-many-results UX, this carries
-    the entire payload. For ``content_type == "text-large"`` the inline
-    text is read back from the object store and surfaced in ``payload.text``
-    so callers see one consistent shape regardless of where bytes lived.
-    For ``content_type == "binary"`` the bytes stay in the object store
-    (use a future ``read_blob`` tool to fetch them); the payload still
-    carries the metadata (mime, size, filename_hint, blob_hash).
-    """
-
-    event_id: str
-    content_hash: str
-    created_at: str
-    kind: str
-    origin: str
-    payload: dict[str, Any]
-    interpretation: dict[str, Any] | None = None
-    linked_event_ids: list[str] = []
-    parent_hashes: list[str] = []
-    invalidation: InvalidationSummary | None = None
-    conflicts: list[ConflictFlag] = []
-
-
-# ── invalidate ──────────────────────────────────────────────────────────────
-
-
-class InvalidateResult(BaseModel):
-    """Result of the ``invalidate`` MCP tool — bi-temporal supersession.
-
-    Records that ``target_hash`` is no longer considered current. Both
-    the target event and any prior invalidations remain in the substrate
-    forever (I2); this just appends a new event marking the supersession.
-    """
-
-    ok: bool
-    event_id: str
-    """ULID of the new invalidation event."""
-
-    content_hash: str
-    """sha256 hash of the new invalidation event itself."""
-
-    target_hash: str
-    """The event_hash that this invalidation supersedes."""
-
-    target_already_invalidated: bool
-    """True if a prior invalidation already existed for the target.
-    The new one becomes the current (latest-wins) record; the prior
-    one stays in the substrate."""

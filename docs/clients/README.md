@@ -59,7 +59,7 @@ After setting up a client, in that client ask:
 
 > "Use the neverforget MCP server to list the tools available."
 
-You should see four tools: `remember`, `recall`, `list_context`, `observe`. Then:
+You should see three tools: `remember`, `recall`, `observe`. Then:
 
 > "Use neverforget to remember: 'first cross-vendor verification on 2026-05-25'"
 
