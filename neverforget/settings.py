@@ -152,6 +152,12 @@ class Settings(BaseSettings):
     # (useful for local dev without an OpenAI key).
     semantic_recall_enabled: bool = True
 
+    # Phase 3 — Sleep Swarm cold-path workers. When True (default), the
+    # scheduler runs Pruner + Conflict-Resolver + Consolidator on their
+    # configured intervals. Disable for local dev where you don't want
+    # background LLM calls to run unattended.
+    cold_path_enabled: bool = True
+
     @field_validator("vault_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: str | Path) -> Path:
