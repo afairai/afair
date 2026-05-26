@@ -24,8 +24,12 @@ from ..agents.embedding import embed_query
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, landing, schemas
 from .auth import BearerTokenMiddleware
+from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
+from .correlation import CorrelationIdMiddleware
 from .oauth import routes as oauth_routes
+from .rate_limit import RateLimitMiddleware, TokenBucketRateLimiter
+from .security_headers import SecurityHeadersMiddleware
 
 log = structlog.get_logger(__name__)
 
@@ -136,8 +140,13 @@ def build_server(settings: Settings) -> FastMCP:
             db = connect_for_thread()
             db.execute("SELECT 1").fetchone()
         except Exception as e:
+            # Log internally with full detail; expose only a generic flag.
+            # The orchestrator (Fly) acts on the HTTP status, not the body —
+            # so leaking str(e) to anyone-on-the-internet buys nothing and
+            # could surface internal paths or library quirks.
+            log.warning("health.degraded", error=str(e), exc_type=type(e).__name__)
             return JSONResponse(
-                {"status": "degraded", "error": str(e)},
+                {"status": "degraded"},
                 status_code=503,
             )
         return JSONResponse({"status": "ok"})
@@ -173,15 +182,39 @@ def build_app(settings: Settings) -> Starlette:
     }
     exempt_prefixes = ("/oauth/",)
 
+    # Per-identity rate limiter. Instance lives for process lifetime so
+    # buckets aren't lost on every request. Settings stay defaults; if we
+    # need per-deployment tuning later, add to Settings.
+    rate_limiter = TokenBucketRateLimiter()
+
     middleware = [
-        # gzip first (outermost) so compression sees the auth-middleware's
-        # responses too. min_size=500 avoids compressing tiny payloads where
-        # gzip overhead would exceed the saving.
+        # Outermost — correlation id must bind BEFORE other middlewares so
+        # their log lines also carry the request_id field.
+        Middleware(CorrelationIdMiddleware),
+        # Security headers — applied to every response, including 4xx
+        # rejections from middlewares below. Belt-and-suspenders.
+        Middleware(SecurityHeadersMiddleware),
+        # gzip — compression sees responses from middlewares below.
+        # min_size=500 avoids compressing tiny payloads.
         Middleware(GZipMiddleware, minimum_size=500, compresslevel=5),
+        # Body-size cap — reject oversized requests BEFORE uvicorn reads
+        # the whole body into memory. 12 MB > MAX_REMEMBER_BYTES (10MB)
+        # + JSON envelope overhead.
+        Middleware(BodySizeLimitMiddleware),
+        # Authentication — must come BEFORE rate limiting so we don't burn
+        # bucket entries on random unauthenticated probes.
         Middleware(
             BearerTokenMiddleware,
             settings=settings,
             static_token=static_token,
+            exempt_paths=exempt_paths,
+            exempt_prefixes=exempt_prefixes,
+        ),
+        # Rate limiter — per-token bucket, deny-with-429 above the cap.
+        # Authenticated traffic only (auth already rejected unauthed).
+        Middleware(
+            RateLimitMiddleware,
+            limiter=rate_limiter,
             exempt_paths=exempt_paths,
             exempt_prefixes=exempt_prefixes,
         ),
