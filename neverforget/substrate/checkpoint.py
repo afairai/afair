@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -25,7 +26,31 @@ import structlog
 from .db import open_db
 
 if TYPE_CHECKING:
+    import sqlite3
     from pathlib import Path
+
+
+def gc_oauth_codes(conn: sqlite3.Connection) -> int:
+    """Delete expired OAuth authorization codes and login-state rows.
+
+    OAuth /authorize creates short-lived entries that are normally
+    deleted by /token (exchange). If the exchange never happens
+    (abandoned dance, network failure, attacker scanning), the rows
+    sit forever. This sweeps them every checkpoint cycle.
+
+    Returns total rows deleted (codes + state) for logging.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    deleted = 0
+    with conn:
+        c = conn.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now_iso,))
+        deleted += c.rowcount or 0
+        c = conn.execute("DELETE FROM oauth_login_state WHERE expires_at < ?", (now_iso,))
+        deleted += c.rowcount or 0
+    if deleted:
+        log.info("oauth.gc", deleted_rows=deleted)
+    return deleted
+
 
 log = structlog.get_logger(__name__)
 
@@ -61,6 +86,7 @@ def start_checkpoint_loop(
                         checkpointed=row[2],
                         interval_seconds=interval_seconds,
                     )
+                gc_oauth_codes(conn)
             except Exception as e:
                 log.warning("wal.checkpoint_failed", error=str(e))
             finally:

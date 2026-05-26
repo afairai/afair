@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import struct
 import threading
+import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
@@ -39,36 +40,61 @@ class EmbeddingError(Exception):
 # Substrate write embeddings (each event is unique) intentionally bypass
 # this cache. The read-side recall path embeds the SAME query string over
 # and over — caching there turns a 300ms OpenAI roundtrip into a dict
-# lookup. Bounded LRU prevents unbounded memory growth on long sessions.
+# lookup. Bounded LRU + per-entry TTL prevents unbounded memory growth
+# AND prevents storing query embeddings forever even when the cache has
+# spare capacity (LRU alone doesn't expire never-revisited entries).
 _QUERY_CACHE_MAXSIZE = 256
+_QUERY_CACHE_TTL_SECONDS = 3600  # 1 hour
 
 
 class _QueryEmbeddingCache:
-    """Thread-safe bounded LRU. Lock held only for cache mutation; the
-    network call runs unlocked so a slow OpenAI roundtrip doesn't block
-    cache hits from concurrent recall calls.
+    """Thread-safe bounded LRU with per-entry TTL.
+
+    Two-tier eviction:
+      - LRU bound (size cap) — drops oldest-used when full.
+      - TTL bound (age cap) — entries older than ``ttl_seconds`` are
+        treated as misses on read. Prevents stale embeddings sitting
+        in memory forever for queries that fire once and never repeat.
+
+    Lock held only for cache mutation; the network call (on miss)
+    runs unlocked so a slow OpenAI roundtrip doesn't block cache
+    hits from concurrent recall calls.
     """
 
-    def __init__(self, maxsize: int = _QUERY_CACHE_MAXSIZE) -> None:
+    def __init__(
+        self,
+        maxsize: int = _QUERY_CACHE_MAXSIZE,
+        *,
+        ttl_seconds: int = _QUERY_CACHE_TTL_SECONDS,
+    ) -> None:
         self._maxsize = maxsize
-        self._cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._ttl = ttl_seconds
+        # Value tuple: (vector, inserted_at_monotonic)
+        self._cache: OrderedDict[tuple[str, str], tuple[list[float], float]] = OrderedDict()
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
+        self.expired = 0
 
     def get_or_compute(self, *, model: str, text: str, api_key: str | None) -> list[float]:
         key = (model, text)
+        now = time.monotonic()
         with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-                self.hits += 1
-                return list(cached)
+            entry = self._cache.get(key)
+            if entry is not None:
+                vec, ts = entry
+                if now - ts <= self._ttl:
+                    self._cache.move_to_end(key)
+                    self.hits += 1
+                    return list(vec)
+                # Expired — treat as miss and drop the stale entry.
+                del self._cache[key]
+                self.expired += 1
         # Miss — compute outside the lock so other threads can keep hitting
         # the cache while we wait on the network.
         vec = embed_text(model=model, text=text, api_key=api_key)
         with self._lock:
-            self._cache[key] = list(vec)
+            self._cache[key] = (list(vec), time.monotonic())
             self._cache.move_to_end(key)
             self.misses += 1
             while len(self._cache) > self._maxsize:
@@ -80,14 +106,17 @@ class _QueryEmbeddingCache:
             self._cache.clear()
             self.hits = 0
             self.misses = 0
+            self.expired = 0
 
     def stats(self) -> dict[str, int]:
         with self._lock:
             return {
                 "hits": self.hits,
                 "misses": self.misses,
+                "expired": self.expired,
                 "size": len(self._cache),
                 "maxsize": self._maxsize,
+                "ttl_seconds": self._ttl,
             }
 
 

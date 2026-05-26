@@ -122,12 +122,16 @@ def _fake_server() -> Iterator[str]:
 
 def _run_hook(env_extra: dict[str, str], stdin: str = "{}") -> dict:
     """Invoke the hook script as a subprocess; parse its JSON stdout."""
+    # HOME defaults to a non-existent path so the file-fallback discovery
+    # ('~/.neverforget.env') doesn't pick up the developer's real config.
+    # Tests that exercise the file path explicitly override HOME.
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home-for-hook-tests", **env_extra}
     proc = subprocess.run(
         [sys.executable, str(HOOK_SCRIPT)],
         input=stdin,
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", **env_extra},
+        env=env,
         timeout=10,
     )
     assert proc.returncode == 0, f"hook exited {proc.returncode}; stderr={proc.stderr!r}"
