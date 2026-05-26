@@ -51,9 +51,22 @@ DEFAULT_MAX_CYCLES = 100
 
 
 def _did_work(stats: dict[str, Any]) -> bool:
-    """A cycle did real work iff it canonicalized at least one event or
-    cascaded at least one invalidation."""
-    return stats.get("events_canonicalized", 0) > 0 or stats.get("invalidations_cascaded", 0) > 0
+    """A cycle did real work iff it actually wrote something — at least
+    one mention (created/matched), one edge, or one cascade.
+
+    NOTE: we deliberately do NOT count ``events_canonicalized`` alone,
+    because the worker counts events even when they yield zero mentions
+    (an extractor that returned malformed entities). Without the
+    no-mentions marker in place this would loop forever; with the marker
+    in place it's still a more honest heuristic ("did this cycle change
+    the entity graph?") than the raw event counter.
+    """
+    return (
+        stats.get("entities_created", 0) > 0
+        or stats.get("entities_matched_exact", 0) > 0
+        or stats.get("entities_matched_llm", 0) > 0
+        or stats.get("invalidations_cascaded", 0) > 0
+    )
 
 
 def _accumulate(totals: dict[str, int], cycle: dict[str, int]) -> None:

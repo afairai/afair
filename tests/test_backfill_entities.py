@@ -153,8 +153,13 @@ def test_backfill_max_cycles_bounds_runaway(
     def _fake_run(self: ec.EntityCanonicalizer, conn: Any, settings: Any) -> dict[str, Any]:
         call_count["n"] += 1
         stats = real_run(self, conn, settings)
-        # Lie: claim we did work even when we didn't, to test the cycle cap.
-        stats["events_canonicalized"] = 1
+        # Lie: claim we did real work (entities_created) every cycle so
+        # the loop's _did_work heuristic keeps firing — without this the
+        # second cycle naturally goes idle (Stage-1 fixed the
+        # entity_canonicalizer to write a no-mentions marker, and
+        # _did_work now keys off entities_created/matched, not the raw
+        # events_canonicalized counter).
+        stats["entities_created"] = stats.get("entities_created", 0) + 1
         return stats
 
     monkeypatch.setattr(ec.EntityCanonicalizer, "run", _fake_run)
