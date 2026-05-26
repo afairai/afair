@@ -264,10 +264,14 @@ def _summarize_day(
         max_tokens=800,
     )
     data = result.data
+    # Haiku-4.5 routinely ignores JSON-Schema's ``maxItems`` and returns
+    # far more themes/open_threads than asked. First production cycle
+    # wrote 225 themes for one day; truncate here so the cap is enforced
+    # server-side regardless of model compliance.
     return _DaySummary(
         narrative=str(data.get("narrative", "")),
-        themes=[str(t) for t in (data.get("themes") or [])],
-        open_threads=[str(t) for t in (data.get("open_threads") or [])],
+        themes=[str(t) for t in (data.get("themes") or [])][:6],
+        open_threads=[str(t) for t in (data.get("open_threads") or [])][:4],
     )
 
 
