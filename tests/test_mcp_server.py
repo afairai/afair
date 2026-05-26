@@ -38,6 +38,10 @@ def _settings_for(tmp_path: Path) -> Settings:
         _env_file=None,  # type: ignore[call-arg]
         environment="local",
         vault_dir=tmp_path,
+        # Phase 3 cold-path workers race with the test's own DB connection
+        # on SQLite write locks. Disable for the build_server tests; the
+        # workers are tested directly in tests/test_phase3_workers.py.
+        cold_path_enabled=False,
     )
 
 
