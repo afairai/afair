@@ -70,3 +70,8 @@ logs/
 
 # Scratch (gitignored per ~/.claude/rules/documentation.md)
 .claude/scratch/
+
+# Claude Code session/runtime state — should never be committed
+.claude/scheduled_tasks.lock
+.claude/sessions/
+.claude/.history

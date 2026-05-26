@@ -54,6 +54,37 @@ The workflow at `.github/workflows/deploy.yml`:
 
 Watch progress: `gh run watch` or [github.com/gowry/neverforget/actions](https://github.com/gowry/neverforget/actions)
 
+### When push-to-main does NOT auto-trigger CI
+
+Observed 2026-05-26: GitHub Actions' push-event dispatcher silently
+dropped a string of consecutive pushes — workflow runs never enqueued
+even though the commits landed on `main`. Repo hooks are empty by
+design (Actions uses GitHub's internal dispatcher, not user-visible
+webhooks), so there's no way to verify delivery from the outside.
+
+**Recovery steps (in order):**
+
+1. Manual workflow dispatch — wakes the dispatcher up:
+   ```bash
+   gh workflow run deploy.yml --ref main
+   gh run watch
+   ```
+   If this fails with HTTP 500, retry — it's typically transient.
+
+2. If `gh workflow run` keeps failing, fall back to direct flyctl:
+   ```bash
+   flyctl deploy --app neverforget --remote-only --wait-timeout 300
+   ```
+   This bypasses CI entirely. Run the smoke against the deployed app
+   afterwards (see §9) to confirm the deploy went through:
+   ```bash
+   URL=https://neverforget.fly.dev TOKEN=$(grep '^NEVERFORGET_AUTH_TOKEN=' .env.local | cut -d= -f2-) \
+     uv run python scripts/smoke_mcp.py
+   ```
+
+3. Document the recovery in `analysis/phase-0-journal.md` so the next
+   pipeline incident has prior art.
+
 ### Manual fallback
 
 If GH Actions is unavailable or you want to deploy from a non-main branch:

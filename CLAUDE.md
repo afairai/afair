@@ -145,6 +145,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `.github/workflows/deploy.yml` | Branch-based CI deploy to Fly | When pipeline changes |
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
+| `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
+| `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 
 ## 5. Invariants — quick reference

@@ -30,6 +30,15 @@ across sessions, AI clients, and devices. Use it daily:
 4. **At session start** for unfamiliar contexts, call `recall(stats=True)`
    to see a structured overview of the vault (totals, kind breakdown,
    recent events). For a single past event by id, use `recall(by_id=...)`.
+5. **When recall returns hits**, each one carries
+   `interpretation.canonical_entities` (people, orgs, projects mentioned),
+   `interpretation.entity_edges` (subject-predicate-object relations
+   discovered in that event), and `interpretation.surprise_score` ∈ [0,1]
+   (0 = entities all match the user's recent context; 1 = entities come
+   from nowhere). Use the entities + edges to disambiguate context
+   (Sajinth-from-elvah vs. Sajinth-from-Athara are different canonicals).
+   High surprise on a hit is a signal that more context-pulling may be
+   needed before acting on it.
 
 Be a thoughtful librarian. Save signal, not noise. The substrate is the
 user's vault, not yours.
