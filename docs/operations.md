@@ -241,7 +241,55 @@ fly ssh console -a neverforget -C "sqlite3 /data/vault/substrate.db 'SELECT COUN
 
 ---
 
-## 10. Common failures
+## 10. Rebuild the entity graph from substrate
+
+The Phase 4 Track 1 entity graph (`entities`, `entity_mentions`,
+`entity_edges`, `entity_merges`, `edge_invalidations`) is **regenerable**
+per Invariant I3: every row is derived from substrate events +
+extractor interpretations. If you want to throw it away and rebuild
+(e.g., after a canonicalizer version bump), the recipe:
+
+```bash
+# 1. SSH to the running Fly machine
+fly ssh console -a neverforget
+
+# 2. Drop the entity-graph tables (substrate events untouched)
+sqlite3 /data/vault/substrate.db <<'SQL'
+DROP TABLE IF EXISTS edge_invalidations;
+DROP TABLE IF EXISTS entity_merges;
+DROP TABLE IF EXISTS entity_edges;
+DROP TABLE IF EXISTS entity_mentions;
+DROP TABLE IF EXISTS entities;
+SQL
+
+# 3. Restart the machine so the schema DDL re-runs and recreates the
+#    empty tables with their I2 triggers
+fly machine restart -a neverforget
+
+# 4. Run the backfill — populates the empty graph from existing events
+fly ssh console -a neverforget -C \
+  "uv run python /app/scripts/backfill_entities.py"
+```
+
+Expected output: per-cycle progress lines, then a `backfill complete`
+summary with the same shape as the worker's stats dict. The script
+also writes an `observe` event recording the rebuild so the operation
+is journaled in the substrate (I7).
+
+**Idempotency:** safe to re-run. Skips events that already have
+mentions. Skips invalidate events that already have a cascade marker.
+
+**Bounded:** default cap of 100 cycles (`--max-cycles N` to override).
+Each cycle is also LLM-budget-bounded so a runaway script can't burn
+through your Anthropic quota.
+
+**Off-server alternative:** download the substrate (`§4 Backup to
+laptop`), run the backfill locally with `--vault-dir ./backup`, then
+upload the result back. Useful when the running server is busy.
+
+---
+
+## 11. Common failures
 
 ### `address already in use` on local dev
 You have a `neverforget` server already running. `lsof -i :8765` to find it.
