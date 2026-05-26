@@ -57,6 +57,8 @@ class ServerContext:
     embedding_dim: int = 1536
     semantic_recall_enabled: bool = True
     cold_path_enabled: bool = True
+    # Phase 4 Track 2 — see Settings.surprise_context_window
+    surprise_context_window: int = 20
     # Optional override — set ONLY in unit tests that want to share their
     # fixture's connection with handler calls. Production leaves this None
     # so connect_for_thread() opens per-thread connections.

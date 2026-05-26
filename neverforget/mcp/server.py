@@ -74,6 +74,7 @@ def build_server(settings: Settings) -> FastMCP:
             embedding_dim=settings.embedding_dim,
             semantic_recall_enabled=settings.semantic_recall_enabled,
             cold_path_enabled=settings.cold_path_enabled,
+            surprise_context_window=settings.surprise_context_window,
         )
     )
 

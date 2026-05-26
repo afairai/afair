@@ -258,9 +258,12 @@ def _event_to_hit(
     if entity_overlay:
         if interpretation is None:
             interpretation = {}
-        for key, value in entity_overlay.items():
-            if value:
-                interpretation[key] = value
+        # The overlay builder only puts useful values in the dict — empty
+        # lists are never set there. So we pass everything through, INCLUDING
+        # falsy-but-meaningful numerics like ``surprise_score=0.0`` (a hit
+        # whose entities are all familiar). A blanket truthy-guard here
+        # would silently drop those.
+        interpretation.update(entity_overlay)
 
     conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
@@ -279,6 +282,58 @@ def _event_to_hit(
     )
 
 
+def _recent_canonical_context(db: Any, window: int) -> set[str]:
+    """Set of canonical entity IDs mentioned in the last ``window`` events.
+
+    Used by the Phase 4 Track 2 surprise score: each recall hit is
+    measured against this set. Hits whose canonical entities all live
+    in this set score 0.0 (familiar); hits with no overlap score 1.0
+    (novel / "where did this come from").
+
+    Cheap to compute — one indexed-join + a merge-resolve pass over the
+    deduped entity IDs. Window covers ``remember``+``observe`` events
+    (the user-driven kinds); ignores ``consolidation``/``invalidate``
+    which are system-generated.
+    """
+    if window <= 0:
+        return set()
+    rows = db.execute(
+        """
+        SELECT DISTINCT em.entity_id
+        FROM entity_mentions em
+        JOIN events e ON e.id = em.event_id
+        WHERE e.kind IN ('remember', 'observe')
+          AND e.id IN (
+              SELECT id FROM events
+              WHERE kind IN ('remember', 'observe')
+              ORDER BY created_at DESC
+              LIMIT ?
+          )
+        """,
+        (window,),
+    ).fetchall()
+    raw_ids = [r["entity_id"] for r in rows]
+    if not raw_ids:
+        return set()
+    resolved = resolve_canonical_batch(db, raw_ids)
+    return set(resolved.values())
+
+
+def _compute_surprise_score(
+    hit_canonical_ids: list[str], recent_context: set[str]
+) -> tuple[float, int, int] | None:
+    """Entity-novelty surprise. Returns (score, novel_count, total_count)
+    or None when the hit has no canonical entities to score against.
+
+    score ∈ [0, 1]: 0 = all entities familiar, 1 = all entities novel.
+    """
+    if not hit_canonical_ids:
+        return None
+    unique = set(hit_canonical_ids)
+    novel = unique - recent_context
+    return (len(novel) / len(unique), len(novel), len(unique))
+
+
 def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, Any]]:
     """For every event in ``events``, compute the per-hit entity overlay.
 
@@ -290,7 +345,10 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
       3. edges sourced from every event_id, filtered to non-invalidated
          (decision #6 again — hide superseded by default)
 
-    Returns ``{content_hash → {canonical_entities, entity_edges}}``.
+    Plus one Phase-4-Track-2 read (the recent-context window for the
+    per-hit surprise score) that's amortized across all hits.
+
+    Returns ``{content_hash → {canonical_entities, entity_edges, surprise_score, surprise_components}}``.
     Events with neither mentions nor edges are absent from the result;
     the caller treats that as "no overlay" and leaves interpretation as-is.
     """
@@ -320,6 +378,11 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
     resolved_map = resolve_canonical_batch(db, list(raw_ids))
     canonical_entities = read_entities_batch(db, list(set(resolved_map.values())))
 
+    # Phase 4 Track 2 — recent context for the per-hit surprise score.
+    # Computed once per recall and applied to every hit.
+    ctx = get_context()
+    recent_context = _recent_canonical_context(db, ctx.surprise_context_window)
+
     overlay: dict[str, dict[str, Any]] = {}
     for content_hash, mentions in mentions_by_hash.items():
         # Dedupe canonical entities — multiple surface forms can map to
@@ -345,6 +408,21 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             )
         if ents:
             overlay.setdefault(content_hash, {})["canonical_entities"] = ents
+            # Phase 4 Track 2 — surface the per-hit surprise score.
+            # Computed from the *resolved* canonical IDs (post-merge), so
+            # supersession is honored in the comparison: an entity that's
+            # been merged into another's canonical inherits its
+            # familiar-or-novel status.
+            hit_canonical_ids = [e["id"] for e in ents]
+            surprise = _compute_surprise_score(hit_canonical_ids, recent_context)
+            if surprise is not None:
+                score, novel, total = surprise
+                overlay[content_hash]["surprise_score"] = round(score, 3)
+                overlay[content_hash]["surprise_components"] = {
+                    "novel_entity_count": novel,
+                    "total_entity_count": total,
+                    "window_size": ctx.surprise_context_window,
+                }
 
     # Attach edges keyed by content_hash via event_id reverse-map.
     event_id_to_hash = {e.id: e.content_hash for e in events}
