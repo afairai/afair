@@ -6,7 +6,19 @@ the v0 lineup:
 
   - Pruner            — interpretation-layer hygiene (no LLM)
   - Conflict-Resolver — flags semantically-similar events that contradict
-  - Consolidator      — daily theme summaries
+  - Consolidator      — daily theme summaries (CLS replay; see consolidator.py)
+
+Theoretical framing (see VISION.md §6.1a): cold-path work is the
+software analog of the brain's DMN-mode (Default Mode Network) —
+mind-wandering, consolidation, and ontology refinement that happens
+when the system isn't actively responding to a user query. The split
+between hot-path (CEN-mode, task work) and cold-path (DMN-mode,
+reflection) is the architectural expression of the Triple Network
+Model's mode-switching. The deeper justification is Complementary
+Learning Systems: the episodic substrate cannot do its own
+generalization without catastrophic interference, so a separate
+semantic-abstraction pass (this scheduler's workers) runs at slower
+cadence over the same data.
 
 Architectural contract:
 
