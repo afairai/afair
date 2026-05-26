@@ -244,3 +244,64 @@ so future-me has the architectural context when reading later entries.
 observations during daily use, I (Claude) append them here in
 formatted entries. Append-only, never rewrite past entries. Marker
 this entry as the start of the user-dictated portion.
+
+---
+
+### Day 2 (continued) — 2026-05-26 evening: cross-session bug catch
+
+**Win ✅ — cross-session debugging via the vault itself**
+
+Parallel claude.ai mobile session audited the vault and noticed daily
+consolidation event `01KSHN1BRJ8TX4HZ1VNNFSNV3M` (31 parent_hashes,
+2026-05-26 08:04:52 UTC) had a malformed `context` field:
+`"v, e, n, d, o, r,  , n, e, u, t, r, a, l, i, t, y, ..."` — clearly
+character-iteration corruption. Logged as observe event
+`01KSJX608Q63GJ6TP9TY5A8XZ7`.
+
+This Claude-Code session picked up the find via `recall("consolidator bug")`,
+read the observe payload, traced root cause, patched, tested, deployed
+— all within ~15 min, without the human user having to relay any
+technical context. The vault was the communication medium between the
+two AI sessions.
+
+**Architecture pressure 🏗️ — Haiku schema-compliance is a real risk**
+
+The bug: `_summarize_day` did
+`[str(t) for t in (data.get("themes") or [])]` to coerce LLM output.
+When Haiku returned `themes: "vendor neutrality, ..."` as a single
+STRING instead of the requested JSON array, the comprehension iterated
+the string over its characters → list-of-single-chars. Pydantic
+accepted the result (each char IS a `str`), `", ".join()` then
+produced the corruption. Tool-use schema enforcement is provider-side;
+Haiku ignored it.
+
+This is a deeper signal: **even tool-call-forced output is not
+schema-guaranteed.** Defensive `isinstance` guards at every
+deserialization point are non-optional for Phase 3+ agent reliability.
+
+The same pattern probably needs auditing in: extractor (entities,
+salient_facts, time_references), conflict_resolver (verdict enum),
+entity_canonicalizer (matched_entity_id). All places where the LLM
+might silently return wrong types.
+
+**Friction 🛠️ — already-corrupted event stays in the substrate**
+
+Per I2, the corrupt consolidation event can't be modified. Per I3, it
+can be re-interpreted but that means writing a NEW consolidation with
+the same parent_hashes. Decision: leave the bad event alone for now —
+it's not actively breaking anything (recall returns it fine), and
+future cycles produce clean output. If the bad event later surfaces as
+a problem (e.g., FTS catches a single character as a query match
+suspiciously often), we'll regenerate.
+
+**Code change:** commit `4f51ea7` introduces
+`_coerce_to_string_list(value, field=)` that explicitly type-checks
+LLM-returned values before iteration. String input wraps as a
+one-element list with a structured warning logged. Three new tests
+cover list-input, string-input, and unit cases.
+
+**Why this is a "win" not a "miss":** the bug existed in the deployed
+system this morning, and a parallel AI session caught it during normal
+daily use via the entity graph + recall surface we just shipped. The
+vault as cross-session debugging medium is exactly the "this saved me
+work" pattern the gate is looking for.
