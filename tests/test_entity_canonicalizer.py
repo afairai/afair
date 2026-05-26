@@ -620,6 +620,61 @@ def test_canonicalizer_produces_stamped_mention_metadata(
     assert mention.match_method == "new"
 
 
+def test_event_with_only_filtered_entities_gets_no_mentions_marker(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: an extractor that returns entities with empty names
+    (or malformed shapes) used to make the worker loop forever — the
+    NOT EXISTS query kept finding the event because no mentions ever
+    landed. The no-mentions marker breaks the loop.
+
+    First cycle: worker processes the event, writes the marker.
+    Second cycle: _find_uncanonicalized_events skips the event because
+    the marker is now present.
+    """
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    # Event whose extractor returned entities-list with all-filtered shapes.
+    event = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "x"}
+    )
+    write_interpretation(
+        db,
+        event=event,
+        version=1,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        extraction={
+            "status": "success",
+            "best_guess_kind": "fact",
+            "summary": "x",
+            "entities": [
+                {"name": "", "type": "person"},  # empty name → filtered
+                {"name": "   ", "type": "person"},  # whitespace-only → filtered
+                "not-a-dict",  # malformed → filtered
+            ],
+            "relations": [],
+        },
+    )
+
+    # First cycle: marker lands.
+    stats1 = EntityCanonicalizer().run(db, settings)
+    assert stats1["events_canonicalized"] == 1
+    assert stats1["entities_created"] == 0
+
+    marker_count = db.execute(
+        "SELECT COUNT(*) AS n FROM interpretations WHERE produced_by = ?",
+        (ec.NO_MENTIONS_PRODUCED_BY,),
+    ).fetchone()
+    assert marker_count["n"] == 1
+
+    # Second cycle: marker prevents re-processing.
+    stats2 = EntityCanonicalizer().run(db, settings)
+    assert stats2["events_canonicalized"] == 0
+
+
 def test_canonicalizer_ignores_failed_extractions(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
