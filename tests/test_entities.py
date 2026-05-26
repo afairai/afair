@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.substrate import (
+from afair.substrate import (
     entity_id,
     find_edges_for_source_event,
     find_entity_by_name,
@@ -216,7 +216,7 @@ def test_entity_merges_self_merge_rejected(db: sqlite3.Connection, sample_event_
         confidence=0.5,
     )
     # Python guard.
-    from neverforget.substrate import write_entity_merge as wem
+    from afair.substrate import write_entity_merge as wem
 
     with pytest.raises(ValueError, match="cannot merge an entity into itself"):
         wem(

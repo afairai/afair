@@ -6,18 +6,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.agents.invalidation import (
+from afair.agents.invalidation import (
     INVALIDATE_KIND,
     InvalidationInfo,
     read_invalidation,
     read_invalidations_batch,
     write_invalidation,
 )
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.handlers import InvalidateTargetError
-from neverforget.mcp.schemas import TextContent
-from neverforget.substrate import open_db, write_event
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.mcp.handlers import InvalidateTargetError
+from afair.mcp.schemas import TextContent
+from afair.substrate import open_db, write_event
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,7 +43,7 @@ def ctx(tmp_path: Path) -> Iterator[ServerContext]:
 
 @pytest.fixture(autouse=True)
 def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", lambda _id: None)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", lambda _id: None)
 
 
 # ── substrate layer ────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ def test_write_invalidation_creates_append_only_event(ctx: ServerContext) -> Non
     assert count == 2
 
     # Original event still readable verbatim.
-    from neverforget.substrate import read_event_by_hash
+    from afair.substrate import read_event_by_hash
 
     still_there = read_event_by_hash(ctx.db, original.content_hash)
     assert still_there is not None

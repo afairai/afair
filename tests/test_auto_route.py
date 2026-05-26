@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.handlers import _auto_route_depth
-from neverforget.mcp.schemas import TextContent
-from neverforget.substrate import open_db
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.mcp.handlers import _auto_route_depth
+from afair.mcp.schemas import TextContent
+from afair.substrate import open_db
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -41,7 +41,7 @@ def ctx(tmp_path: Path) -> Iterator[ServerContext]:
 
 @pytest.fixture(autouse=True)
 def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", lambda _id: None)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", lambda _id: None)
 
 
 # ── heuristic-level tests ──────────────────────────────────────────────────

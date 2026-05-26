@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from neverforget.agents import llm
+from afair.agents import llm
 
 # A simple schema reused across tests.
 SCHEMA = {

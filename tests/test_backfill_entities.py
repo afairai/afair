@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from neverforget.agents import entity_canonicalizer as ec
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.substrate import open_db, write_event
+from afair.agents import entity_canonicalizer as ec
+from afair.agents.interpretation import write_interpretation
+from afair.substrate import open_db, write_event
 from scripts.backfill_entities import main
 
 if TYPE_CHECKING:

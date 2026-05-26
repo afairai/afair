@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from neverforget.settings import Settings
+from afair.settings import Settings
 
 if TYPE_CHECKING:
     from pathlib import Path

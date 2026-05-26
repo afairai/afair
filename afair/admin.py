@@ -1,8 +1,8 @@
 """Admin / one-shot maintenance commands.
 
-Runnable via ``python -m neverforget.admin <command>`` either locally
-(against ~/.env.local) or remotely (``fly ssh console -a neverforget -C
-"python -m neverforget.admin backfill"``).
+Runnable via ``python -m afair.admin <command>`` either locally
+(against ~/.env.local) or remotely (``fly ssh console -a afair -C
+"python -m afair.admin backfill"``).
 
 Commands:
   backfill       — ensure every event has an embedding + bind record.
@@ -388,7 +388,7 @@ def switch_embedding_model(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="neverforget.admin")
+    parser = argparse.ArgumentParser(prog="afair.admin")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("backfill", help="embed + bind missing events")

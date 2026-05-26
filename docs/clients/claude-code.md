@@ -1,4 +1,4 @@
-# Claude Code (CLI) — connecting to neverforget
+# Claude Code (CLI) — connecting to afair
 
 Claude Code's `.mcp.json` lives at three possible scopes; pick the one that
 matches your workflow:
@@ -18,27 +18,27 @@ Add to `~/.claude/settings.json`:
 ```jsonc
 {
   "mcpServers": {
-    "neverforget": {
+    "afair": {
       "type": "http",
-      "url": "https://neverforget.fly.dev/mcp",
+      "url": "https://afair.fly.dev/mcp",
       "headers": {
-        "Authorization": "Bearer <NEVERFORGET_AUTH_TOKEN>"
+        "Authorization": "Bearer <AFAIR_AUTH_TOKEN>"
       }
     }
   }
 }
 ```
 
-Replace `<NEVERFORGET_AUTH_TOKEN>` with the value from your `.env.local`
+Replace `<AFAIR_AUTH_TOKEN>` with the value from your `.env.local`
 (or from your password manager — never paste it in chat or commit it).
 
 You can also do it via the CLI:
 
 ```bash
-claude mcp add neverforget \
+claude mcp add afair \
   --transport http \
-  --url https://neverforget.fly.dev/mcp \
-  --header "Authorization=Bearer <NEVERFORGET_AUTH_TOKEN>"
+  --url https://afair.fly.dev/mcp \
+  --header "Authorization=Bearer <AFAIR_AUTH_TOKEN>"
 ```
 
 ## 2. Add the instruction snippet
@@ -51,13 +51,13 @@ Append the contents of [_snippet.md](_snippet.md) to `~/.claude/CLAUDE.md`
 Restart Claude Code (or reload the MCP server with `/mcp` then reconnect).
 Then ask:
 
-> Use the neverforget MCP server to list the tools available.
+> Use the afair MCP server to list the tools available.
 
 Expected: three tools listed — `remember`, `recall`, `observe`.
 
 Now exercise the round-trip:
 
-> Use neverforget to remember: "first claude-code verification on
+> Use afair to remember: "first claude-code verification on
 > 2026-05-25, the round-trip works"
 
 Then in **the same conversation** (proving the tool works at all):
@@ -86,9 +86,9 @@ status. Common causes:
 Token is wrong. Verify locally:
 
 ```bash
-TOKEN=$(grep '^NEVERFORGET_AUTH_TOKEN=' .env.local | cut -d= -f2-)
+TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-)
 curl -s -o /dev/null -w "%{http_code}\n" \
-  -X POST https://neverforget.fly.dev/mcp \
+  -X POST https://afair.fly.dev/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \
@@ -103,11 +103,11 @@ config is wrong. `401` = token wrong, regenerate.
 The Fly machine is degraded. Check:
 
 ```bash
-fly logs --app neverforget
+fly logs --app afair
 ```
 
 Usually a substrate-DB issue at boot. Most often resolved by
-`fly machine restart 1859472c239438 --app neverforget`.
+`fly machine restart 1859472c239438 --app afair`.
 
 ### Auto-accept-edits + MCP tools
 

@@ -19,13 +19,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.agents import entity_canonicalizer as ec
-from neverforget.agents.entity_canonicalizer import EntityCanonicalizer
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.settings import Settings
-from neverforget.substrate import open_db, write_event
+from afair.agents import entity_canonicalizer as ec
+from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.agents.interpretation import write_interpretation
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.settings import Settings
+from afair.substrate import open_db, write_event
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -52,7 +52,7 @@ def ctx(tmp_path: Path) -> Iterator[ServerContext]:
 
 @pytest.fixture(autouse=True)
 def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", lambda _id: None)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", lambda _id: None)
 
 
 @pytest.fixture(autouse=True)
@@ -305,7 +305,7 @@ def test_supersession_makes_merged_entity_familiar(ctx: ServerContext, settings:
     """When entity A is merged into B, recall hits mentioning A should
     treat A's canonical (= B) as the comparison key. So if B was recent,
     a hit mentioning A is NOT surprising."""
-    from neverforget.substrate import write_entity_merge
+    from afair.substrate import write_entity_merge
 
     # Establish "Sajinth-elvah" via one event.
     a_id = _seed(

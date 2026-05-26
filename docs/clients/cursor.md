@@ -1,4 +1,4 @@
-# Cursor — connecting to neverforget
+# Cursor — connecting to afair
 
 Cursor supports MCP servers via `.cursor/mcp.json` at user or project scope.
 
@@ -9,11 +9,11 @@ Create `~/.cursor/mcp.json` (or `<project>/.cursor/mcp.json`):
 ```jsonc
 {
   "mcpServers": {
-    "neverforget": {
+    "afair": {
       "type": "http",
-      "url": "https://neverforget.fly.dev/mcp",
+      "url": "https://afair.fly.dev/mcp",
       "headers": {
-        "Authorization": "Bearer <NEVERFORGET_AUTH_TOKEN>"
+        "Authorization": "Bearer <AFAIR_AUTH_TOKEN>"
       }
     }
   }
@@ -30,7 +30,7 @@ Or via the Cursor UI:
 
 Cursor reads instructions from a few places — pick one or both:
 
-- **Project-scoped:** create `.cursor/rules/neverforget.md` and paste the
+- **Project-scoped:** create `.cursor/rules/afair.md` and paste the
   contents of [_snippet.md](_snippet.md).
 - **Workspace-scoped:** add to `.cursorrules` at the repo root.
 - **Global (Cursor-wide):** Settings → Rules → "Rules for AI", paste the
@@ -40,18 +40,18 @@ Cursor reads instructions from a few places — pick one or both:
 
 Restart Cursor. In a chat with the AI:
 
-> Use the neverforget MCP server to list its tools.
+> Use the afair MCP server to list its tools.
 
 Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip:
 
-> Use neverforget to remember: "Cursor verification 2026-05-25, the
+> Use afair to remember: "Cursor verification 2026-05-25, the
 > cross-vendor stack is working"
 
 Then in a new Cursor chat (or from another client):
 
-> What did we save in neverforget about 2026-05-25?
+> What did we save in afair about 2026-05-25?
 
 ## Troubleshooting
 

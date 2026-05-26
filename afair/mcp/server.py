@@ -57,7 +57,7 @@ def build_server(settings: Settings) -> FastMCP:
     ``connect_for_thread()`` so SQLite WAL's concurrent-reader model
     is actually exercised when multiple AI clients hit the server.
 
-    The server name "neverforget" is the codename surface visible to MCP
+    The server name "afair" is the codename surface visible to MCP
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
@@ -108,7 +108,7 @@ def build_server(settings: Settings) -> FastMCP:
     # so the first real recall isn't penalized.
     _spawn_warmup(settings)
 
-    mcp: FastMCP = FastMCP("neverforget")
+    mcp: FastMCP = FastMCP("afair")
 
     # ── tools — descriptions are AI-facing prompts, see descriptions.py ─────
 

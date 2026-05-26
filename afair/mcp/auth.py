@@ -1,6 +1,6 @@
 """HTTP-level authentication for the MCP server — accepts EITHER:
 
-  1. The static bearer token (`NEVERFORGET_AUTH_TOKEN`) — defense in depth,
+  1. The static bearer token (`AFAIR_AUTH_TOKEN`) — defense in depth,
      server-to-server convenience, CI smoke usability.
   2. A JWT we issued via the OAuth resource server (Phase 1+).
 
@@ -47,8 +47,7 @@ def _www_authenticate_header(settings: Settings) -> str:
     """
     issuer = settings.effective_oauth_issuer
     return (
-        f'Bearer realm="neverforget", '
-        f'resource_metadata="{issuer}/.well-known/oauth-protected-resource"'
+        f'Bearer realm="afair", resource_metadata="{issuer}/.well-known/oauth-protected-resource"'
     )
 
 

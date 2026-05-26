@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from neverforget.mcp.rate_limit import TokenBucketRateLimiter
+from afair.mcp.rate_limit import TokenBucketRateLimiter
 
 
 def test_initial_burst_capacity_allows_2x_minute_rate() -> None:
@@ -106,7 +106,7 @@ def test_query_cache_ttl_expires_stale_entries() -> None:
     import time as time_module
     from unittest.mock import patch
 
-    from neverforget.agents.embedding import _QueryEmbeddingCache
+    from afair.agents.embedding import _QueryEmbeddingCache
 
     cache = _QueryEmbeddingCache(maxsize=100, ttl_seconds=60)
 
@@ -116,7 +116,7 @@ def test_query_cache_ttl_expires_stale_entries() -> None:
         calls["n"] += 1
         return [0.1] * 4
 
-    with patch("neverforget.agents.embedding.embed_text", fake_embed):
+    with patch("afair.agents.embedding.embed_text", fake_embed):
         # First call — miss.
         cache.get_or_compute(model="m", text="q", api_key=None)
         assert calls["n"] == 1
