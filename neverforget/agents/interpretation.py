@@ -3,6 +3,15 @@
 Per Invariant I3, the substrate row is immutable; everything derived sits
 here. Multiple interpretations may coexist per event (different versions,
 different producers). The substrate may always be re-interpreted forever.
+
+Theoretical framing: this is the **distributed semantic store** in our
+Complementary Learning Systems analog (see VISION.md §6.1a). The
+substrate is hippocampus-like — fast, sparse, episodic, immutable. The
+interpretation layer is neocortex-like — slower, distributed, semantic,
+freely revisable. The biological motivation for splitting the two
+(catastrophic interference: one system can't both learn fast AND
+generalize well) maps directly onto our split (I2 immutability gives us
+the audit trail; I3 mutability gives us regeneration as agents improve).
 """
 
 from __future__ import annotations
