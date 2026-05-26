@@ -224,9 +224,7 @@ def _events_for_day(conn: sqlite3.Connection, day: date) -> list[Event]:
     from ..substrate.events import row_to_event
 
     start = datetime.combine(day, datetime.min.time(), tzinfo=UTC).isoformat()
-    end = datetime.combine(
-        day + timedelta(days=1), datetime.min.time(), tzinfo=UTC
-    ).isoformat()
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=UTC).isoformat()
     rows = conn.execute(
         """
         SELECT * FROM events
