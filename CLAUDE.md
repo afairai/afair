@@ -33,6 +33,11 @@
   `interpretation.canonical_entities` + `interpretation.entity_edges`,
   entity-aware query routing for `recall(query=)`. One-shot backfill at
   `scripts/backfill_entities.py`.
+- **Phase 4 Track 2 v0 Surprise score** — per-hit
+  `interpretation.surprise_score ∈ [0,1]` based on entity-novelty against
+  the recent context window (last N events, default 20, configurable via
+  `SURPRISE_CONTEXT_WINDOW`). Plus `surprise_components` audit dict.
+  Mode-switching agent (Phase 2 dependency) still deferred.
 - **Fly deployment live at https://neverforget.fly.dev** — single-tenant
   machine in `fra`, 1 GB volume `vault` with 5-day auto-snapshots,
   `strategy = "immediate"`, `min_machines_running = 1`
@@ -46,7 +51,7 @@
 
 - Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
-- Phase 4 Track 2 (Active-Inference Salience) — surprise-score per recall hit + CEN↔DMN mode-switching agent; depends on Phase 2 Salience agent which doesn't exist yet
+- Phase 4 Track 2 mode-switching agent (CEN↔DMN routing driven by cumulative surprise + auto-`observe()` on threshold) — depends on Phase 2 Salience agent which doesn't exist yet. v0 surprise-score per hit IS live.
 
 ### 0.3 What's blocked
 
