@@ -10,10 +10,7 @@ from pydantic import ValidationError
 
 from neverforget.mcp import handlers
 from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.handlers import (
-    EventNotFoundError,
-    InvalidGetEventArgsError,
-)
+from neverforget.mcp.handlers import InvalidRecallArgsError
 from neverforget.mcp.schemas import (
     MAX_REMEMBER_BYTES,
     BinaryContent,
@@ -186,8 +183,8 @@ def test_recall_shallow_finds_match(ctx: ServerContext) -> None:
     assert r.depth_used == "shallow"
     assert r.note is None
     assert len(r.hits) == 1
-    assert "text" in r.hits[0].payload_summary
-    assert "Sajinth" in r.hits[0].payload_summary["text"]
+    assert "text" in r.hits[0].payload
+    assert "Sajinth" in r.hits[0].payload["text"]
 
 
 def test_recall_normal_depth_with_semantic_disabled_returns_shallow(
@@ -250,9 +247,10 @@ def test_recall_truncates_long_text_in_summary(ctx: ServerContext) -> None:
     handlers.remember(content=TextContent(type="text", text=long_text))
     r = handlers.recall(query="important")
     assert len(r.hits) == 1
-    summary = r.hits[0].payload_summary
-    assert summary["truncated"] is True
-    assert len(summary["text"]) <= 500
+    hit = r.hits[0]
+    # The truncated flag lives on the hit itself in the new shape.
+    assert hit.truncated is True
+    assert len(hit.payload["text"]) <= 500
 
 
 def test_recall_empty_vault_returns_no_hits(ctx: ServerContext) -> None:
@@ -264,35 +262,41 @@ def test_recall_empty_vault_returns_no_hits(ctx: ServerContext) -> None:
 # ── list_context ────────────────────────────────────────────────────────────
 
 
-def test_list_context_empty(ctx: ServerContext) -> None:
-    r = handlers.list_context()
+def test_recall_stats_empty_vault(ctx: ServerContext) -> None:
+    """recall(stats=True) replaces the old list_context — same semantics."""
+    r = handlers.recall(stats=True)
+    assert r.summary is not None
     assert r.summary.total_events == 0
     assert r.summary.by_kind == {}
     assert r.summary.by_origin == {}
-    assert r.summary.recent == []
+    assert r.hits == []  # no events yet
 
 
-def test_list_context_counts_by_kind_and_origin(ctx: ServerContext) -> None:
+def test_recall_stats_counts_by_kind_and_origin(ctx: ServerContext) -> None:
     handlers.remember(content=TextContent(type="text", text="a"))
     handlers.remember(content=TextContent(type="text", text="b"))
     handlers.observe(event=ObserveEvent(action="edit_file", subject="foo.py"))
 
-    r = handlers.list_context()
+    r = handlers.recall(stats=True)
+    assert r.summary is not None
     assert r.summary.total_events == 3
     assert r.summary.by_kind == {"remember": 2, "observe": 1}
     assert r.summary.by_origin == {"agent": 3}
 
 
-def test_list_context_about_filters(ctx: ServerContext) -> None:
+def test_recall_with_query_and_stats(ctx: ServerContext) -> None:
     handlers.remember(
         content=TextContent(type="text", text="roadmap for Q3"),
         context="planning",
     )
     handlers.remember(content=TextContent(type="text", text="lunch ideas"))
 
-    r = handlers.list_context(about="roadmap")
-    assert len(r.summary.recent) == 1
-    assert "roadmap" in r.summary.recent[0].payload_summary["text"]
+    r = handlers.recall(query="roadmap", stats=True)
+    # search returns the relevant hit, summary covers the whole vault
+    assert len(r.hits) == 1
+    assert "roadmap" in r.hits[0].payload["text"]
+    assert r.summary is not None
+    assert r.summary.total_events == 2
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
@@ -357,74 +361,78 @@ def test_observe_then_recall_finds_it(ctx: ServerContext) -> None:
     # Single-word query — avoids FTS5 special-char interpretation of hyphens.
     r = handlers.recall(query="inline")
     assert len(r.hits) == 1
-    assert r.hits[0].payload_summary["action"] == "edit_file"
-    assert r.hits[0].payload_summary["subject"] == "events.py"
+    assert r.hits[0].payload["action"] == "edit_file"
+    assert r.hits[0].payload["subject"] == "events.py"
 
 
-# ── get_event — full payload retrieval ─────────────────────────────────────
+# ── recall by_id / by_content_hash / full_payload (absorbs get_event) ─────
 
 
-def test_get_event_returns_full_text_no_truncation(ctx: ServerContext) -> None:
-    """A long inline-text event surfaces verbatim via get_event,
-    while recall still truncates the same hit at 500 chars."""
+def test_recall_by_id_returns_full_text_no_truncation(ctx: ServerContext) -> None:
+    """A long inline-text event surfaces verbatim via recall(by_id=...,
+    full_payload=True), while default recall(query) still truncates."""
     long_text = "Section " + "A" * 2000 + " — End"
     r = handlers.remember(content=TextContent(type="text", text=long_text))
 
-    # Recall truncates to 500 chars (the existing behavior we keep).
+    # Default recall truncates the text payload.
     recall_result = handlers.recall(query="Section", depth="shallow")
     assert len(recall_result.hits) == 1
-    preview = recall_result.hits[0].payload_summary["text"]
+    preview = recall_result.hits[0].payload["text"]
     assert len(preview) <= 500
-    assert recall_result.hits[0].payload_summary.get("truncated") is True
+    assert recall_result.hits[0].truncated is True
 
-    # get_event by event_id returns the FULL text.
-    full = handlers.get_event(event_id=r.event_id)
-    assert full.payload["content_type"] == "text"
-    assert full.payload["text"] == long_text
-    assert len(full.payload["text"]) > 2000
+    # by_id lookup returns the full event (full_payload implicit).
+    full = handlers.recall(by_id=r.event_id)
+    assert len(full.hits) == 1
+    assert full.hits[0].payload["content_type"] == "text"
+    assert full.hits[0].payload["text"] == long_text
+    assert full.hits[0].truncated is False
 
 
-def test_get_event_by_content_hash_works(ctx: ServerContext) -> None:
+def test_recall_by_content_hash_works(ctx: ServerContext) -> None:
     r = handlers.remember(content=TextContent(type="text", text="hash lookup"))
-    full = handlers.get_event(content_hash=r.content_hash)
-    assert full.event_id == r.event_id
-    assert full.payload["text"] == "hash lookup"
+    full = handlers.recall(by_content_hash=r.content_hash)
+    assert len(full.hits) == 1
+    assert full.hits[0].event_id == r.event_id
+    assert full.hits[0].payload["text"] == "hash lookup"
 
 
-def test_get_event_rejects_both_or_neither_selector(ctx: ServerContext) -> None:
-    """Per spec, exactly ONE of event_id or content_hash must be provided."""
+def test_recall_rejects_both_lookup_selectors(ctx: ServerContext) -> None:
+    """recall accepts at most ONE of by_id, by_content_hash."""
     handlers.remember(content=TextContent(type="text", text="x"))
-    with pytest.raises(InvalidGetEventArgsError):
-        handlers.get_event()
-    with pytest.raises(InvalidGetEventArgsError):
-        handlers.get_event(event_id="01XYZ", content_hash="sha256:abc")
+    with pytest.raises(InvalidRecallArgsError):
+        handlers.recall(by_id="01XYZ", by_content_hash="sha256:abc")
 
 
-def test_get_event_unknown_id_raises_not_found(ctx: ServerContext) -> None:
-    with pytest.raises(EventNotFoundError):
-        handlers.get_event(event_id="01DOESNOTEXIST00000000")
+def test_recall_unknown_id_returns_empty_with_note(ctx: ServerContext) -> None:
+    """Unlike the old get_event (which raised), recall(by_id=...) returns
+    an empty hits list with a note. Friendlier for AI clients that
+    speculatively query."""
+    r = handlers.recall(by_id="01DOESNOTEXIST00000000")
+    assert r.hits == []
+    assert r.note is not None and "no event found" in r.note
 
 
-def test_get_event_inlines_text_large_blob(ctx: ServerContext) -> None:
-    """text-large payloads spill to the object store; get_event reads
+def test_recall_full_payload_inlines_text_large_blob(ctx: ServerContext) -> None:
+    """text-large payloads spill to the object store; lookup-mode reads
     them back so the caller sees one consistent shape with payload.text
     populated."""
-    # Force spill by lowering the inline threshold for this test's context.
     ctx.inline_text_max_bytes = 100
     big = "Q" * 5000
     r = handlers.remember(content=TextContent(type="text", text=big))
 
-    full = handlers.get_event(event_id=r.event_id)
-    assert full.payload["content_type"] == "text-large"
-    assert full.payload["text"] == big
-    # The blob_hash and size_bytes are preserved for traceability.
-    assert full.payload["blob_hash"].startswith("sha256:")
-    assert full.payload["size_bytes"] == len(big)
+    full = handlers.recall(by_id=r.event_id)
+    assert len(full.hits) == 1
+    hit = full.hits[0]
+    assert hit.payload["content_type"] == "text-large"
+    assert hit.payload["text"] == big
+    assert hit.payload["blob_hash"].startswith("sha256:")
+    assert hit.payload["size_bytes"] == len(big)
 
 
-def test_get_event_binary_returns_metadata_not_bytes(ctx: ServerContext) -> None:
-    """Binary events keep raw bytes in the object store; get_event surfaces
-    metadata only. A future read_blob tool would expose the actual bytes."""
+def test_recall_binary_returns_metadata_not_bytes(ctx: ServerContext) -> None:
+    """Binary events keep raw bytes in the object store; recall surfaces
+    metadata only. A future blob-fetch capability would expose actual bytes."""
     import base64
 
     raw = b"\x89PNG\x00\x00fake-png-bytes" * 50
@@ -436,9 +444,11 @@ def test_get_event_binary_returns_metadata_not_bytes(ctx: ServerContext) -> None
             filename_hint="bug.png",
         )
     )
-    full = handlers.get_event(event_id=r.event_id)
-    assert full.payload["content_type"] == "binary"
-    assert full.payload["mime"] == "image/png"
-    assert full.payload["filename_hint"] == "bug.png"
-    assert full.payload["size_bytes"] == len(raw)
-    assert "text" not in full.payload  # bytes aren't inlined
+    full = handlers.recall(by_id=r.event_id)
+    assert len(full.hits) == 1
+    payload = full.hits[0].payload
+    assert payload["content_type"] == "binary"
+    assert payload["mime"] == "image/png"
+    assert payload["filename_hint"] == "bug.png"
+    assert payload["size_bytes"] == len(raw)
+    assert "text" not in payload  # bytes aren't inlined

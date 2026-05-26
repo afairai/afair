@@ -141,53 +141,82 @@ def test_batch_lookup_empty_input_returns_empty(ctx: ServerContext) -> None:
     assert read_invalidations_batch(ctx.db, []) == {}
 
 
-# ── handler layer ──────────────────────────────────────────────────────────
+# ── handler layer (collapsed: invalidate is now a remember kwarg) ─────────
 
 
-def test_invalidate_handler_writes_event_and_returns_result(ctx: ServerContext) -> None:
+def test_remember_with_invalidates_writes_event_and_supersession(
+    ctx: ServerContext,
+) -> None:
+    """remember(content, invalidates=[hash]) writes the new fact AND the
+    invalidation event for each target. The result's invalidated list
+    reflects what was successfully marked superseded."""
     r = handlers.remember(content=TextContent(type="text", text="we'll launch in March"))
-    result = handlers.invalidate(target_hash=r.content_hash, reason="pushed to June")
+    result = handlers.remember(
+        content=TextContent(type="text", text="actually June"),
+        invalidates=[r.content_hash],
+    )
     assert result.ok is True
-    assert result.target_hash == r.content_hash
-    assert result.target_already_invalidated is False
-    assert result.content_hash.startswith("sha256:")
+    assert r.content_hash in result.invalidated
 
 
-def test_invalidate_handler_reports_prior_invalidation(ctx: ServerContext) -> None:
+def test_remember_invalidates_multiple_targets_in_one_call(
+    ctx: ServerContext,
+) -> None:
+    """Multiple targets get individual invalidation events."""
+    a = handlers.remember(content=TextContent(type="text", text="fact a"))
+    b = handlers.remember(content=TextContent(type="text", text="fact b"))
+    result = handlers.remember(
+        content=TextContent(type="text", text="superseder"),
+        invalidates=[a.content_hash, b.content_hash],
+    )
+    assert set(result.invalidated) == {a.content_hash, b.content_hash}
+
+
+def test_remember_with_invalidates_unknown_target_raises(ctx: ServerContext) -> None:
+    with pytest.raises(InvalidateTargetError, match="not found"):
+        handlers.remember(
+            content=TextContent(type="text", text="x"),
+            invalidates=["sha256:" + "0" * 64],
+        )
+
+
+def test_remember_cannot_invalidate_an_invalidation_event(ctx: ServerContext) -> None:
+    """Nested invalidations are not supported. The first invalidate goes
+    through; trying to invalidate THE invalidation event must fail."""
     r = handlers.remember(content=TextContent(type="text", text="fact"))
-    handlers.invalidate(target_hash=r.content_hash, reason="first")
-    second = handlers.invalidate(target_hash=r.content_hash, reason="second")
-    assert second.target_already_invalidated is True
-
-
-def test_invalidate_unknown_target_raises(ctx: ServerContext) -> None:
-    with pytest.raises(InvalidateTargetError, match="no event found"):
-        handlers.invalidate(target_hash="sha256:" + "0" * 64, reason="bogus")
-
-
-def test_invalidate_cannot_target_an_invalidation_event(ctx: ServerContext) -> None:
-    """Nested invalidations are not supported in v1 — the API rejects
-    rather than producing confusing dual-supersession semantics."""
-    r = handlers.remember(content=TextContent(type="text", text="fact"))
-    first = handlers.invalidate(target_hash=r.content_hash, reason="wrong")
+    handlers.remember(
+        content=TextContent(type="text", text="wrong"),
+        invalidates=[r.content_hash],
+    )
+    # Find the invalidation event by querying for kind=invalidate.
+    inv_row = ctx.db.execute(
+        "SELECT content_hash FROM events WHERE kind = 'invalidate' LIMIT 1"
+    ).fetchone()
+    assert inv_row is not None
     with pytest.raises(InvalidateTargetError, match="invalidation event"):
-        handlers.invalidate(target_hash=first.content_hash, reason="meta")
+        handlers.remember(
+            content=TextContent(type="text", text="meta"),
+            invalidates=[inv_row["content_hash"]],
+        )
 
 
 # ── recall integration ────────────────────────────────────────────────────
 
 
 def test_recall_surfaces_invalidation_field_when_present(ctx: ServerContext) -> None:
-    """Invalidated facts still appear in recall — they're not filtered
-    — but each hit carries the invalidation summary so the AI can choose."""
+    """Invalidated facts still appear in recall — they're not filtered —
+    but each hit carries the invalidation summary so the AI can choose."""
     r = handlers.remember(content=TextContent(type="text", text="quarterly revenue is 100k"))
-    handlers.invalidate(target_hash=r.content_hash, reason="restated to 92k")
+    handlers.remember(
+        content=TextContent(type="text", text="restated to 92k"),
+        invalidates=[r.content_hash],
+    )
 
     hits = handlers.recall(query="quarterly revenue", depth="shallow").hits
-    assert len(hits) >= 1
-    target_hit = next(h for h in hits if h.content_hash == r.content_hash)
+    target_hit = next((h for h in hits if h.content_hash == r.content_hash), None)
+    assert target_hit is not None
     assert target_hit.invalidation is not None
-    assert target_hit.invalidation.reason == "restated to 92k"
+    assert "92k" in target_hit.invalidation.reason
 
 
 def test_recall_leaves_invalidation_null_for_current_facts(ctx: ServerContext) -> None:
@@ -197,12 +226,17 @@ def test_recall_leaves_invalidation_null_for_current_facts(ctx: ServerContext) -
     assert hits[0].invalidation is None
 
 
-def test_get_event_surfaces_invalidation(ctx: ServerContext) -> None:
+def test_recall_by_id_surfaces_invalidation(ctx: ServerContext) -> None:
     r = handlers.remember(content=TextContent(type="text", text="old plan"))
-    handlers.invalidate(target_hash=r.content_hash, reason="superseded by new plan")
-    result = handlers.get_event(event_id=r.event_id)
-    assert result.invalidation is not None
-    assert "superseded" in result.invalidation.reason
+    handlers.remember(
+        content=TextContent(type="text", text="superseded by new plan"),
+        invalidates=[r.content_hash],
+    )
+    result = handlers.recall(by_id=r.event_id)
+    assert len(result.hits) == 1
+    inv = result.hits[0].invalidation
+    assert inv is not None
+    assert "superseded" in inv.reason
 
 
 def test_invalidation_event_itself_recallable_via_fts(ctx: ServerContext) -> None:
@@ -210,6 +244,9 @@ def test_invalidation_event_itself_recallable_via_fts(ctx: ServerContext) -> Non
     is FTS-indexed via derive_searchable_text. Useful for 'what facts have
     we marked outdated?' queries."""
     r = handlers.remember(content=TextContent(type="text", text="original fact"))
-    handlers.invalidate(target_hash=r.content_hash, reason="zombiequickfoxtrot unique marker")
+    handlers.remember(
+        content=TextContent(type="text", text="zombiequickfoxtrot unique marker"),
+        invalidates=[r.content_hash],
+    )
     hits = handlers.recall(query="zombiequickfoxtrot", depth="shallow").hits
     assert any(h.kind == INVALIDATE_KIND for h in hits)

@@ -1,9 +1,14 @@
 """FastMCP server wiring.
 
-Registers the four v1 tools with their AI-facing descriptions and exposes
-a /health endpoint for the orchestrator (Fly) to probe. The bearer-token
-auth middleware is layered on at HTTP-level via a thin Starlette wrapper —
-this keeps authentication BELOW the MCP tool surface (Invariant I1).
+Registers the three v1 tools (remember, recall, observe) with their
+AI-facing descriptions and exposes a /health endpoint for the orchestrator
+(Fly) to probe. The bearer-token auth middleware is layered on at
+HTTP-level via a thin Starlette wrapper — this keeps authentication BELOW
+the MCP tool surface (Invariant I1).
+
+The 3-tool surface was fixed on 2026-05-26 before any external user
+adopted the API. Per I1, this surface is now forever-stable; future
+additions are new tools, never signature changes to these three.
 """
 
 from __future__ import annotations
@@ -106,47 +111,41 @@ def build_server(settings: Settings) -> FastMCP:
         context: str | None = None,
         type_hint: str | None = None,
         parent_hashes: list[str] | None = None,
+        invalidates: list[str] | None = None,
     ) -> schemas.RememberResult:
         return handlers.remember(
             content=content,
             context=context,
             type_hint=type_hint,
             parent_hashes=parent_hashes,
+            invalidates=invalidates,
         )
 
     @mcp.tool(description=descriptions.RECALL, version="1")
     def recall(
-        query: str,
+        query: str | None = None,
         scope: str | None = None,
-        depth: schemas.Depth = "normal",
+        depth: schemas.Depth = "auto",
         limit: int = 20,
+        by_id: str | None = None,
+        by_content_hash: str | None = None,
+        full_payload: bool = False,
+        stats: bool = False,
     ) -> schemas.RecallResult:
-        return handlers.recall(query=query, scope=scope, depth=depth, limit=limit)
-
-    @mcp.tool(description=descriptions.LIST_CONTEXT, version="1")
-    def list_context(
-        about: str | None = None,
-        limit: int = 50,
-    ) -> schemas.ListContextResult:
-        return handlers.list_context(about=about, limit=limit)
+        return handlers.recall(
+            query=query,
+            scope=scope,
+            depth=depth,
+            limit=limit,
+            by_id=by_id,
+            by_content_hash=by_content_hash,
+            full_payload=full_payload,
+            stats=stats,
+        )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")
     def observe(event: schemas.ObserveEvent) -> schemas.ObserveResult:
         return handlers.observe(event=event)
-
-    @mcp.tool(description=descriptions.GET_EVENT, version="1")
-    def get_event(
-        event_id: str | None = None,
-        content_hash: str | None = None,
-    ) -> schemas.GetEventResult:
-        return handlers.get_event(event_id=event_id, content_hash=content_hash)
-
-    @mcp.tool(description=descriptions.INVALIDATE, version="1")
-    def invalidate(
-        target_hash: str,
-        reason: str | None = None,
-    ) -> schemas.InvalidateResult:
-        return handlers.invalidate(target_hash=target_hash, reason=reason)
 
     # ── /health — orchestrator-facing, never goes through MCP protocol ──────
 

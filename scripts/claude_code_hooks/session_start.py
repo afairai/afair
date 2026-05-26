@@ -10,7 +10,7 @@ At the start of every Claude Code session (any directory), this hook:
 
   1. Reads the bearer token + URL for the user's neverforget instance
      from the environment OR from ``~/.neverforget.env`` if present.
-  2. Calls the MCP ``list_context`` tool over HTTP/JSON-RPC.
+  2. Calls the MCP ``recall(stats=True)`` tool over HTTP/JSON-RPC.
   3. Emits a JSON object Claude Code parses to inject the result into
      the new session's ``additionalContext``.
 
@@ -29,7 +29,7 @@ For SessionStart we emit:
 
 The additionalContext becomes part of the system context for the
 session, so the AI starts every session aware of what's in the vault
-without having to manually call ``list_context``.
+without having to manually call ``recall``.
 
 Installation
 ------------
@@ -129,7 +129,7 @@ def _post(
 
 
 def _fetch_vault_summary(url: str, token: str) -> str | None:
-    """Initialize an MCP session, call list_context, format the result.
+    """Initialize an MCP session, call recall(stats=True), format the result.
 
     Returns the markdown summary or None on any failure. The caller
     treats None as "skip silently".
@@ -164,8 +164,8 @@ def _fetch_vault_summary(url: str, token: str) -> str | None:
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "list_context",
-                    "arguments": {"limit": MAX_HITS_TO_SUMMARIZE},
+                    "name": "recall",
+                    "arguments": {"stats": True, "limit": MAX_HITS_TO_SUMMARIZE},
                 },
             },
             session_id=sid,
@@ -179,15 +179,20 @@ def _fetch_vault_summary(url: str, token: str) -> str | None:
 
 
 def _format_summary(body: dict) -> str | None:
-    """Turn the list_context result into a compact markdown brief."""
+    """Turn the recall(stats=True) result into a compact markdown brief.
+
+    The new RecallResult shape carries ``summary`` (totals + breakdowns)
+    and ``hits`` (recent events) — both populated when stats=True.
+    """
     try:
-        summary = body["result"]["structuredContent"]["summary"]
+        result = body["result"]["structuredContent"]
+        summary = result.get("summary") or {}
+        recent = result.get("hits") or []
     except (KeyError, TypeError):
         return None
 
     total = summary.get("total_events", 0)
     by_kind = summary.get("by_kind") or {}
-    recent = summary.get("recent") or []
     if total == 0:
         return None  # empty vault — don't pollute the session
 
@@ -205,14 +210,15 @@ def _format_summary(body: dict) -> str | None:
 
     if recent:
         lines.append(
-            "**Most recent context** (use `recall` to dig deeper, `get_event` for full content):"
+            "**Most recent context** (use `recall(query=...)` to dig deeper, "
+            "`recall(by_id=..., full_payload=True)` for full content):"
         )
         lines.append("")
         for hit in recent[:MAX_HITS_TO_SUMMARIZE]:
             interp = hit.get("interpretation") or {}
             kind = hit.get("kind") or "event"
             ev_id = hit.get("event_id") or ""
-            ev_summary = interp.get("summary") or _payload_oneliner(hit.get("payload_summary"))
+            ev_summary = interp.get("summary") or _payload_oneliner(hit.get("payload"))
             if hit.get("invalidation"):
                 ev_summary = f"~~{ev_summary}~~ (invalidated)"
             lines.append(f"- `{ev_id}` ({kind}) — {ev_summary}")

@@ -49,8 +49,9 @@ across sessions, AI clients, and devices. Use it daily:
 3. **After completing significant work** (a fix, a feature, a decision,
    a deployment), call `observe()` to log what happened so future
    sessions know.
-4. **At session start** for unfamiliar contexts, call `list_context(about)`
-   to see what is already known about a subject.
+4. **At session start** for unfamiliar contexts, call `recall(stats=True)`
+   to see a structured overview of the vault (totals, kind breakdown,
+   recent events). For a single past event by id, use `recall(by_id=...)`.
 
 Be a thoughtful librarian. Save signal, not noise. The substrate is the
 user's vault, not yours.

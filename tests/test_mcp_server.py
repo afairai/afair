@@ -50,20 +50,16 @@ async def test_server_builds_and_registers_all_v1_tools(tmp_path: Path) -> None:
     """Server boots and exposes the v1 tool surface per Invariant I1.
 
     I1 is additive: tools are added forever; existing signatures never
-    change. Started at 4 (remember/recall/list_context/observe); since
-    2026-05-25 also exposes get_event for full untruncated retrieval.
+    change. Pre-release collapse on 2026-05-26 fixed the surface at
+    three verbs: remember (with invalidates kwarg), recall (with by_id,
+    by_content_hash, full_payload, stats), observe. The old list_context,
+    get_event, invalidate verbs were absorbed before any external user
+    saw them. Per I1, this surface is now forever-stable.
     """
     server = build_server(_settings_for(tmp_path))
     tools = await server.list_tools()
     tool_names = {t.name for t in tools}
-    assert tool_names == {
-        "remember",
-        "recall",
-        "list_context",
-        "observe",
-        "get_event",
-        "invalidate",
-    }
+    assert tool_names == {"remember", "recall", "observe"}
 
 
 @pytest.mark.asyncio
@@ -117,7 +113,7 @@ async def test_recall_via_mcp_protocol(tmp_path: Path) -> None:
     result = await server.call_tool("recall", {"query": "Sajinth"})
     data = result.data if hasattr(result, "data") else result.structured_content
     assert len(data["hits"]) == 1
-    assert "Sajinth" in data["hits"][0]["payload_summary"]["text"]
+    assert "Sajinth" in data["hits"][0]["payload"]["text"]
     assert data["depth_used"] == "shallow"
 
 

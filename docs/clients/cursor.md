@@ -42,7 +42,7 @@ Restart Cursor. In a chat with the AI:
 
 > Use the neverforget MCP server to list its tools.
 
-Expected: four tools — `remember`, `recall`, `list_context`, `observe`.
+Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip:
 

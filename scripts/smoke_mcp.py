@@ -56,7 +56,7 @@ def _load_token() -> str:
 
 
 def _expected_tool_names() -> set[str]:
-    return {"remember", "recall", "list_context", "observe"}
+    return {"remember", "recall", "observe"}
 
 
 async def main() -> int:
@@ -74,13 +74,13 @@ async def main() -> int:
     )
 
     async with Client(transport) as client:
-        # 1. tools/list contract — exactly the four v1 tools
+        # 1. tools/list contract — exactly the three v1 tools
         tools = await client.list_tools()
         tool_names = {t.name for t in tools}
         expected = _expected_tool_names()
         checks.append(
             (
-                "tools/list returns exactly the four v1 tools (I1 contract)",
+                "tools/list returns exactly the three v1 tools (I1 contract)",
                 tool_names == expected,
                 f"got {sorted(tool_names)}, expected {sorted(expected)}",
             )
@@ -175,13 +175,13 @@ async def main() -> int:
             )
         )
 
-        # 5. list_context — survey
-        list_result = await client.call_tool("list_context", {"limit": 5})
-        list_data = _extract(list_result)
-        total = list_data.get("summary", {}).get("total_events", 0)
+        # 5. recall(stats=True) — vault survey (was list_context pre-collapse)
+        stats_result = await client.call_tool("recall", {"stats": True, "limit": 5})
+        stats_data = _extract(stats_result)
+        total = stats_data.get("summary", {}).get("total_events", 0)
         checks.append(
             (
-                "list_context reports total_events >= 2 (remember + observe just landed)",
+                "recall(stats=True) reports total_events >= 2 (remember + observe just landed)",
                 total >= 2,
                 f"got total_events={total}",
             )
