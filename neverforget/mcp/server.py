@@ -20,7 +20,11 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from ..agents.cold_path import ColdPathScheduler
+from ..agents.conflict_resolver import ConflictResolver
+from ..agents.consolidator import Consolidator
 from ..agents.embedding import embed_query
+from ..agents.pruner import Pruner
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, landing, schemas
 from .auth import BearerTokenMiddleware
@@ -63,8 +67,20 @@ def build_server(settings: Settings) -> FastMCP:
             embedding_model=settings.embedding_model,
             embedding_dim=settings.embedding_dim,
             semantic_recall_enabled=settings.semantic_recall_enabled,
+            cold_path_enabled=settings.cold_path_enabled,
         )
     )
+
+    # Phase 3 sleep swarm. Daemon thread runs Pruner + Conflict-Resolver
+    # + Consolidator on their own intervals. Each worker is independently
+    # tested + bounded so a single bad cycle can't crash the scheduler.
+    if settings.cold_path_enabled:
+        ColdPathScheduler(
+            vault_dir=settings.vault_dir,
+            embedding_dim=settings.embedding_dim,
+            settings=settings,
+            workers=[Pruner(), ConflictResolver(), Consolidator()],
+        ).start()
 
     # Background WAL-checkpoint loop — folds back the WAL file every 5
     # minutes so it doesn't grow unbounded on long-running servers.
