@@ -1,4 +1,18 @@
-"""Consolidator — daily theme summaries (Phase 3).
+"""Consolidator — daily theme summaries (Phase 3 — CLS replay).
+
+This worker is a software implementation of **Complementary Learning
+Systems** replay (McClelland, McNaughton & O'Reilly 1995; Kumaran,
+Hassabis & McClelland 2016). The biological pattern: a fast, sparse
+episodic store (hippocampus) samples its recent events and the
+neocortex extracts distributed semantic abstractions during sleep.
+Our analog: the append-only substrate is the episodic store; the
+``kind=consolidation`` events with themes + open_threads are the
+distributed abstractions; daily cadence is the replay schedule.
+
+The ``open_threads`` field is a proto-instance of Active Inference
+prediction-error signaling — unresolved predictions handed forward
+for a future consumer-agent to pick up (Phase 3+ work; see
+VISION.md §9).
 
 Pattern: at most once per UTC day, pick all the events for that day,
 ask the LLM to write a coherent narrative + extract themes, write the
