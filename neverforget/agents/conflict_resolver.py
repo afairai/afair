@@ -54,7 +54,7 @@ not a new SQLite column. Recall + GetEvent surface this as ``conflicts[]``."""
 MAX_PAIRS_PER_CYCLE = 8
 """Hard cap on LLM calls per scheduled run. Down from 20 after the first
 real run hit Anthropic's 50K-tok/min org rate limit on a single cycle —
-8 pairs × ~600 input tokens + a sleep between calls keeps us well under
+8 pairs x ~600 input tokens + a sleep between calls keeps us well under
 the per-minute cap even when the warm-path Extractor is also active."""
 
 INTER_CALL_SLEEP_SECONDS = 3.0
