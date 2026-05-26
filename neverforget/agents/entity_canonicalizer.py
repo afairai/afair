@@ -88,6 +88,15 @@ CASCADE_PRODUCED_BY = "entity_canonicalizer:cascaded:v1"
 Lives in the interpretations table so re-runs are idempotent without a
 separate cursor."""
 
+NO_MENTIONS_PRODUCED_BY = "entity_canonicalizer:no_mentions:v1"
+"""Marker for events whose extractor output had no canonicalizable entities
+(empty names, all filtered, etc.). Without this marker the
+``_find_uncanonicalized_events`` query would re-surface these events every
+cycle in an infinite loop, because the NOT EXISTS check only filters by
+entity_mentions presence. The marker tells the worker "we already looked,
+there was nothing to write" without violating I2 (it's an interpretation
+row, not a mutation)."""
+
 
 # ── budget knobs ──────────────────────────────────────────────────────────
 
@@ -240,6 +249,26 @@ class EntityCanonicalizer(ColdPathWorker):
             stats["llm_errors"] += result["llm_errors"]
             stats["sonnet_escalations"] += result["sonnet_escalations"]
             llm_budget -= result["llm_calls"]
+            # Idle-loop guard: if THIS pass wrote no mentions for the
+            # event (extractor returned entities-list but all filtered —
+            # empty names, malformed shapes), stamp a marker so the
+            # NOT EXISTS query stops surfacing this event next cycle.
+            if (
+                result["created"] == 0
+                and result["matched_exact"] == 0
+                and result["matched_llm"] == 0
+            ):
+                write_interpretation(
+                    conn,
+                    event=event,
+                    version=CANONICALIZER_VERSION,
+                    produced_by=NO_MENTIONS_PRODUCED_BY,
+                    extraction={
+                        "status": "success",
+                        "content_type": "no_mentions_marker",
+                        "reason": "extractor entities present but all filtered (empty names, invalid shapes)",
+                    },
+                )
             if llm_budget <= 0:
                 # Drain remaining events with exact-only matching by leaving
                 # llm_budget at 0; the helper handles that mode internally.
@@ -291,10 +320,15 @@ def _find_uncanonicalized_events(
               SELECT 1 FROM entity_mentions m
               WHERE m.event_hash = i.event_hash
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM interpretations m
+              WHERE m.event_hash = i.event_hash
+                AND m.produced_by = ?
+          )
         ORDER BY e.created_at ASC
         LIMIT ?
         """,
-        (max_events,),
+        (NO_MENTIONS_PRODUCED_BY, max_events),
     ).fetchall()
 
     out: list[tuple[Event, dict[str, Any]]] = []
