@@ -29,6 +29,7 @@ from ..agents.cold_path import ColdPathScheduler
 from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
 from ..agents.embedding import embed_query
+from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.pruner import Pruner
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, landing, schemas
@@ -84,7 +85,12 @@ def build_server(settings: Settings) -> FastMCP:
             vault_dir=settings.vault_dir,
             embedding_dim=settings.embedding_dim,
             settings=settings,
-            workers=[Pruner(), ConflictResolver(), Consolidator()],
+            workers=[
+                Pruner(),
+                ConflictResolver(),
+                Consolidator(),
+                EntityCanonicalizer(),
+            ],
         ).start()
 
     # Background WAL-checkpoint loop — folds back the WAL file every 5
