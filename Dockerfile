@@ -36,6 +36,7 @@ FROM deps AS builder
 # becomes mandatory once we publish — easier to bake the dependency in now.
 COPY README.md ./README.md
 COPY neverforget ./neverforget
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
@@ -53,6 +54,7 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/neverforget /app/neverforget
+COPY --from=builder /app/scripts /app/scripts
 
 # Persistent vault dir — on Fly this path is overlaid by the mounted volume.
 RUN mkdir -p /data/vault
