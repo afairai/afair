@@ -158,6 +158,14 @@ class Settings(BaseSettings):
     # background LLM calls to run unattended.
     cold_path_enabled: bool = True
 
+    # Phase 4 Track 2 — per-hit surprise score uses entity-novelty against
+    # the user's "recent context window": the last N events' canonical
+    # entities. A hit with all-familiar entities scores 0.0, all-novel
+    # scores 1.0. 20 is a starting point — wide enough to capture the
+    # last working session, narrow enough that the comparison stays
+    # responsive to context-switches.
+    surprise_context_window: int = Field(default=20, ge=1, le=500)
+
     @field_validator("vault_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: str | Path) -> Path:
