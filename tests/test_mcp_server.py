@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.mcp.context import clear_context
-from neverforget.mcp.server import build_server
-from neverforget.settings import Settings
+from afair.mcp.context import clear_context
+from afair.mcp.server import build_server
+from afair.settings import Settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,7 +23,7 @@ def _isolated_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     not the LLM — extractor work is covered separately in test_extractor.py.
     """
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         lambda _event_id: None,
     )
     clear_context()

@@ -8,9 +8,9 @@ import pytest
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-from neverforget.mcp.context import clear_context
-from neverforget.mcp.server import build_app
-from neverforget.settings import Settings
+from afair.mcp.context import clear_context
+from afair.mcp.server import build_app
+from afair.settings import Settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -24,7 +24,7 @@ SAMPLE_TOKEN = "test-token-do-not-use-in-production"
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each test gets a clean context and a no-op extractor."""
     monkeypatch.setattr(
-        "neverforget.mcp.handlers.schedule_extraction",
+        "afair.mcp.handlers.schedule_extraction",
         lambda _event_id: None,
     )
     clear_context()
@@ -48,7 +48,7 @@ def _settings(tmp_path: Path, *, token: str | None = SAMPLE_TOKEN) -> Settings:
 
 def test_production_boot_requires_auth_token(tmp_path: Path) -> None:
     """ENVIRONMENT=fly without a token must refuse to boot."""
-    with pytest.raises(ValidationError, match="NEVERFORGET_AUTH_TOKEN"):
+    with pytest.raises(ValidationError, match="AFAIR_AUTH_TOKEN"):
         Settings(
             _env_file=None,  # type: ignore[call-arg]
             environment="fly",

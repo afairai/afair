@@ -3,7 +3,7 @@
 # four MCP tools work end-to-end over HTTPS, with bearer-token auth.
 #
 # Usage:
-#   ./scripts/smoke.sh                      # uses .env.local token, neverforget.fly.dev
+#   ./scripts/smoke.sh                      # uses .env.local token, afair.fly.dev
 #   URL=... TOKEN=... ./scripts/smoke.sh    # override either
 #
 # Exit codes:
@@ -12,11 +12,11 @@
 
 set -euo pipefail
 
-URL="${URL:-https://neverforget.fly.dev}"
-TOKEN="${TOKEN:-$(grep '^NEVERFORGET_AUTH_TOKEN=' .env.local 2>/dev/null | cut -d= -f2- || true)}"
+URL="${URL:-https://afair.fly.dev}"
+TOKEN="${TOKEN:-$(grep '^AFAIR_AUTH_TOKEN=' .env.local 2>/dev/null | cut -d= -f2- || true)}"
 
 if [ -z "$TOKEN" ]; then
-  echo "ERROR: no token. Set TOKEN env var or ensure .env.local has NEVERFORGET_AUTH_TOKEN=" >&2
+  echo "ERROR: no token. Set TOKEN env var or ensure .env.local has AFAIR_AUTH_TOKEN=" >&2
   exit 1
 fi
 
@@ -42,7 +42,7 @@ check() {
   fi
 }
 
-echo "=== neverforget smoke ($URL) ==="
+echo "=== afair smoke ($URL) ==="
 echo
 
 echo "── /health (no auth required) ──"

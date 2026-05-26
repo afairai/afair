@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from neverforget.agents.cold_path import ColdPathScheduler, ColdPathWorker
-from neverforget.settings import Settings
-from neverforget.substrate import open_db
+from afair.agents.cold_path import ColdPathScheduler, ColdPathWorker
+from afair.settings import Settings
+from afair.substrate import open_db
 
 if TYPE_CHECKING:
     import sqlite3

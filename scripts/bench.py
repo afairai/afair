@@ -9,8 +9,8 @@ Run examples:
     uv run scripts/bench.py --local
 
     # Custom URL + token
-    NEVERFORGET_URL=https://x.example.com/mcp \\
-    NEVERFORGET_AUTH_TOKEN=... uv run scripts/bench.py
+    AFAIR_URL=https://x.example.com/mcp \\
+    AFAIR_AUTH_TOKEN=... uv run scripts/bench.py
 
 What it reports:
     - initialize:   one-shot TLS + MCP handshake cost
@@ -35,7 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_LIVE_URL = "https://neverforget.fly.dev/mcp"
+DEFAULT_LIVE_URL = "https://afair.fly.dev/mcp"
 DEFAULT_LOCAL_URL = "http://localhost:8765/mcp"
 
 DEFAULT_QUERIES = [
@@ -50,7 +50,7 @@ DEFAULT_QUERIES = [
 def _load_token_from_env_local() -> str | None:
     """Best-effort token discovery from .env.local in the repo root.
 
-    Looks for ``NEVERFORGET_AUTH_TOKEN=<value>`` lines, trims quotes and
+    Looks for ``AFAIR_AUTH_TOKEN=<value>`` lines, trims quotes and
     whitespace. Returns None if not found — callers can pass via env var.
     """
     candidates = [Path(".env.local"), Path(".env"), Path("../.env.local")]
@@ -58,7 +58,7 @@ def _load_token_from_env_local() -> str | None:
         if not path.exists():
             continue
         for line in path.read_text().splitlines():
-            if line.startswith("NEVERFORGET_AUTH_TOKEN="):
+            if line.startswith("AFAIR_AUTH_TOKEN="):
                 value = line.split("=", 1)[1].strip().strip("'\"")
                 if value:
                     return value
@@ -167,7 +167,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Bench the MCP server latency.")
     parser.add_argument(
         "--url",
-        default=os.environ.get("NEVERFORGET_URL"),
+        default=os.environ.get("AFAIR_URL"),
         help="MCP endpoint URL (default: live Fly app, or http://localhost:8765/mcp with --local)",
     )
     parser.add_argument(
@@ -177,7 +177,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--token",
-        default=os.environ.get("NEVERFORGET_AUTH_TOKEN"),
+        default=os.environ.get("AFAIR_AUTH_TOKEN"),
         help="Bearer token (default: auto-discover from .env.local)",
     )
     parser.add_argument(
@@ -197,7 +197,7 @@ def main() -> int:
     url = args.url or (DEFAULT_LOCAL_URL if args.local else DEFAULT_LIVE_URL)
     token = args.token or _load_token_from_env_local()
     if not token:
-        print("ERROR: no bearer token provided. Set NEVERFORGET_AUTH_TOKEN or --token.")
+        print("ERROR: no bearer token provided. Set AFAIR_AUTH_TOKEN or --token.")
         return 1
 
     queries = DEFAULT_QUERIES[: args.queries]

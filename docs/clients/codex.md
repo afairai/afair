@@ -1,4 +1,4 @@
-# Codex CLI (OpenAI) — connecting to neverforget
+# Codex CLI (OpenAI) — connecting to afair
 
 Codex CLI configuration lives at `~/.codex/config.toml`.
 
@@ -7,15 +7,15 @@ Codex CLI configuration lives at `~/.codex/config.toml`.
 Append to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.neverforget]
+[mcp_servers.afair]
 type = "http"
-url = "https://neverforget.fly.dev/mcp"
+url = "https://afair.fly.dev/mcp"
 
-[mcp_servers.neverforget.headers]
-Authorization = "Bearer <NEVERFORGET_AUTH_TOKEN>"
+[mcp_servers.afair.headers]
+Authorization = "Bearer <AFAIR_AUTH_TOKEN>"
 ```
 
-Replace `<NEVERFORGET_AUTH_TOKEN>` with the value from your `.env.local`.
+Replace `<AFAIR_AUTH_TOKEN>` with the value from your `.env.local`.
 
 ## 2. Add the instruction snippet
 
@@ -24,16 +24,16 @@ Append the contents of [_snippet.md](_snippet.md) to `~/.codex/AGENTS.md`
 
 ## 3. Verify
 
-Restart Codex (or run `codex mcp restart neverforget`). Then in a new
+Restart Codex (or run `codex mcp restart afair`). Then in a new
 session:
 
-> Use the neverforget MCP server to list the tools available.
+> Use the afair MCP server to list the tools available.
 
 Expected: three tools — `remember`, `recall`, `observe`.
 
 Round-trip test — first save, then recall in a new session:
 
-> Use neverforget to remember: "Codex CLI verification 2026-05-25"
+> Use afair to remember: "Codex CLI verification 2026-05-25"
 
 Then in a fresh `codex` session:
 
@@ -56,7 +56,7 @@ versions reject it — use the nested form above.
 
 ```bash
 codex mcp list
-codex mcp logs neverforget
+codex mcp logs afair
 ```
 
 If `mcp logs` shows 401 responses, the token is wrong. Same verification

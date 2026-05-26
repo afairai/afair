@@ -1,4 +1,4 @@
-# neverforget
+# afair
 
 > A user-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — built behind a stable MCP surface, free to mutate beneath it.
 
@@ -24,7 +24,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 cp .env.example .env
 # fill in ANTHROPIC_API_KEY (or your chosen provider key)
-uv run python -m neverforget
+uv run python -m afair
 ```
 
 ## Architecture

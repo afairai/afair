@@ -8,15 +8,15 @@ What it does
 ------------
 At the start of every Claude Code session (any directory), this hook:
 
-  1. Reads the bearer token + URL for the user's neverforget instance
-     from the environment OR from ``~/.neverforget.env`` if present.
+  1. Reads the bearer token + URL for the user's afair instance
+     from the environment OR from ``~/.afair.env`` if present.
   2. Calls the MCP ``recall(stats=True)`` tool over HTTP/JSON-RPC.
   3. Emits a JSON object Claude Code parses to inject the result into
      the new session's ``additionalContext``.
 
 If the server is unreachable, the auth token is missing, or anything
 else goes wrong, the hook fails silently — the session starts normally
-without vault context. This is intentional: a broken neverforget should
+without vault context. This is intentional: a broken afair should
 never block the user from working.
 
 Output format
@@ -39,9 +39,9 @@ remove the entry there.
 
 Config discovery
 ----------------
-1. ``NEVERFORGET_URL`` env var, default ``https://neverforget.fly.dev/mcp``
-2. ``NEVERFORGET_AUTH_TOKEN`` env var
-3. If env vars missing, falls back to ``~/.neverforget.env`` (gitignored
+1. ``AFAIR_URL`` env var, default ``https://afair.fly.dev/mcp``
+2. ``AFAIR_AUTH_TOKEN`` env var
+3. If env vars missing, falls back to ``~/.afair.env`` (gitignored
    file the installer writes when configured).
 """
 
@@ -55,16 +55,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_URL = "https://neverforget.fly.dev/mcp"
-DEFAULT_CONFIG_PATH = Path.home() / ".neverforget.env"
+DEFAULT_URL = "https://afair.fly.dev/mcp"
+DEFAULT_CONFIG_PATH = Path.home() / ".afair.env"
 TIMEOUT_SECONDS = 5.0
 MAX_HITS_TO_SUMMARIZE = 8
 
 
 def _load_config() -> tuple[str, str | None]:
     """Return (url, token). Env wins; file is fallback."""
-    url = os.environ.get("NEVERFORGET_URL")
-    token = os.environ.get("NEVERFORGET_AUTH_TOKEN")
+    url = os.environ.get("AFAIR_URL")
+    token = os.environ.get("AFAIR_AUTH_TOKEN")
     if not (url and token) and DEFAULT_CONFIG_PATH.exists():
         for line in DEFAULT_CONFIG_PATH.read_text().splitlines():
             line = line.strip()
@@ -75,9 +75,9 @@ def _load_config() -> tuple[str, str | None]:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip("'\"")
-            if key == "NEVERFORGET_URL" and not url:
+            if key == "AFAIR_URL" and not url:
                 url = value
-            elif key == "NEVERFORGET_AUTH_TOKEN" and not token:
+            elif key == "AFAIR_AUTH_TOKEN" and not token:
                 token = value
     return url or DEFAULT_URL, token
 
@@ -197,7 +197,7 @@ def _format_summary(body: dict) -> str | None:
         return None  # empty vault — don't pollute the session
 
     lines: list[str] = [
-        "## Vault context (auto-loaded by neverforget)",
+        "## Vault context (auto-loaded by afair)",
         "",
         f"You have access to a persistent memory vault with **{total} events**.",
     ]

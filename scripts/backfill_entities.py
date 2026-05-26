@@ -41,11 +41,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from neverforget.agents.entity_canonicalizer import EntityCanonicalizer
-from neverforget.mcp.context import ServerContext, set_context
-from neverforget.settings import Settings
-from neverforget.substrate import open_db
-from neverforget.substrate.events import write_event
+from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.mcp.context import ServerContext, set_context
+from afair.settings import Settings
+from afair.substrate import open_db
+from afair.substrate.events import write_event
 
 DEFAULT_MAX_CYCLES = 100
 
@@ -103,7 +103,7 @@ def _log_backfill_run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="One-shot entity-graph backfill for an existing neverforget vault."
+        description="One-shot entity-graph backfill for an existing afair vault."
     )
     parser.add_argument(
         "--max-cycles",

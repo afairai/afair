@@ -75,7 +75,7 @@ def issue_access_token(
     to call and silently reject on mismatch.
     """
     if settings.jwt_secret is None:
-        msg = "NEVERFORGET_JWT_SECRET must be set to issue tokens"
+        msg = "AFAIR_JWT_SECRET must be set to issue tokens"
         raise JWTError(msg)
 
     now = int(time.time())
@@ -120,7 +120,7 @@ def validate(
 ) -> TokenClaims:
     """Parse + verify a JWT. Raises on any failure."""
     if settings.jwt_secret is None:
-        msg = "NEVERFORGET_JWT_SECRET must be set to validate tokens"
+        msg = "AFAIR_JWT_SECRET must be set to validate tokens"
         raise JWTError(msg)
 
     expected_iss = settings.effective_oauth_issuer

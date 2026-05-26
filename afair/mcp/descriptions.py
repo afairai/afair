@@ -189,7 +189,7 @@ ARGUMENTS:
        "result": "added inline-vs-spill logic"}
       {"action": "sent_email", "subject": "sajinth@example.com",
        "result": "follow-up on roadmap", "thread_id": "..."}
-      {"action": "deployed", "subject": "neverforget-prod",
+      {"action": "deployed", "subject": "afair-prod",
        "result": "v0.1.3", "duration_s": 47}
 
 RETURN:

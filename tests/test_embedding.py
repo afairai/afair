@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from neverforget.agents import embedding
+from afair.agents import embedding
 
 # ── chunking ───────────────────────────────────────────────────────────────
 

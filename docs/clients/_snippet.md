@@ -13,9 +13,9 @@ The block is short on purpose — long instruction blocks get ignored.
 ---
 
 ```markdown
-## neverforget MCP
+## afair MCP
 
-You have access to a `neverforget` MCP server providing persistent memory
+You have access to a `afair` MCP server providing persistent memory
 across sessions, AI clients, and devices. Use it daily:
 
 1. **Before answering** questions that benefit from history (preferences,

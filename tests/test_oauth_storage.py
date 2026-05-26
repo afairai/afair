@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.mcp.oauth import jwt as jwt_mod
-from neverforget.mcp.oauth import storage
-from neverforget.settings import Settings
-from neverforget.substrate import open_db
+from afair.mcp.oauth import jwt as jwt_mod
+from afair.mcp.oauth import storage
+from afair.settings import Settings
+from afair.substrate import open_db
 
 if TYPE_CHECKING:
     import sqlite3

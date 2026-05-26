@@ -90,8 +90,8 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices(
             "auth_token",
-            "NEVERFORGET_AUTH_TOKEN",
-            "neverforget_auth_token",
+            "AFAIR_AUTH_TOKEN",
+            "afair_auth_token",
         ),
     )
 
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices(
             "jwt_secret",
-            "NEVERFORGET_JWT_SECRET",
+            "AFAIR_JWT_SECRET",
         ),
     )
     # Access token lifetime (1 hour by default; Authlib's standard).
@@ -193,7 +193,7 @@ class Settings(BaseSettings):
         """
         if self.environment == "fly" and self.auth_token is None:
             msg = (
-                "NEVERFORGET_AUTH_TOKEN must be set when ENVIRONMENT=fly. "
+                "AFAIR_AUTH_TOKEN must be set when ENVIRONMENT=fly. "
                 "Generate one with: python -c "
                 "'import secrets; print(secrets.token_urlsafe(32))'"
             )
@@ -216,7 +216,7 @@ class Settings(BaseSettings):
         if self.oauth_issuer:
             return self.oauth_issuer.rstrip("/")
         if self.environment == "fly":
-            return "https://neverforget.fly.dev"
+            return "https://afair.fly.dev"
         return f"http://{self.mcp_host}:{self.mcp_port}"
 
 

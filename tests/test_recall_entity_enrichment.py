@@ -16,15 +16,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from neverforget.agents import entity_canonicalizer as ec
-from neverforget.agents.entity_canonicalizer import EntityCanonicalizer
-from neverforget.agents.interpretation import write_interpretation
-from neverforget.agents.invalidation import write_invalidation
-from neverforget.mcp import handlers
-from neverforget.mcp.context import ServerContext, clear_context, set_context
-from neverforget.mcp.schemas import TextContent
-from neverforget.settings import Settings
-from neverforget.substrate import open_db, write_event
+from afair.agents import entity_canonicalizer as ec
+from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.agents.interpretation import write_interpretation
+from afair.agents.invalidation import write_invalidation
+from afair.mcp import handlers
+from afair.mcp.context import ServerContext, clear_context, set_context
+from afair.mcp.schemas import TextContent
+from afair.settings import Settings
+from afair.substrate import open_db, write_event
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -52,7 +52,7 @@ def ctx(tmp_path: Path) -> Iterator[ServerContext]:
 def _disable_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests own the canonicalizer lifecycle and inject extractor outputs
     directly. The warm-path Extractor would race with that."""
-    monkeypatch.setattr("neverforget.mcp.handlers.schedule_extraction", lambda _id: None)
+    monkeypatch.setattr("afair.mcp.handlers.schedule_extraction", lambda _id: None)
 
 
 @pytest.fixture
@@ -168,7 +168,7 @@ def test_recall_dedupes_canonical_entities_when_same_entity_mentioned_twice(
     ).fetchone()["id"]
 
     # Second event mentions both — LLM matches "Saji" → Sajinth.
-    from neverforget.agents.llm import LLMResult
+    from afair.agents.llm import LLMResult
 
     def _fake(**kw: object) -> LLMResult:
         return LLMResult(
@@ -331,7 +331,7 @@ def test_recall_resolves_canonical_through_merges(ctx: ServerContext, settings: 
     """If two entities have been merged, recall surfaces the SURVIVING
     canonical for both mentions — the "from" entity is invisible by
     default (decision #6)."""
-    from neverforget.substrate import write_entity_merge
+    from afair.substrate import write_entity_merge
 
     # Event A: creates "Sajinth-elvah" person.
     a_id = _seed_event_with_entities(
