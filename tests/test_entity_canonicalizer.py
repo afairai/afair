@@ -1,0 +1,684 @@
+"""Phase 4 Track 1 — EntityCanonicalizer cold-path worker tests.
+
+Exercises the worker against real SQLite with a mocked LLM. Tests cover:
+
+- Stage 1 exact match (no LLM, two events with same surface form)
+- Stage 2 LLM judgment (mock returns one of the candidates)
+- Stage 2 Sonnet escalation (Haiku low-confidence → Sonnet re-judge)
+- Stage 3 new entity creation when no candidate
+- Edge writes for relations
+- Edge skipping when subject/object aren't resolvable
+- Cascade invalidation cycle
+- Re-run idempotency (cycle 2 is a no-op)
+- LLM budget cap
+- Defensive: hallucinated entity_id from LLM is rejected
+
+The LLM is mocked via monkeypatch on agents.entity_canonicalizer.call_tool
+so the test runs in milliseconds without hitting Anthropic.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from neverforget.agents import entity_canonicalizer as ec
+from neverforget.agents.entity_canonicalizer import (
+    CANONICALIZER_PRODUCED_BY,
+    CASCADE_PRODUCED_BY,
+    EntityCanonicalizer,
+)
+from neverforget.agents.interpretation import write_interpretation
+from neverforget.agents.invalidation import write_invalidation
+from neverforget.agents.llm import LLMError, LLMResult
+from neverforget.settings import Settings
+from neverforget.substrate import (
+    iter_edges_for_entity,
+    iter_mentions_for_event,
+    open_db,
+    read_edge_invalidations,
+    write_event,
+)
+from neverforget.substrate.entities import find_edges_for_source_event
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterator
+    from pathlib import Path
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    conn = open_db(tmp_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    """Settings instance with cold_path disabled so the test owns the worker lifecycle."""
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        cold_path_enabled=False,
+    )
+
+
+def _write_event_with_extraction(
+    conn: sqlite3.Connection,
+    *,
+    text: str,
+    entities: list[dict[str, str]],
+    relations: list[dict[str, str]] | None = None,
+    summary: str | None = None,
+) -> str:
+    """Write an event + its extractor interpretation. Returns content_hash."""
+    event = write_event(
+        conn,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": text},
+    )
+    extraction: dict[str, Any] = {
+        "status": "success",
+        "best_guess_kind": "fact",
+        "summary": summary or text[:200],
+        "entities": entities,
+        "relations": relations or [],
+    }
+    write_interpretation(
+        conn,
+        event=event,
+        version=1,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        extraction=extraction,
+    )
+    return event.content_hash
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the inter-call sleep helper to a no-op for fast tests."""
+    monkeypatch.setattr(ec, "_maybe_sleep", lambda _last: 0.0)
+
+
+# ── Stage 1: exact match ──────────────────────────────────────────────────
+
+
+def test_exact_match_links_second_event_to_same_canonical(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two events both mentioning "Sajinth" as person → both link to the
+    same canonical entity. No LLM call needed."""
+    _no_sleep(monkeypatch)
+
+    # Should never be called for this test — exact match wins.
+    def _boom(**_: Any) -> LLMResult:
+        msg = "no LLM call expected for exact match"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ec, "call_tool", _boom)
+
+    h1 = _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    h2 = _write_event_with_extraction(
+        db, text="Sajinth shipped a feature", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["events_canonicalized"] == 2
+    assert stats["entities_created"] == 1
+    assert stats["entities_matched_exact"] == 1
+    assert stats["llm_calls"] == 0
+
+    m1 = iter_mentions_for_event(db, h1)
+    m2 = iter_mentions_for_event(db, h2)
+    assert len(m1) == 1
+    assert len(m2) == 1
+    assert m1[0].entity_id == m2[0].entity_id  # SAME canonical
+
+
+def test_exact_match_distinguishes_by_kind(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apple-the-org and apple-the-concept become two distinct entities."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec,
+        "call_tool",
+        lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected")),
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Apple released a new product",
+        entities=[{"name": "Apple", "type": "organization"}],
+    )
+    _write_event_with_extraction(
+        db, text="I want an apple for lunch", entities=[{"name": "apple", "type": "concept"}]
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["entities_created"] == 2
+    assert stats["entities_matched_exact"] == 0
+
+
+# ── Stage 2: LLM match ────────────────────────────────────────────────────
+
+
+def _llm_returns(matched_id: str | None, *, confidence: float = 0.9) -> Any:
+    """Build a stub call_tool that returns one verdict regardless of input."""
+
+    def _fake(**_kw: Any) -> LLMResult:
+        return LLMResult(
+            data={
+                "matched_entity_id": matched_id,
+                "reason": "test",
+                "confidence": confidence,
+            },
+            model=_kw.get("model", "test"),
+            raw="",
+        )
+
+    return _fake
+
+
+def test_llm_match_links_variant_surface_form_to_existing(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first event creates Sajinth (person). The second mentions
+    'Saji' — different surface form, same kind — LLM judges it as the
+    same Sajinth. Both events end up linked to one canonical."""
+    _no_sleep(monkeypatch)
+
+    # First event: exact (no LLM).
+    h1 = _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+    sajinth_entity_id = iter_mentions_for_event(db, h1)[0].entity_id
+
+    # Second event: LLM picks the existing Sajinth.
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(sajinth_entity_id, confidence=0.92))
+    h2 = _write_event_with_extraction(
+        db, text="Saji approved the design", entities=[{"name": "Saji", "type": "person"}]
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["entities_matched_llm"] == 1
+    assert stats["entities_created"] == 0
+    assert stats["llm_calls"] == 1
+
+    saji_mention = iter_mentions_for_event(db, h2)[0]
+    assert saji_mention.entity_id == sajinth_entity_id
+    assert saji_mention.match_method == "llm"
+
+
+def test_llm_returns_null_creates_new_entity(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLM judges 'this is NOT any candidate' → new canonical entity."""
+    _no_sleep(monkeypatch)
+
+    _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
+    _write_event_with_extraction(
+        db,
+        text="John from accounting called",
+        entities=[{"name": "John", "type": "person"}],
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["entities_created"] == 1
+    assert stats["entities_matched_llm"] == 0
+
+
+def test_sonnet_escalation_on_low_confidence(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Haiku verdict at 0.4 confidence triggers a Sonnet re-judge.
+    The escalation counter increments and the Sonnet verdict wins."""
+    _no_sleep(monkeypatch)
+
+    _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    sajinth_entity_id = db.execute(
+        "SELECT id FROM entities WHERE canonical_name = 'Sajinth'"
+    ).fetchone()["id"]
+
+    call_log: list[dict[str, Any]] = []
+
+    def _two_stage(**kw: Any) -> LLMResult:
+        call_log.append(kw)
+        if "haiku" in kw["model"]:
+            # Haiku returns low-confidence null verdict.
+            return LLMResult(
+                data={
+                    "matched_entity_id": None,
+                    "reason": "ambiguous",
+                    "confidence": 0.4,
+                },
+                model=kw["model"],
+                raw="",
+            )
+        # Sonnet escalation returns high-confidence match.
+        return LLMResult(
+            data={
+                "matched_entity_id": sajinth_entity_id,
+                "reason": "same person — context matches",
+                "confidence": 0.95,
+            },
+            model=kw["model"],
+            raw="",
+        )
+
+    monkeypatch.setattr(ec, "call_tool", _two_stage)
+    _write_event_with_extraction(
+        db, text="S.S. signed off", entities=[{"name": "S.S.", "type": "person"}]
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+
+    assert stats["sonnet_escalations"] == 1
+    assert stats["llm_calls"] == 2  # Haiku + Sonnet
+    assert stats["entities_matched_llm"] == 1
+    # Two distinct models were invoked.
+    models_seen = {c["model"] for c in call_log}
+    assert any("haiku" in m for m in models_seen)
+    assert any("sonnet" in m for m in models_seen)
+
+
+def test_llm_hallucinated_entity_id_falls_back_to_new(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the LLM returns an entity_id not in the candidate set, treat it
+    as a hallucination and fall through to new-entity creation."""
+    _no_sleep(monkeypatch)
+
+    _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    monkeypatch.setattr(
+        ec, "call_tool", _llm_returns("entity:fake-id-not-in-pool", confidence=0.99)
+    )
+    _write_event_with_extraction(
+        db, text="Maya joined Athara", entities=[{"name": "Maya", "type": "person"}]
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["entities_matched_llm"] == 0
+    assert stats["entities_created"] == 1
+
+
+def test_llm_error_falls_back_to_new(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLMError → log + create a new entity, don't crash the cycle."""
+    _no_sleep(monkeypatch)
+
+    _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    def _raise(**_: Any) -> LLMResult:
+        msg = "503 from upstream"
+        raise LLMError(msg)
+
+    monkeypatch.setattr(ec, "call_tool", _raise)
+    _write_event_with_extraction(
+        db, text="Maya joined Athara", entities=[{"name": "Maya", "type": "person"}]
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["llm_errors"] == 1
+    assert stats["entities_created"] == 1
+
+
+# ── relations → edges ─────────────────────────────────────────────────────
+
+
+def test_relation_creates_edge_between_entities(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    edges = db.execute("SELECT * FROM entity_edges").fetchall()
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["predicate"] == "runs"
+
+
+def test_relation_with_unresolved_subject_is_skipped(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        # Athara is referenced in the relation but NOT extracted as an entity.
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["edges_created"] == 0
+    assert stats["edges_skipped_unresolved"] == 1
+
+
+def test_relation_self_edge_skipped(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Subject == object yields no edge (rare in practice; the schema
+    would allow it but it's noise)."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth knows Sajinth",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        relations=[{"subject": "Sajinth", "predicate": "knows", "object": "Sajinth"}],
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["edges_created"] == 0
+    assert stats["edges_skipped_unresolved"] == 1
+
+
+# ── idempotency + budget ─────────────────────────────────────────────────
+
+
+def test_second_cycle_is_noop(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running the worker a second time over the same vault does nothing
+    (no new events, all already canonicalized)."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    stats1 = EntityCanonicalizer().run(db, settings)
+    stats2 = EntityCanonicalizer().run(db, settings)
+    assert stats1["events_canonicalized"] == 1
+    assert stats2["events_canonicalized"] == 0
+    assert stats2["entities_created"] == 0
+
+
+def test_llm_budget_cap_drains_remaining_to_exact_or_new(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the LLM budget is exhausted, remaining events still get
+    canonicalized — they just skip the LLM stage and fall through to
+    Stage 3 (new entity)."""
+    _no_sleep(monkeypatch)
+    # Tighten the budget for the test.
+    monkeypatch.setattr(ec, "MAX_LLM_CALLS_PER_CYCLE", 1)
+
+    # Anchor entity so the LLM stage is in play for subsequent events.
+    _write_event_with_extraction(db, text="anchor", entities=[{"name": "Maya", "type": "person"}])
+    EntityCanonicalizer().run(db, settings)
+
+    # Two more events with variant surface forms that won't exact-match Maya.
+    call_count = 0
+
+    def _llm_returns_match(**kw: Any) -> LLMResult:
+        nonlocal call_count
+        call_count += 1
+        return LLMResult(
+            data={"matched_entity_id": None, "reason": "x", "confidence": 0.99},
+            model=kw["model"],
+            raw="",
+        )
+
+    monkeypatch.setattr(ec, "call_tool", _llm_returns_match)
+
+    _write_event_with_extraction(
+        db, text="Alice landed today", entities=[{"name": "Alice", "type": "person"}]
+    )
+    _write_event_with_extraction(
+        db, text="Bob shipped a fix", entities=[{"name": "Bob", "type": "person"}]
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    # LLM was budgeted to 1 call total — the second event creates a new
+    # entity without invoking the LLM.
+    assert stats["llm_calls"] <= 1
+    assert stats["entities_created"] == 2
+
+
+# ── cascade invalidation ──────────────────────────────────────────────────
+
+
+def test_cascade_invalidation_marks_edges(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remember(invalidates=[hash]) writes an invalidate event. The
+    canonicalizer's next cycle finds every edge sourced from the
+    invalidated event and marks them as invalidated."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    # One edge exists.
+    target_event_id = db.execute(
+        "SELECT id FROM events WHERE kind = 'remember' LIMIT 1"
+    ).fetchone()["id"]
+    edges = find_edges_for_source_event(db, target_event_id)
+    assert len(edges) == 1
+    edge_id = edges[0].id
+    assert read_edge_invalidations(db, edge_id) == []
+
+    # Write an invalidate event targeting the original.
+    target_hash = db.execute(
+        "SELECT content_hash FROM events WHERE id = ?", (target_event_id,)
+    ).fetchone()["content_hash"]
+    write_invalidation(db, target_hash=target_hash, reason="Sajinth stepped down", origin="user")
+
+    # Next cycle: cascade fires.
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["invalidations_cascaded"] == 1
+    assert stats["edges_invalidated"] == 1
+
+    invalidations = read_edge_invalidations(db, edge_id)
+    assert len(invalidations) == 1
+    assert invalidations[0].source_event_id is not None
+
+
+def test_cascade_is_idempotent(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second cycle does NOT re-cascade an already-cascaded invalidate event."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    target_event = db.execute(
+        "SELECT content_hash FROM events WHERE kind = 'remember' LIMIT 1"
+    ).fetchone()
+    write_invalidation(db, target_hash=target_event["content_hash"], reason="moved", origin="user")
+
+    stats1 = EntityCanonicalizer().run(db, settings)
+    stats2 = EntityCanonicalizer().run(db, settings)
+    assert stats1["invalidations_cascaded"] == 1
+    assert stats2["invalidations_cascaded"] == 0
+
+    # A cascade marker should sit in interpretations.
+    marker = db.execute(
+        "SELECT COUNT(*) AS n FROM interpretations WHERE produced_by = ?",
+        (CASCADE_PRODUCED_BY,),
+    ).fetchone()
+    assert marker["n"] == 1
+
+
+def test_cascade_with_no_edges_still_marks_event_processed(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invalidate event targets an event that had no entity_edges —
+    cascade is a no-op (0 edges invalidated) but the marker still lands
+    so we don't re-scan the event next cycle."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    # Event with entities but no relations → no edges.
+    _write_event_with_extraction(
+        db, text="standalone fact", entities=[{"name": "X", "type": "concept"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    target_event = db.execute(
+        "SELECT content_hash FROM events WHERE kind = 'remember' LIMIT 1"
+    ).fetchone()
+    write_invalidation(db, target_hash=target_event["content_hash"], reason="x", origin="user")
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["invalidations_cascaded"] == 1
+    assert stats["edges_invalidated"] == 0
+
+    marker_count = db.execute(
+        "SELECT COUNT(*) AS n FROM interpretations WHERE produced_by = ?",
+        (CASCADE_PRODUCED_BY,),
+    ).fetchone()
+    assert marker_count["n"] == 1
+
+
+# ── ancillary ─────────────────────────────────────────────────────────────
+
+
+def test_canonicalizer_produces_stamped_mention_metadata(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every mention should carry the worker's produced-by string and a
+    sensible match_method. Tests the audit trail per I7."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    h = _write_event_with_extraction(
+        db, text="Sajinth ran a meeting", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+    mention = iter_mentions_for_event(db, h)[0]
+    assert mention.canonicalized_by == CANONICALIZER_PRODUCED_BY
+    assert mention.match_method == "new"
+
+
+def test_canonicalizer_ignores_failed_extractions(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status=failed interpretation rows have no usable entities — skip."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    event = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "x"}
+    )
+    write_interpretation(
+        db,
+        event=event,
+        version=1,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        extraction={"status": "failed", "error_type": "x", "error_message": "y", "retries": 0},
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["events_canonicalized"] == 0
+
+
+def test_edges_hidden_after_cascade(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: write event with relation → canonicalize → invalidate →
+    cascade → iter_edges_for_entity (default) returns nothing."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    sajinth_id = db.execute("SELECT id FROM entities WHERE canonical_name = 'Sajinth'").fetchone()[
+        "id"
+    ]
+
+    # Before invalidation: edge visible.
+    assert len(iter_edges_for_entity(db, sajinth_id)) == 1
+
+    # Invalidate and cascade.
+    target_hash = db.execute(
+        "SELECT content_hash FROM events WHERE kind = 'remember' LIMIT 1"
+    ).fetchone()["content_hash"]
+    write_invalidation(db, target_hash=target_hash, reason="moved on", origin="user")
+    EntityCanonicalizer().run(db, settings)
+
+    # Default view hides invalidated edges.
+    assert len(iter_edges_for_entity(db, sajinth_id)) == 0
+    # Historical view still surfaces them.
+    assert len(iter_edges_for_entity(db, sajinth_id, include_invalidated=True)) == 1
