@@ -35,7 +35,7 @@ FROM deps AS builder
 # and hatchling fails the editable build without it. License file likewise
 # becomes mandatory once we publish — easier to bake the dependency in now.
 COPY README.md ./README.md
-COPY afair ./neverforget
+COPY afair ./afair
 COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
@@ -76,4 +76,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "neverforget"]
+CMD ["python", "-m", "afair"]
