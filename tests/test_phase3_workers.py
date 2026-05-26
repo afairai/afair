@@ -317,3 +317,130 @@ def test_consolidator_does_not_consume_its_own_output(
 
 
 _ = time  # used implicitly elsewhere; keep linter happy
+
+
+# ── consolidator: LLM-returns-string-instead-of-list defense ─────────────
+
+
+def test_consolidator_handles_llm_returning_themes_as_string(
+    db: sqlite3.Connection, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: bug discovered 2026-05-26 via vault audit (observe event
+    01KSJX608Q63GJ6TP9TY5A8XZ7). Consolidation event 01KSHN1BRJ8TX4HZ1VNNFSNV3M
+    had a corrupted ``context`` field where individual characters were joined
+    by ', ' — root cause was Haiku returning ``themes`` as a single STRING
+    instead of a JSON array. The old code did
+    ``[str(t) for t in (data.get("themes") or [])]`` which iterates a string
+    over its characters and silently produces a list-of-single-chars.
+
+    With the _coerce_to_string_list type-guard, a string value should be
+    wrapped as a single-element list (with a structured warning), NOT
+    iterated character-by-character. The resulting consolidation event's
+    ``themes`` field must therefore be a real list of full strings.
+    """
+    for i in range(4):
+        write_event(
+            db,
+            origin="u",
+            kind="remember",
+            payload={"content_type": "text", "text": f"event {i}"},
+        )
+
+    def fake_call_returning_string_themes(**_: Any) -> LLMResult:
+        # Note: themes returned as a STRING, not a list.
+        return LLMResult(
+            data={
+                "narrative": "a real narrative",
+                "themes": "vendor neutrality, OAuth complete, Sprint A shipped",
+                "open_threads": "auto-linking refinement needed",
+            },
+            model="m",
+            raw="",
+        )
+
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call_returning_string_themes)
+
+    Consolidator().run(db, settings_local)
+
+    # Find the consolidation event and inspect its themes + context.
+    rows = db.execute(f"SELECT payload FROM events WHERE kind = '{CONSOLIDATION_KIND}'").fetchall()
+    assert len(rows) == 1
+    import json as _json
+
+    payload = _json.loads(rows[0]["payload"])
+    themes = payload["themes"]
+
+    # Critical assertion: themes is a list of WHOLE strings, not a list
+    # of single-character strings.
+    assert isinstance(themes, list)
+    assert len(themes) == 1, f"expected single-element wrap, got {len(themes)}: {themes[:5]}"
+    assert themes[0] == "vendor neutrality, OAuth complete, Sprint A shipped"
+
+    # And the derived ``context`` field must look coherent — no
+    # comma-separated single characters.
+    context = payload["context"]
+    assert "v, e, n, d, o, r" not in context, (
+        "context contains character-iteration corruption — type guard regressed"
+    )
+    assert "vendor neutrality" in context
+
+
+def test_consolidator_handles_llm_returning_themes_as_list(
+    db: sqlite3.Connection, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: when the LLM correctly returns themes as a list, the
+    coercion is a no-op and themes are stored unchanged."""
+    for i in range(4):
+        write_event(
+            db,
+            origin="u",
+            kind="remember",
+            payload={"content_type": "text", "text": f"event {i}"},
+        )
+
+    def fake_call(**_: Any) -> LLMResult:
+        return LLMResult(
+            data={
+                "narrative": "n",
+                "themes": ["theme one", "theme two", "theme three"],
+                "open_threads": ["open one"],
+            },
+            model="m",
+            raw="",
+        )
+
+    monkeypatch.setattr("afair.agents.consolidator.call_tool", fake_call)
+
+    Consolidator().run(db, settings_local)
+
+    import json as _json
+
+    rows = db.execute(f"SELECT payload FROM events WHERE kind = '{CONSOLIDATION_KIND}'").fetchall()
+    payload = _json.loads(rows[0]["payload"])
+    assert payload["themes"] == ["theme one", "theme two", "theme three"]
+    assert payload["open_threads"] == ["open one"]
+
+
+def test_coerce_to_string_list_unit_cases() -> None:
+    """Unit-level cases for ``_coerce_to_string_list``: list, tuple,
+    string, None, empty string, and unexpected types all handled safely."""
+    from afair.agents.consolidator import _coerce_to_string_list
+
+    # Lists pass through (with str-cast for safety).
+    assert _coerce_to_string_list(["a", "b", "c"], field="themes") == ["a", "b", "c"]
+    assert _coerce_to_string_list([1, 2, 3], field="themes") == ["1", "2", "3"]
+
+    # Tuples treated like lists.
+    assert _coerce_to_string_list(("a", "b"), field="themes") == ["a", "b"]
+
+    # Single string wrapped as one element.
+    assert _coerce_to_string_list("hello world", field="themes") == ["hello world"]
+
+    # Empty/None fall back to empty list.
+    assert _coerce_to_string_list(None, field="themes") == []
+    assert _coerce_to_string_list("", field="themes") == []
+    assert _coerce_to_string_list("   ", field="themes") == []
+
+    # Unexpected types fall back to empty list (not crash).
+    assert _coerce_to_string_list(42, field="themes") == []
+    assert _coerce_to_string_list({"key": "val"}, field="themes") == []
