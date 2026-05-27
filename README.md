@@ -1,8 +1,14 @@
-# afair
+<p align="center">
+  <img src="assets/logo/afair-elephant.png" alt="afair" width="160" />
+</p>
 
-> A user-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — built behind a stable MCP surface, free to mutate beneath it.
+<h1 align="center">afair</h1>
 
-**Codename. Final name deferred to Phase 6–7.** See `VISION.md §15`.
+<p align="center">
+  <em>A user-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — built behind a stable MCP surface, free to mutate beneath it.</em>
+</p>
+
+---
 
 ## What this is
 
@@ -38,4 +44,4 @@ See `VISION.md §6`. Briefly:
 
 ## License
 
-AGPL-3.0-or-later. License decision is provisional per `VISION.md §13 Open Questions` and may change before public release.
+License decision is deferred. The operational rule is binding until then: see `VISION.md §12 Licensing Posture` — build everything as if the repo goes public tomorrow.
