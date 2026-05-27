@@ -335,3 +335,74 @@ unreachable at boot — usually fixed by `fly machine restart`.
 ### Deploy times out
 `wait_timeout = "5m"` in `fly.toml`. If exceeded, the deploy is rolled back
 to the previous image. Check `fly logs` for the actual error.
+
+---
+
+## 12. Logo & brand assets
+
+Canonical brand files live in `assets/logo/`. Source of truth = the
+original upload (`afair-elephant-original.jpg`); everything else is
+derived via the recipe documented inline at the top of the directory.
+
+| File | Use |
+|---|---|
+| `afair-elephant.png` (1024×1024, transparent) | Primary logo (light backgrounds) |
+| `afair-elephant-inverse.png` (1024×1024, transparent, white silhouette) | Dark backgrounds / dark mode |
+| `afair-elephant.svg` | Infinite-scale vector (potrace-traced) |
+| `favicon-{16,32,48,180,192,256,512}.png` | Web favicon set |
+| `favicon.ico` | Multi-size .ico for legacy browsers |
+| `social-preview.png` (1280×640) | GitHub social preview, Open Graph image |
+
+### Set the GitHub social preview (one-time manual)
+
+`gh` CLI does not expose this. Manual UI step:
+
+1. Open <https://github.com/gowry/afair/settings>
+2. Under **Social preview**, click **Edit**
+3. Upload `assets/logo/social-preview.png`
+4. Save
+
+Verify by sharing the repo link in Slack / Twitter / iMessage — preview
+should show the lockup. Allow ~1 min for cache to refresh.
+
+### Regenerate variants from a new original
+
+If we ever swap the source elephant for a refined version, drop the new
+file at `assets/logo/afair-elephant-original.jpg` (or `.png`) and re-run
+the recipe; current generation chain uses ImageMagick 7 + potrace:
+
+```bash
+cd assets/logo
+SRC=afair-elephant-original.jpg
+
+# Master: tight-crop, threshold, square canvas at 1024
+magick "$SRC" -fuzz 5% -trim +repage -threshold 50% \
+  -gravity center -background white \
+  -extent $(magick "$SRC" -fuzz 5% -trim +repage -format '%[fx:max(w,h)*1.25]' info:)x$(magick "$SRC" -fuzz 5% -trim +repage -format '%[fx:max(w,h)*1.25]' info:) \
+  -resize 1024x1024 master-bw.png
+
+# Primary PNG (transparent bg, black silhouette)
+magick master-bw.png -transparent white afair-elephant.png
+
+# Inverse for dark backgrounds
+magick master-bw.png -negate -transparent black afair-elephant-inverse.png
+
+# SVG via potrace
+magick master-bw.png -alpha off -monochrome master-bw.pbm
+potrace --svg --output afair-elephant.svg master-bw.pbm
+
+# Favicons
+for sz in 16 32 48 180 192 256 512; do
+  magick afair-elephant.png -resize ${sz}x${sz} \
+    -background none -gravity center -extent ${sz}x${sz} favicon-${sz}.png
+done
+magick favicon-16.png favicon-32.png favicon-48.png favicon.ico
+
+# Social preview lockup (elephant left, "afair" wordmark right)
+magick -size 1280x640 xc:white \
+  \( afair-elephant.png -resize 360x360 \) -gravity west -geometry +160+0 -compose over -composite \
+  -fill black -font Helvetica -pointsize 140 -gravity east -annotate +220+0 "afair" \
+  social-preview.png
+
+rm -f master-bw.png master-bw.pbm
+```

@@ -159,6 +159,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
+| `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in `docs/operations.md §12` | When the source logo changes |
 
 ## 5. Invariants — quick reference
 
