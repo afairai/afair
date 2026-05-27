@@ -9,7 +9,7 @@
 
 ## 0. The gate
 
-Per `VISION.md §9 Phase 0`:
+The Phase 0 capability gate (tracked in `CLAUDE.md §0`):
 
 > **Capability gate:** Daily use from Claude Code, Codex CLI, and Claude.ai chat for two weeks without rebuilding. Trust the system enough to keep calling it because nothing reaches into your life uninvited.
 
@@ -74,7 +74,7 @@ Whatever the verdict, capture the **why** — that's the input to Phase 1's desi
 
 These show up across multiple days; track them cumulatively:
 
-- **Trust:** Am I starting to trust the system enough to remember sensitive things? (The trust ladder from VISION.md §9 is a real thing.)
+- **Trust:** Am I starting to trust the system enough to remember sensitive things? (The trust ladder in `CLAUDE.md §3` is a real thing.)
 - **Cross-vendor:** Have I actually used it from multiple clients (Claude Code + Codex / Claude.ai)? That's I5 in practice.
 - **Latency:** Does `recall` feel fast enough on the shallow path? p95 target is < 100 ms.
 - **Extraction quality:** Are the Interpretation rows worth anything yet, or are they noise?
