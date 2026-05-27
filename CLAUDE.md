@@ -68,6 +68,13 @@
   hosted offering is acceptable"). Build after daily-use window
   closes + marketing/control-plane bootstrap; uses real vault data,
   not synthetic.
+- **Funding stance** — bootstrap by default, VC conditional, hard-reject
+  any term sheet that pressures I1–I8. EU non-dilutive options
+  (EIC Accelerator, EXIST, HTGF, Calm Company Fund, TinySeed, OSS Capital)
+  explored before any traditional VC conversation. Re-evaluate at
+  ≥500 paying users sustained for ≥90 days, or when a closing competitive
+  window demands defense capital. Full reasoning, decision tree,
+  reject criteria in `analysis/2026-05-27-funding-stance.md`.
 
 ## 1. Naming (post-rebrand)
 
@@ -96,10 +103,10 @@ planned.
 | Logging | structlog | JSON with PII redaction |
 | Deployment | Docker → Fly machine | Single binary across local / self-hosted / managed |
 
-## 2.5 Public-repo discipline (binding until VISION.md §16 resolves)
+## 2.5 Public-repo discipline (binding until VISION.md §12 resolves)
 
 The repo is **not** open source today. The licensing decision is deferred
-to a Phase-6 review (`VISION.md` §16). Until then the operational rule:
+(see `VISION.md` §12 Licensing Posture). Until then the operational rule:
 
 > **Build as if the repo goes public tomorrow.**
 
@@ -159,6 +166,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
+| `analysis/2026-05-27-funding-stance.md` | Bootstrap-default-VC-conditional funding decision + EU non-dilutive options + hard-reject criteria | Re-evaluate at ≥500 paying users or when a closing competitive window demands defense capital |
+| `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention — redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in `docs/operations.md §12` | When the source logo changes |
 
 ## 5. Invariants — quick reference
