@@ -57,18 +57,30 @@
 
 - Nothing yet
 
-## 1. Codename and renaming discipline
+### 0.4 Captured for later (not active build)
 
-`afair` is the **codename**. Final product name is deferred to Phase 6–7 (see VISION.md §15).
+- **Vault Dashboard** — control-plane (`app.afair.ai`) read-only surface
+  with entity-graph hero view ("brain cells connected" aesthetic via
+  `react-force-graph-3d`), surprise heatmap, timeline scrubber,
+  vault-stats strip. Design + framework selection captured in
+  `analysis/2026-05-27-dashboard-concept.md`. Authorized by VISION.md
+  §11 anti-pattern exception ("minimal management dashboard for the
+  hosted offering is acceptable"). Build after daily-use window
+  closes + marketing/control-plane bootstrap; uses real vault data,
+  not synthetic.
 
-**Rule for code:** keep external surface configurable so the rename touches metadata, not prose.
+## 1. Naming (post-rebrand)
 
-- Internal Python imports are **relative** (`from . import substrate`), never `from afair.substrate import ...`.
-- The package directory `afair/` is fine — it's one mechanical rename when the time comes.
-- Avoid hardcoding the codename in docstrings, log messages, error strings, README body text. Write generically.
-- The MCP server name surface (visible to clients), Fly app name, Docker image, repo name — keep the codename for now, accept that renaming these means a one-shot find-replace + redeploy.
+`afair` is the **final product name**. `afair.ai` is registered. Code,
+repo, MCP server, Fly apps, Docker image all use it. The earlier
+codename phase is over.
 
-## 2. Stack (decided in VISION.md §6.8)
+Working rule for code: keep imports relative (`from . import substrate`)
+rather than absolute (`from afair.substrate import ...`) so the package
+directory could be renamed later without churn — but no rename is
+planned.
+
+## 2. Stack
 
 | Concern | Choice | Reason |
 |---|---|---|
@@ -122,8 +134,6 @@ we can EXECUTE either decision in Phase 6 without rewrites or churn.
 
 ## 3. Trust ladder (binding for all phases)
 
-Per VISION.md §9 Phase 0:
-
 1. **Phase 0** — explicit `remember` / `observe` calls only. Zero automated ingestion.
 2. **Phase 1+** — user-initiated manual import (paste, drag, "ingest this URL").
 3. **Phase 2+** — opt-in connectors, one source at a time, salience filter auditable before enable.
@@ -135,8 +145,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 
 | File | Purpose | Update cadence |
 |---|---|---|
-| `VISION.md` | The constitution — invariants, architecture, phase plan | Quarterly review; §0/§9 updates each phase |
-| `CLAUDE.md` (this file) | Project-specific working rules + current state | After each merge that changes state |
+| `VISION.md` | The constitution — vision, mission, invariants, architecture, competitive landscape, research grounding | Quarterly review; treat as zeitlos — no per-phase status updates |
+| `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation | When setup steps change |
 | `.env.example` | Required env vars with comments | When env shape changes |
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
@@ -148,6 +158,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
+| `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
 
 ## 5. Invariants — quick reference
 
