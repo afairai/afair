@@ -11,7 +11,7 @@ Create `~/.cursor/mcp.json` (or `<project>/.cursor/mcp.json`):
   "mcpServers": {
     "afair": {
       "type": "http",
-      "url": "https://afair.fly.dev/mcp",
+      "url": "https://mcp.afair.ai/mcp",
       "headers": {
         "Authorization": "Bearer <AFAIR_AUTH_TOKEN>"
       }

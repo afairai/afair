@@ -33,7 +33,7 @@ from typing import Any
 # ── config ──────────────────────────────────────────────────────────────────
 
 SERVER_NAME = "afair"
-DEFAULT_URL = "https://afair.fly.dev/mcp"
+DEFAULT_URL = "https://mcp.afair.ai/mcp"
 
 SNIPPET_MARKER = "## afair MCP"
 SNIPPET_BODY = """\

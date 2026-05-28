@@ -39,7 +39,7 @@ remove the entry there.
 
 Config discovery
 ----------------
-1. ``AFAIR_URL`` env var, default ``https://afair.fly.dev/mcp``
+1. ``AFAIR_URL`` env var, default ``https://mcp.afair.ai/mcp``
 2. ``AFAIR_AUTH_TOKEN`` env var
 3. If env vars missing, falls back to ``~/.afair.env`` (gitignored
    file the installer writes when configured).
@@ -55,7 +55,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_URL = "https://afair.fly.dev/mcp"
+DEFAULT_URL = "https://mcp.afair.ai/mcp"
 DEFAULT_CONFIG_PATH = Path.home() / ".afair.env"
 TIMEOUT_SECONDS = 5.0
 MAX_HITS_TO_SUMMARIZE = 8
