@@ -75,6 +75,18 @@
   ≥500 paying users sustained for ≥90 days, or when a closing competitive
   window demands defense capital. Full reasoning, decision tree,
   reject criteria in `analysis/2026-05-27-funding-stance.md`.
+- **Observability strategy (Phase 0.5)** — three layers to make the
+  designed flow visible: (A) append-only `pipeline_events` table tracing
+  every event's lifecycle from `extraction.enqueued` through
+  `consolidation.included`; (B) declarative `ExpectationChecker` worker
+  that catches silent no-shows ("extraction should complete within 120s",
+  "consolidator should run daily for previous day if ≥3 events"); (C)
+  enriched `/health` reporting per-worker liveness and expectation
+  violations. Plus replace the in-process ThreadPoolExecutor with a
+  SQLite-backed durable queue to eliminate restart-loss. Triggered by
+  the 2026-05-28 heizzeit-event extraction stall + 2-day consolidator
+  silence — both invisible to current tooling. Full design in
+  `analysis/2026-05-28-observability-strategy.md`.
 
 ## 1. Naming (post-rebrand)
 
@@ -167,6 +179,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
 | `analysis/2026-05-27-funding-stance.md` | Bootstrap-default-VC-conditional funding decision + EU non-dilutive options + hard-reject criteria | Re-evaluate at ≥500 paying users or when a closing competitive window demands defense capital |
+| `analysis/2026-05-28-observability-strategy.md` | Three-layer plan to make the designed flow visible — pipeline_events table, expectation checker, enriched /health. Triggered by heizzeit stall + consolidator silence | Refresh as drops 1–7 ship |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention — redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in `docs/operations.md §12` | When the source logo changes |
 
