@@ -20,7 +20,7 @@ In Claude.ai (web or desktop):
 
 1. **Settings** → **Connectors** → **Add custom connector**
 2. **Name:** `afair`
-3. **Server URL:** `https://afair.fly.dev/mcp`
+3. **Server URL:** `https://mcp.afair.ai/mcp`
 4. **Authentication:** "Bearer Token" / "API Key" / "Custom Header" (the
    label varies between Claude.ai versions). Use:
    - Header name: `Authorization`
@@ -81,7 +81,7 @@ server has tools registered:
 ```bash
 TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-)
 # Initialize MCP session, then list tools
-curl -X POST https://afair.fly.dev/mcp \
+curl -X POST https://mcp.afair.ai/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \

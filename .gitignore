@@ -75,3 +75,4 @@ logs/
 .claude/scheduled_tasks.lock
 .claude/sessions/
 .claude/.history
+.playwright-mcp/

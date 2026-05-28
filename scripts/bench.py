@@ -35,7 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_LIVE_URL = "https://afair.fly.dev/mcp"
+DEFAULT_LIVE_URL = "https://mcp.afair.ai/mcp"
 DEFAULT_LOCAL_URL = "http://localhost:8765/mcp"
 
 DEFAULT_QUERIES = [
