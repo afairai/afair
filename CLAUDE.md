@@ -87,6 +87,16 @@
   the 2026-05-28 heizzeit-event extraction stall + 2-day consolidator
   silence — both invisible to current tooling. Full design in
   `analysis/2026-05-28-observability-strategy.md`.
+- **Early-access signup professionalization** — current `afair-web`
+  signup flow (2026-05-28): Mailersend transactional send + dogfood
+  `remember()` into the afair vault as source of truth. Works fine
+  for pre-launch. **At ≥50–100 signups, professionalize:** dedicated
+  SQLite-on-Fly-volume (or migrate to D1) as the operational store,
+  proper unsubscribe + GDPR opt-in (double opt-in), admin dashboard
+  on `app.afair.ai` for list export + broadcast composer, per-signup
+  attribution (which Twitter thread / which podcast / etc.), bot/spam
+  protection (Turnstile). Mailersend remains the send channel; storage
+  separates from transactional.
 
 ## 1. Naming (post-rebrand)
 
