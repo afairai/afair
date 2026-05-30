@@ -28,7 +28,7 @@ from starlette.routing import Mount, Route
 from ..agents.cold_path import ColdPathScheduler
 from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
-from ..agents.embedding import embed_query
+from ..agents.embedding import embed_text
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.pruner import Pruner
 from ..substrate import start_checkpoint_loop
@@ -326,7 +326,12 @@ def _spawn_warmup(settings: Settings) -> None:
         # fastembed/* needs no key.
 
         try:
-            embed_query(model=settings.embedding_model, text="warmup", api_key=api_key)
+            # Use embed_text (uncached path) for warmup so we don't pin a
+            # "warmup" entry in the query-embedding LRU cache (Perf I7).
+            # We want the HTTPS connection + provider state warm — not
+            # the cache pre-populated with a string nobody will ever
+            # query for.
+            embed_text(model=settings.embedding_model, text="warmup", api_key=api_key)
             log.info("warmup.done", model=settings.embedding_model)
         except Exception as e:
             log.warning("warmup.embedding_failed", error=str(e))

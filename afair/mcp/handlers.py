@@ -97,8 +97,10 @@ SUMMARY_TEXT_CHARS = 500
 
 # Background pool used to overlap the embedding call with the (cheap)
 # local FTS query during recall. Pool is process-level so it survives
-# across requests. max_workers=4 covers a handful of concurrent recalls.
-_RECALL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recall-parallel")
+# across requests. max_workers=8 covers the realistic multi-tool
+# concurrent-recall pattern (Perf audit I2): 4 was too low and queued
+# the 5th+ concurrent recall behind an embedding network round-trip.
+_RECALL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="recall-parallel")
 
 
 class ContentTooLargeError(ValueError):
