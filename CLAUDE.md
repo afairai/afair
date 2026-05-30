@@ -38,20 +38,31 @@
   the recent context window (last N events, default 20, configurable via
   `SURPRISE_CONTEXT_WINDOW`). Plus `surprise_components` audit dict.
   Mode-switching agent (Phase 2 dependency) still deferred.
-- **Fly deployment live at https://afair.fly.dev** — single-tenant
-  machine in `fra`, 1 GB volume `vault` with 5-day auto-snapshots,
-  `strategy = "immediate"`, `min_machines_running = 1`
+- **Fly deployment live at https://afair.fly.dev** (MCP at `https://mcp.afair.ai`)
+  — single-tenant machine in `fra`, 1 GB volume `vault` with 5-day
+  auto-snapshots, `strategy = "immediate"`, `min_machines_running = 1`
+- **Litestream continuous WAL replication → Cloudflare R2** — bucket
+  `afair-prod-vault`, prefix `substrate/`, RPO ~1s, hourly snapshots,
+  30-day WAL retention, EU residency (`weur` location hint). Recovery on
+  boot is automatic via `scripts/start.sh`. Replaces the brief dual-write
+  experiment that was reverted (commit `4f02cac`)
 - **GitHub Actions deploy pipeline** at `.github/workflows/deploy.yml` —
   branch-based on `main`, runs ruff + mypy + pytest gates, then
   `flyctl deploy --remote-only`, verifies `/health`
 - `docs/operations.md` — runbooks for deploy, backup-to-laptop, snapshot
-  restore, permanent erasure, secret rotation
+  restore, Litestream recovery + drill, permanent erasure, secret rotation
 
 ### 0.2 What's in flight
 
 - Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
 - Phase 4 Track 2 mode-switching agent (CEN↔DMN routing driven by cumulative surprise + auto-`observe()` on threshold) — depends on Phase 2 Salience agent which doesn't exist yet. v0 surprise-score per hit IS live.
+- **Multi-user provisioning (`scripts/provision_user.py`)** — must exist
+  before the first paying invite. Creates per-user R2 bucket
+  (`afair-user-<ulid>`), provisions bucket-scoped token, Fly machine
+  + secrets, smoke-tests Litestream replication. Open architectural
+  question: many-machines-one-app vs one-app-per-user. Full requirements
+  in `docs/operations.md` §7 "Multi-user provisioning".
 
 ### 0.3 What's blocked
 
@@ -182,6 +193,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |
 | `.github/workflows/deploy.yml` | Branch-based CI deploy to Fly | When pipeline changes |
+| `litestream.yml` | Continuous WAL replication config — sources, R2 destination, retention | When backup target / cadence / retention changes |
+| `scripts/start.sh` | Container entrypoint — restores SQLite from R2 on cold boot, wraps Python under `litestream replicate -exec` | When startup orchestration changes |
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
