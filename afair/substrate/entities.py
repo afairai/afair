@@ -36,6 +36,7 @@ from ulid import ULID
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Iterable
 
 
 # ── identity ──────────────────────────────────────────────────────────────
@@ -569,11 +570,13 @@ def read_edges_by_source_event_ids(
     return result
 
 
-def read_entities_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, Entity]:
+def read_entities_batch(conn: sqlite3.Connection, entity_ids: Iterable[str]) -> dict[str, Entity]:
     """Bulk-fetch entities by ID. Used by recall to materialize the
-    canonical_entities surface on many hits in one query."""
-    if not entity_ids:
-        return {}
+    canonical_entities surface on many hits in one query.
+
+    Accepts any iterable (list, set, dict values view); deduplicates
+    internally — callers don't need to ``list(set(...))`` first.
+    """
     unique_ids = list({e for e in entity_ids if e})
     if not unique_ids:
         return {}

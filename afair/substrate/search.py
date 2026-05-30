@@ -21,7 +21,11 @@ if TYPE_CHECKING:
 # queries before being passed as a MATCH expression. Hyphens are the most
 # common gotcha — they parse as the NOT operator, so "smoke-test" tries to
 # search for "smoke" NOT "test" and SQLite reports "no such column: test".
-_FTS5_SPECIALS_RE = re.compile(r'[-+*"():^]')
+#
+# Public so other modules (e.g. depth-routing in handlers.py) can reuse
+# the precompiled pattern instead of re-compiling their own copy.
+FTS5_SPECIALS_RE = re.compile(r'[-+*"():^]')
+_FTS5_SPECIALS_RE = FTS5_SPECIALS_RE  # internal alias for back-compat
 
 
 def _safe_fts_query(query: str) -> str:

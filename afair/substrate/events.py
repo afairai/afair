@@ -60,10 +60,39 @@ def write_event(
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
 ) -> Event:
-    """Insert one event, idempotent on its content hash.
+    """Insert one event, idempotent on its content hash. Returns the Event.
 
-    If an event with identical (kind, origin, payload, parent_hashes) already
-    exists, returns the existing row without inserting a duplicate.
+    Convenience wrapper around :func:`write_event_with_status` that discards
+    the dedup flag — most callers only need the row itself.
+    """
+    event, _ = write_event_with_status(
+        conn,
+        origin=origin,
+        kind=kind,
+        payload=payload,
+        parent_hashes=parent_hashes,
+    )
+    return event
+
+
+def write_event_with_status(
+    conn: sqlite3.Connection,
+    *,
+    origin: str,
+    kind: str,
+    payload: dict[str, Any],
+    parent_hashes: list[str] | None = None,
+) -> tuple[Event, bool]:
+    """Insert-or-return-existing variant that also reports whether a fresh
+    INSERT happened.
+
+    Returns ``(event, was_inserted)``. ``was_inserted=True`` means this call
+    actually wrote the row; ``False`` means the content_hash already existed
+    and the returned row was retrieved instead. Callers that need to schedule
+    background work (e.g., extraction) only on a true insert use this variant
+    so they don't have to do their own pre-check ``read_event_by_hash`` —
+    eliminating one redundant SHA-256 + canonical_json per write (Perf audit
+    minor — double content_hash).
 
     The payload is canonicalized (sorted keys, no whitespace) before storage
     and hashing, so insertion order of keys does not affect identity.
@@ -113,7 +142,7 @@ def write_event(
             # the original docstring promised.
             existing = read_event_by_hash(conn, chash)
             if existing is not None:
-                return existing
+                return existing, False
             # If we get here something is wrong with the unique index;
             # fail loud rather than returning a bogus event.
             msg = (
@@ -132,7 +161,7 @@ def write_event(
         event_id = row["id"]
         created_at = row["created_at"]
 
-    return Event(
+    event = Event(
         id=event_id,
         content_hash=chash,
         created_at=created_at,
@@ -142,6 +171,7 @@ def write_event(
         parent_hashes=sorted_parents,
         schema_version=SCHEMA_VERSION,
     )
+    return event, True
 
 
 def read_event_by_id(conn: sqlite3.Connection, event_id: str) -> Event | None:
@@ -164,7 +194,7 @@ def iter_events(
 ) -> Iterator[Event]:
     """Iterate events filtered by ``kind`` / ``origin``, sorted by created_at."""
     clauses: list[str] = []
-    params: list[str] = []
+    params: list[Any] = []
     if kind is not None:
         clauses.append("kind = ?")
         params.append(kind)
@@ -175,6 +205,7 @@ def iter_events(
     direction = "DESC" if order == "desc" else "ASC"
     sql = f"SELECT * FROM events {where} ORDER BY created_at {direction}"
     if limit is not None:
-        sql += f" LIMIT {int(limit)}"
+        sql += " LIMIT ?"
+        params.append(int(limit))
     for row in conn.execute(sql, params):
         yield row_to_event(row)
