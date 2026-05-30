@@ -313,9 +313,7 @@ def save_login_state(
 def consume_login_state(conn: sqlite3.Connection, state: str) -> LoginState | None:
     """Get + delete a login-state row in one shot."""
     state_hash = _hash_token(state)
-    row = conn.execute(
-        "SELECT * FROM oauth_login_state WHERE state = ?", (state_hash,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM oauth_login_state WHERE state = ?", (state_hash,)).fetchone()
     if row is None:
         return None
 
