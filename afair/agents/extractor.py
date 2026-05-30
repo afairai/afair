@@ -80,17 +80,30 @@ def schedule_extraction(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
-    _EXECUTOR.submit(
-        _run_extraction,
-        event_id=event_id,
-        vault_dir=ctx.vault_dir,
-        model=ctx.extractor_model,
-        api_key=_api_key_for(ctx.extractor_model, ctx),
-        embedding_model=ctx.embedding_model,
-        embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
-        embedding_dim=ctx.embedding_dim,
-        semantic_recall_enabled=ctx.semantic_recall_enabled,
-    )
+    try:
+        _EXECUTOR.submit(
+            _run_extraction,
+            event_id=event_id,
+            vault_dir=ctx.vault_dir,
+            model=ctx.extractor_model,
+            api_key=_api_key_for(ctx.extractor_model, ctx),
+            embedding_model=ctx.embedding_model,
+            embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
+            embedding_dim=ctx.embedding_dim,
+            semantic_recall_enabled=ctx.semantic_recall_enabled,
+        )
+    except RuntimeError as exc:
+        # Interpreter teardown: atexit fired _EXECUTOR.shutdown() while
+        # we were mid-request. The event row is already durable; a future
+        # boot's backfill (or the cold-path interpretation re-runs) will
+        # pick this up. Don't propagate — the MCP client already got
+        # its 200 OK back from remember() (audit finding — concurrency
+        # bug #3, latent during clean shutdown).
+        log.info(
+            "extractor.submit_after_shutdown",
+            event_id=event_id,
+            detail=str(exc),
+        )
 
 
 def extract_sync(event_id: str) -> None:
@@ -341,19 +354,6 @@ def _validate_extraction(data: dict[str, object]) -> dict[str, object] | str:
         if not isinstance(data[key], str):
             return f"field {key} must be a string"
     return data
-
-
-# Test helper — flush pending background extractions in unit tests.
-def _wait_for_pending(timeout: float = 10.0) -> None:
-    """Wait for all currently-enqueued extractions to complete.
-
-    Not part of the public surface; used only in tests.
-    """
-    # ThreadPoolExecutor doesn't expose "wait for current queue" directly.
-    # We submit a no-op and wait on its future — by the time it runs, all
-    # earlier-submitted tasks have completed in our single thread.
-    # For max_workers>1, this is approximate; tests use a single worker.
-    _EXECUTOR.submit(lambda: None).result(timeout=timeout)
 
 
 # Silence the noisy litellm logger in tests — we have our own structured logs.

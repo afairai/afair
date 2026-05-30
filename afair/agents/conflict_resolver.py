@@ -64,62 +64,17 @@ spacing, a cycle runs ~25s and the LLM-token-per-minute usage stays
 roughly half of the cap, leaving headroom for the warm-path Extractor."""
 
 
-def read_conflicts_for_event(conn: sqlite3.Connection, event_hash: str) -> list[dict[str, Any]]:
-    """Return all conflict-resolver verdicts touching this event.
-
-    Symmetric — picks up rows where the event is the anchor (event_hash
-    column) AND rows where it's the OTHER side (encoded in the producer
-    string). Returns a list of dicts shaped like ConflictFlag in the
-    schemas module.
-    """
-    # Rows where THIS event is the anchor (event_a)
-    anchor_rows = conn.execute(
-        """
-        SELECT extraction FROM interpretations
-        WHERE event_hash = ?
-          AND produced_by LIKE 'conflict_resolver:v0:%'
-        """,
-        (event_hash,),
-    ).fetchall()
-    # Rows where THIS event is the OTHER side (event_b): encoded in producer
-    other_rows = conn.execute(
-        """
-        SELECT extraction FROM interpretations
-        WHERE produced_by = ?
-        """,
-        (f"{CONFLICT_RESOLVER_PRODUCED_BY}:{event_hash}",),
-    ).fetchall()
-
-    flags: list[dict[str, Any]] = []
-    for row in list(anchor_rows) + list(other_rows):
-        data = json.loads(row["extraction"])
-        # Surface the OTHER side relative to the asking event.
-        other_hash = (
-            data.get("event_b_hash")
-            if data.get("event_a_hash") == event_hash
-            else data.get("event_a_hash")
-        )
-        flags.append(
-            {
-                "with_event_id": data.get("event_b_id", ""),
-                "with_content_hash": other_hash or "",
-                "verdict": data.get("verdict", "unclear"),
-                "reason": data.get("reason", ""),
-                "confidence": float(data.get("confidence", 0.0)),
-            }
-        )
-    return flags
-
-
 def read_conflicts_batch(
     conn: sqlite3.Connection, event_hashes: list[str]
 ) -> dict[str, list[dict[str, Any]]]:
-    """Batch variant — one map per anchor hash, mirroring the
-    invalidation batch helper used by recall.
+    """Read all conflict-resolver verdicts touching the given event hashes.
 
-    Two queries total (anchor side + other-side), regardless of N.
-    Previously this was a per-hash loop calling read_conflicts_for_event,
-    which itself ran 2 queries — so 2*N queries became 2 (Perf audit I5).
+    Two queries total (anchor side + other-side) regardless of N.
+    Symmetric — picks up rows where each event is the anchor (event_hash
+    column) AND rows where it's the OTHER side (encoded in the producer
+    string ``conflict_resolver:v0:<other-hash>``). Returns a map from
+    event_hash → list of dicts shaped like ConflictFlag in the schemas
+    module (Perf audit I5).
     """
     if not event_hashes:
         return {}
