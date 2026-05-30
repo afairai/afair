@@ -7,8 +7,8 @@
 
 - **App:** `afair` on Fly (personal org)
 - **Region:** `fra` (EU residency by default)
-- **Volume:** `vault`, 1 GB, 5-day Fly snapshot retention
-- **Continuous backup:** Litestream → Cloudflare R2 bucket `afair-prod-vault` (RPO ~1s, 30-day WAL retention, hourly snapshots, EU residency)
+- **Volume:** `vault`, 1 GB
+- **Backup:** Fly automatic daily volume snapshots, **14-day retention** (bumped from 5d on 2026-05-30). RPO ~24h. Future RPO upgrades documented in §7.
 - **Strategy:** `immediate` — single-machine deploys with brief downtime
 - **URL:** `https://afair.fly.dev` (HTTPS auto-provisioned), MCP at `https://mcp.afair.ai`
 - **Deploy:** GitHub Actions on push to `main` (see `.github/workflows/deploy.yml`)
@@ -201,161 +201,94 @@ fly scale count 1 -a afair
 
 ---
 
-## 7. Continuous WAL replication via Litestream → R2
+## 7. Backup strategy + future RPO upgrade paths
 
-Fly volume snapshots run daily — that's an RPO up to 24 hours. Litestream
-streams the SQLite WAL continuously to R2 in addition:
+**Current state:** Fly automatic daily volume snapshots with 14-day retention.
+RPO is ~24h, RTO is minutes (snapshot restore + machine boot).
 
-- **RPO:** ~1 second (`sync-interval: 1s`)
-- **Hourly snapshots** (compact, full DB state)
-- **WAL retention:** 30 days
-- **Replica location:** R2 EU west (location hint `weur`)
-- **Bucket:** `afair-prod-vault`, prefix `substrate/`
+This is **acceptable for Phase 0** (founder dogfood + early invites). The
+upgrade path is documented below; revisit when real users generate data
+where 24h loss is meaningfully worse than 1h loss.
 
-Litestream runs as a sibling process to Python inside the same Fly machine,
-started by `scripts/start.sh`. Config: `litestream.yml`. Credentials come
-from Fly secrets (`R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_BUCKET_PATH`,
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`).
+### Increase snapshot retention
 
-### Auto-recovery on boot
-
-`scripts/start.sh` checks:
-
-1. R2 credentials in env? (Fly secrets set?)
-2. `/data/vault/substrate.db` missing locally?
-
-If both yes → `litestream restore -if-replica-exists` from R2, then start
-the Python app on the restored DB. If R2 unconfigured → run Python without
-replication (local-dev / self-host path).
-
-### Verify replication is active
+Default after `fly volumes create … --snapshot-retention 5` is 5 days.
+Bump to 14 with:
 
 ```bash
-fly logs -a afair --no-tail | grep -i litestream | tail -20
-# Expected: regular "wal segment written" lines, "snapshot written"
-# every hour, no "level=ERROR" entries.
+fly volumes list -a afair                # note volume id
+fly volumes update <vol-id> -a afair --snapshot-retention 14
 ```
 
-### List snapshots in R2
+### List snapshots + restore
 
-```bash
-fly ssh console -a afair -C \
-  'litestream snapshots -config /app/litestream.yml /data/vault/substrate.db'
-# Lists generation, snapshot index, size, timestamp, and replica name.
+See §6.
+
+### Upgrade paths when 24h RPO is too coarse
+
+Three realistic options, in increasing order of complexity:
+
+**A — Hourly snapshots via GitHub Actions cron** *(RPO ~1h)*
+
+Add `.github/workflows/snapshot-hourly.yml`:
+
+```yaml
+name: Hourly substrate snapshot
+on:
+  schedule: [{cron: "0 * * * *"}]
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl volumes snapshots create <vol-id> --app afair
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PROD }}
 ```
 
-### Recovery drill (verify the replica is real and restorable)
+Zero new vendors. Just a scheduled job. Cost: extra storage for 24×
+more snapshots, rotation via retention policy.
 
-Run this once after the first deploy and periodically (quarterly) to
-make sure recovery actually works. Drill is non-destructive — uses a
-sibling path for the restore.
+**B — LiteFS Cloud** *(RPO < 1s, Fly-native)*
 
-```bash
-fly ssh console -a afair
+Fly's managed SQLite replication service. Designed for the
+single-database-per-machine model. Single subscription, programmatic
+namespace provisioning via Fly API → fits the multi-user invite flow
+without external vendors. Cost ~$10/db/month base + storage.
 
-# 1. Inside the machine — pick a sibling path that doesn't collide
-TARGET=/tmp/restored-substrate.db
+Replaces Fly volume snapshots as the primary backup mechanism. Self-hosted
+users get a different backup story (Litestream against their own S3, or
+just manual volume snapshots).
 
-# 2. Pull the latest replica into TARGET (does not touch live DB)
-litestream restore -config /app/litestream.yml -o "$TARGET" /data/vault/substrate.db
+**C — Litestream against an external S3-compat (e.g., Cloudflare R2)** *(RPO < 1s, vendor mixed)*
 
-# 3. Compare row counts: restored vs live
-sqlite3 "$TARGET"                       "SELECT COUNT(*) AS restored FROM events;"
-sqlite3 /data/vault/substrate.db        "SELECT COUNT(*) AS live     FROM events;"
+What we briefly trialed and rolled back on 2026-05-30. RPO competitive
+with LiteFS Cloud, cheaper per GB, but adds a second vendor to the
+trust chain AND duplicates user content into third-party storage
+(failed the security audit: substrate plaintext + OAuth secrets leak
+to R2 via continuous WAL streaming unless encryption + DB-split is
+done correctly).
 
-# 4. Compare the most recent event hash (live should equal or exceed restored
-#    by at most ~1 second's worth of writes — that's the RPO floor).
-sqlite3 "$TARGET"                       "SELECT content_hash, created_at FROM events ORDER BY created_at DESC LIMIT 1;"
-sqlite3 /data/vault/substrate.db        "SELECT content_hash, created_at FROM events ORDER BY created_at DESC LIMIT 1;"
+Not the default choice. If we ever revisit it, see commit `4f02cac`
+(revert) and `08b17c6` (original Litestream wire-up) for the prior art.
 
-# 5. Clean up
-rm "$TARGET"
-```
+### Trade-off matrix
 
-Expected: restored row count ≤ live row count (delta = writes in the
-last second). Restored most-recent hash should be in the live DB.
+| Option | RPO | Vendors | Per-user provisioning cost | Self-host story |
+|---|---|---|---|---|
+| Current (daily snapshots) | ~24h | Fly only | zero (Fly auto) | Volume snapshots on user's own host |
+| A — Hourly snapshots cron | ~1h | Fly only | zero (GH Actions cron) | Same |
+| B — LiteFS Cloud | <1s | Fly only | one API call per user namespace | User runs own LiteFS or volume snapshots |
+| C — Litestream → external S3 | <1s | Fly + S3 vendor | bucket + token per user | User runs Litestream to their own S3 |
 
-### Full disaster recovery (do not run without intent)
+### Decision: stay at default until invites force the question
 
-If the live SQLite is actually destroyed:
+Phase 0 = me, one machine, one vault, daily-use validation. 24h RPO
+costs me at most one day of memories if Fly's NVMe craters. Acceptable.
 
-```bash
-# 1. SSH in
-fly ssh console -a afair
-
-# 2. The live DB is gone or unusable. Move whatever's left aside:
-mv /data/vault/substrate.db /tmp/broken-$(date +%s).db 2>/dev/null
-rm -f /data/vault/substrate.db-wal /data/vault/substrate.db-shm
-
-# 3. Restore from R2
-litestream restore -config /app/litestream.yml /data/vault/substrate.db
-
-# 4. Verify shape
-sqlite3 /data/vault/substrate.db "SELECT COUNT(*) FROM events;"
-
-# 5. Restart the app to pick up the restored DB
-exit
-fly machine restart -a afair
-```
-
-### Rotate R2 credentials
-
-```bash
-# 1. CF Dashboard → R2 → Manage R2 API Tokens → create new token,
-#    scope: Object Read & Write on bucket afair-prod-vault
-# 2. Update .env.secrets.backup with new keys (and rotation date)
-# 3. Update Fly secrets:
-fly secrets set --app afair \
-  R2_ACCESS_KEY_ID=<new> \
-  R2_SECRET_ACCESS_KEY=<new>
-# 4. Verify a snapshot writes successfully (see "Verify replication is active")
-# 5. Revoke the old token in CF dashboard
-```
-
-### Multi-user provisioning (TODO before first paying invite)
-
-Single-tenant means **one R2 bucket per user**. Cloudflare R2 tokens are
-bucket-scoped (no prefix-level scoping), so shared-bucket-with-prefix is
-not an acceptable isolation model.
-
-Naming convention:
-
-- `afair-prod-vault` — founder dogfood vault (this machine)
-- `afair-user-<user-ulid>` — pattern for each paying-user vault
-
-Provisioning script lives at `scripts/provision_user.py` (not yet
-written — must exist before the first external invite). The script must:
-
-1. Create R2 bucket `afair-user-<id>` via CF API (`POST /accounts/{acct}/r2/buckets`, location `weur`).
-2. Create an R2 API token scoped to that bucket. **Open question:**
-   CF's public API for per-bucket-scoped R2 token creation needs
-   verification (historically dashboard-only). If still manual, the
-   provisioning flow blocks on a human dashboard step — automate via
-   a `cloudflare-go` SDK call or a one-time ops-admin token that issues
-   sub-tokens.
-3. Provision a Fly machine for the user (multi-machine-under-one-app
-   model with subdomain routing, OR one-app-per-user — decision still
-   open, captured here for the next architecture pass).
-4. `fly secrets set --app <user-app>` with the five R2 env vars.
-5. `fly deploy --app <user-app>` to roll out the Litestream-enabled image.
-6. Smoke test: verify a snapshot lands in the new bucket within 2 minutes.
-
-Limits to monitor as user count grows:
-
-- **R2 buckets per CF account:** default 1000 (request increase at ~800).
-- **R2 API tokens per account:** check current limit; may require periodic
-  bulk listing/cleanup.
-- **Fly machines per app / per org:** Fly's limits are generous but
-  count toward billing — track for forecasting.
-
-Cancel / right-to-erasure flow when a user terminates (I2 + I4):
-
-1. Wait for last user-confirmed export window (see §4 backup-to-laptop).
-2. SIGTERM the Fly machine — Litestream flushes any pending WAL.
-3. Destroy machine + Fly volume (irreversible).
-4. After retention window (default 14 days) delete the R2 bucket and
-   revoke its scoped token via CF API.
-5. Audit log entry per Invariant I7: which user, when, who triggered.
+When the first paying user is provisioned (Phase 1+) revisit. **Most
+likely path:** Option A immediately (just adds a cron), Option B if
+~1h still hurts.
 
 ---
 
