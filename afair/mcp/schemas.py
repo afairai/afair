@@ -76,8 +76,29 @@ class BinaryContent(BaseModel):
     filename_hint: str | None = Field(default=None, max_length=MAX_FILENAME_HINT_CHARS)
 
 
+class BlobRefContent(BaseModel):
+    """Reference to an already-uploaded blob in the object store.
+
+    Used after a streaming-upload via /internal/blob/upload — the
+    bytes are already on disk, this just wires an event to them.
+    Bypasses the 10 MB JSON-body cap so files up to the deployment
+    limit (typically 1 GB) can be remembered without holding the
+    blob in RAM.
+
+    ``blob_hash`` MUST be ``sha256:<64-hex>`` — the streaming endpoint
+    returns it after the upload completes. If the hash doesn't exist
+    in the object store the handler raises ``InvalidateTargetError``
+    (similar semantics to a missing invalidates target).
+    """
+
+    type: Literal["blob-ref"]
+    blob_hash: str = Field(min_length=71, max_length=71)
+    mime: str = Field(min_length=1, max_length=MAX_MIME_CHARS)
+    filename_hint: str | None = Field(default=None, max_length=MAX_FILENAME_HINT_CHARS)
+
+
 RememberContent = Annotated[
-    TextContent | BinaryContent,
+    TextContent | BinaryContent | BlobRefContent,
     Field(discriminator="type"),
 ]
 

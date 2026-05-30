@@ -61,14 +61,30 @@ class BodySizeLimitMiddleware:
     The check is header-only — we never read the body just to measure
     it. Clients that omit Content-Length get past this gate; uvicorn's
     own body limits handle them.
+
+    Paths in ``exempt_paths`` bypass the cap entirely. Used by the
+    streaming-upload endpoint which has its own (much larger) cap
+    enforced via the per-chunk feed loop.
     """
 
-    def __init__(self, app: ASGIApp, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        exempt_paths: tuple[str, ...] = (),
+    ) -> None:
         self.app = app
         self._max = max_body_bytes
+        self._exempt = frozenset(exempt_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in self._exempt:
             await self.app(scope, receive, send)
             return
 
