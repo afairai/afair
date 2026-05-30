@@ -54,6 +54,23 @@ def test_production_boot_requires_auth_token(tmp_path: Path) -> None:
             environment="fly",
             vault_dir=tmp_path,
             auth_token=None,
+            oauth_issuer="https://mcp.example.com",
+        )
+
+
+def test_production_boot_requires_oauth_issuer(tmp_path: Path) -> None:
+    """ENVIRONMENT=fly without OAUTH_ISSUER must refuse to boot (Sec M1).
+
+    The old code silently fell back to a hardcoded dev URL, which broke
+    every OAuth handshake against the wrong-domain JWT iss claim.
+    """
+    with pytest.raises(ValidationError, match="OAUTH_ISSUER"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            environment="fly",
+            vault_dir=tmp_path,
+            auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
+            oauth_issuer=None,
         )
 
 

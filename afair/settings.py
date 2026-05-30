@@ -215,6 +215,26 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _oauth_issuer_required_in_prod(self) -> Settings:
+        """Fail boot if production environment lacks an explicit OAuth issuer.
+
+        The issuer URL is embedded in every JWT we mint AND in the
+        well-known metadata that MCP clients use to discover the auth
+        server. A wrong issuer silently breaks every OAuth handshake.
+        The OLD code fell back to a hardcoded "https://afair.fly.dev"
+        which was the dev URL — production runs at mcp.afair.ai and the
+        mismatch was a silent footgun (Sec audit M1).
+        """
+        if self.environment == "fly" and not self.oauth_issuer:
+            msg = (
+                "OAUTH_ISSUER must be set when ENVIRONMENT=fly "
+                "(e.g. https://mcp.afair.ai). Used as the `iss` claim "
+                "in JWTs and the `issuer` field in OAuth metadata."
+            )
+            raise ValueError(msg)
+        return self
+
     @property
     def allowlist(self) -> tuple[str, ...]:
         """Normalized lowercase allowlist (set of allowed GitHub usernames)."""
@@ -224,14 +244,16 @@ class Settings(BaseSettings):
     def effective_oauth_issuer(self) -> str:
         """Issuer URL for JWTs we mint.
 
-        In prod (Fly) defaults to the public app URL. Locally, derives from
-        host/port. Settable explicitly via OAUTH_ISSUER for custom-domain
-        deployments.
+        Resolution order:
+          1. Explicit ``OAUTH_ISSUER`` env var when set — wins always.
+          2. Local dev: derives ``http://<host>:<port>`` from settings.
+          3. Production (``environment="fly"``): the prod-boot validator
+             below refuses to start without an explicit issuer, so
+             this property never sees that case. The explicit failure
+             beats a silent fallback to a wrong-domain URL.
         """
         if self.oauth_issuer:
             return self.oauth_issuer.rstrip("/")
-        if self.environment == "fly":
-            return "https://afair.fly.dev"
         return f"http://{self.mcp_host}:{self.mcp_port}"
 
 
