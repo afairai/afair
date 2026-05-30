@@ -95,6 +95,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # — Scoped signup token (Security audit I7)
+    # The afair-web landing page writes early-access signups into the
+    # vault. Giving it the full bearer (which can read+write+observe
+    # anything) means web-app compromise = full vault compromise.
+    # This token is accepted ONLY on /internal/signup, which writes
+    # one specific kind of event and nothing else. Web has just this.
+    signup_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "signup_token",
+            "AFAIR_SIGNUP_TOKEN",
+            "afair_signup_token",
+        ),
+    )
+
     # — OAuth server signing
     # We issue JWTs signed with this secret (HS256 for Phase 1; RS256
     # upgrade lives in a later phase if/when we need cross-instance
