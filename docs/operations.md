@@ -201,14 +201,24 @@ fly scale count 1 -a afair
 
 ---
 
-## 7. Backup strategy + future RPO upgrade paths
+## 7. Backup strategy + RPO
 
-**Current state:** Fly automatic daily volume snapshots with 14-day retention.
-RPO is ~24h, RTO is minutes (snapshot restore + machine boot).
+**Current state:**
+- Fly automatic **daily** volume snapshots, 14-day retention (the floor)
+- GitHub Actions **hourly** snapshot cron at `:17` past each hour
+  (`.github/workflows/hourly-backup.yml`)
 
-This is **acceptable for Phase 0** (founder dogfood + early invites). The
-upgrade path is documented below; revisit when real users generate data
-where 24h loss is meaningfully worse than 1h loss.
+RPO is ~1 h, RTO is minutes (snapshot restore + machine boot). The
+hourly cron uses the same volume snapshot mechanism as Fly's automatic
+daily — restore is identical (see §6).
+
+The hourly workflow needs `FLY_API_TOKEN` as a GitHub repo secret
+(already present for the deploy workflow). If you rebuild the volume
+on a different ID, update `VAULT_VOLUME_ID` in the workflow env.
+
+When ~1 h RPO is no longer enough, the next upgrade path is **LiteFS
+Cloud** (RPO < 1 s, Fly-native, ~$10/db/month base) — see the
+trade-off matrix below.
 
 ### Increase snapshot retention
 
@@ -224,30 +234,9 @@ fly volumes update <vol-id> -a afair --snapshot-retention 14
 
 See §6.
 
-### Upgrade paths when 24h RPO is too coarse
+### Upgrade paths beyond the current ~1h floor
 
-Three realistic options, in increasing order of complexity:
-
-**A — Hourly snapshots via GitHub Actions cron** *(RPO ~1h)*
-
-Add `.github/workflows/snapshot-hourly.yml`:
-
-```yaml
-name: Hourly substrate snapshot
-on:
-  schedule: [{cron: "0 * * * *"}]
-jobs:
-  snapshot:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl volumes snapshots create <vol-id> --app afair
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PROD }}
-```
-
-Zero new vendors. Just a scheduled job. Cost: extra storage for 24×
-more snapshots, rotation via retention policy.
+Two realistic options, in increasing order of complexity:
 
 **B — LiteFS Cloud** *(RPO < 1s, Fly-native)*
 
@@ -276,19 +265,20 @@ Not the default choice. If we ever revisit it, see commit `4f02cac`
 
 | Option | RPO | Vendors | Per-user provisioning cost | Self-host story |
 |---|---|---|---|---|
-| Current (daily snapshots) | ~24h | Fly only | zero (Fly auto) | Volume snapshots on user's own host |
-| A — Hourly snapshots cron | ~1h | Fly only | zero (GH Actions cron) | Same |
+| ~~Daily snapshots only~~ | ~24h | Fly only | zero | Volume snapshots |
+| **Current — daily + hourly cron** | ~1h | Fly only | zero (GH Actions runs once) | Same; users can copy the workflow |
 | B — LiteFS Cloud | <1s | Fly only | one API call per user namespace | User runs own LiteFS or volume snapshots |
 | C — Litestream → external S3 | <1s | Fly + S3 vendor | bucket + token per user | User runs Litestream to their own S3 |
 
-### Decision: stay at default until invites force the question
+### Decision: hourly snapshots are live; LiteFS when invites scale
 
-Phase 0 = me, one machine, one vault, daily-use validation. 24h RPO
-costs me at most one day of memories if Fly's NVMe craters. Acceptable.
+Phase 0 = me, one machine, one vault, daily-use validation. 1h RPO
+costs me at most one hour of memories if Fly's NVMe craters.
 
-When the first paying user is provisioned (Phase 1+) revisit. **Most
-likely path:** Option A immediately (just adds a cron), Option B if
-~1h still hurts.
+When ~1 h still hurts (probably triggered by the first user who pays
+a subscription fee), bump to LiteFS Cloud (Option B). The
+trade-off matrix above captures why C (Litestream → external S3) is
+the avoided path.
 
 ---
 
