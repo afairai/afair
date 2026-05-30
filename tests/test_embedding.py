@@ -266,6 +266,76 @@ def test_query_cache_eviction_at_maxsize(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cache.stats()["misses"] == 4  # A, B, C, A-again
 
 
+def test_query_cache_single_flight_coalesces_concurrent_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N concurrent threads asking for the same key → ONE upstream call (Perf I1).
+
+    Before single-flight: every miss races to the API and the slowest
+    write wins. Wasteful and rate-limit-prone. After: the first thread
+    issues the call, the rest park on a threading.Event and read the
+    cached value when it returns.
+    """
+    import threading
+
+    embedding.reset_query_cache()
+    call_count = {"n": 0}
+    in_call = threading.Event()
+    proceed = threading.Event()
+
+    def slow_embedding(**kwargs: Any) -> _FakeEmbedding:
+        # Signal that we're in the upstream call, then block until the
+        # test releases us. This guarantees that all N threads have
+        # entered get_or_compute before our single call returns.
+        call_count["n"] += 1
+        in_call.set()
+        proceed.wait(timeout=2.0)
+        return _FakeEmbedding([[0.1, 0.2]])
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "embedding", slow_embedding)
+
+    results: list[list[float]] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            v = embedding.embed_query(model="openai/x", text="shared-query")
+            with lock:
+                results.append(v)
+        except BaseException as e:
+            with lock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+
+    # Wait for the leader to enter the upstream call. Followers should
+    # be parked on the leader's Event by now.
+    assert in_call.wait(timeout=2.0), "leader never reached the upstream call"
+    # Brief settle so followers definitely registered as coalesced.
+    import time as _t
+
+    _t.sleep(0.05)
+    proceed.set()
+
+    for t in threads:
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+
+    assert errors == []
+    assert len(results) == 8
+    assert all(r == [0.1, 0.2] for r in results)
+    # The whole point: 8 concurrent misses → 1 upstream call.
+    assert call_count["n"] == 1
+    stats = embedding.query_cache_stats()
+    assert stats["misses"] == 1
+    assert stats["coalesced"] == 7  # 8 callers minus the leader
+
+
 # ── token estimation ──────────────────────────────────────────────────────
 
 
