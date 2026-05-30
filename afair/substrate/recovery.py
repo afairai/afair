@@ -52,9 +52,7 @@ def rebuild_events_from_records(
         stats["records_seen"] += 1
         chash = record["content_hash"]
 
-        already = cursor.execute(
-            "SELECT 1 FROM events WHERE content_hash = ?", (chash,)
-        ).fetchone()
+        already = cursor.execute("SELECT 1 FROM events WHERE content_hash = ?", (chash,)).fetchone()
         if already is not None:
             stats["rows_already_present"] += 1
             continue
