@@ -65,6 +65,7 @@ from ..substrate import (
     write_event,
 )
 from ..substrate.events import row_to_event
+from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
@@ -534,6 +535,32 @@ def remember(
     event with ``kind='invalidate'`` and ``parent_hashes=[target]`` for
     lineage. The new ``content`` is written first; invalidations follow.
     """
+    # Bound the never-documented-unbounded kwargs at the handler entry.
+    # The MCP signature is the v1 surface (I1, frozen) so we tighten by
+    # validating the inputs server-side rather than changing the public
+    # signature. These limits are generous for any legitimate caller and
+    # cheap protection against floods that would explode the FTS index,
+    # exhaust the validator, or serialize a million invalidation
+    # transactions inside a single request handler.
+    if context is not None and len(context) > schemas.MAX_CONTEXT_CHARS:
+        msg = f"context must be <= {schemas.MAX_CONTEXT_CHARS} chars; got {len(context)}"
+        raise ValueError(msg)
+    if type_hint is not None and len(type_hint) > schemas.MAX_TYPE_HINT_CHARS:
+        msg = f"type_hint must be <= {schemas.MAX_TYPE_HINT_CHARS} chars; got {len(type_hint)}"
+        raise ValueError(msg)
+    if parent_hashes is not None and len(parent_hashes) > schemas.MAX_PARENT_HASHES_PER_CALL:
+        msg = (
+            f"parent_hashes must be <= {schemas.MAX_PARENT_HASHES_PER_CALL} entries; "
+            f"got {len(parent_hashes)}"
+        )
+        raise ValueError(msg)
+    if invalidates is not None and len(invalidates) > schemas.MAX_INVALIDATES_PER_CALL:
+        msg = (
+            f"invalidates must be <= {schemas.MAX_INVALIDATES_PER_CALL} entries; "
+            f"got {len(invalidates)}"
+        )
+        raise ValueError(msg)
+
     ctx = get_context()
     db = connect_for_thread()
 
