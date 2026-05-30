@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ...substrate import open_db
+from ..rate_limit import TokenBucketRateLimiter
 from . import jwt as jwt_mod
 from . import metadata, storage
 from .identity import GitHubIdentityBackend, IdentityBackend
@@ -34,6 +35,88 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from ...settings import Settings
+
+
+# ── DCR hardening (Sec audit I1) ───────────────────────────────────────────
+# Defaults sized for legitimate MCP-client registration traffic. Real MCP
+# clients (Claude.ai, Claude Code, Codex CLI, ChatGPT) each register once
+# per install. Even an aggressive integration test pings this at maybe
+# 5/minute. 10 registrations per IP per hour is generous for humans and
+# painful for attackers trying to enumerate or DoS.
+_DCR_RATE_LIMITER = TokenBucketRateLimiter(
+    requests_per_minute=10,
+    burst_multiplier=1.0,  # capacity == per-minute rate; no extra burst headroom
+    max_identities=8192,  # bound per-IP dict against a fan-out flood
+)
+
+# Body / field caps for /oauth/register. All values are far above any
+# legitimate client's registration payload (Claude.ai sends ~600 bytes;
+# Claude Code ~400; ChatGPT ~500) yet small enough to bound abuse.
+_DCR_MAX_BODY_BYTES = 16 * 1024  # 16 KB
+_DCR_MAX_REDIRECT_URIS = 8
+_DCR_MAX_URI_CHARS = 2048  # matches common browser-URL limits
+_DCR_MAX_CLIENT_NAME_CHARS = 256
+# Allowed redirect-URI schemes. Per OAuth 2.1 BCP 212 native clients use
+# custom schemes (com.anthropic.claude://oauth-callback) and loopback
+# clients use http://localhost or http://127.0.0.1. https is the public-
+# web baseline. Anything else (file://, ftp://, data://) is a smell.
+_DCR_ALLOWED_SCHEMES = frozenset(
+    {
+        "https",
+        "http",  # only allowed for loopback hosts — checked separately
+    }
+)
+_DCR_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort caller IP for DCR per-IP rate limiting.
+
+    On Fly the platform sets ``Fly-Client-IP`` after stripping spoofed
+    upstream values. We trust that first. ``X-Forwarded-For`` is the
+    fallback for other deployments; we take the first hop. Last resort
+    is the direct socket address (only meaningful on localhost dev).
+    """
+    fly = request.headers.get("fly-client-ip")
+    if fly:
+        return fly.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",", 1)[0].strip()
+        if first:
+            return first
+    if request.client is not None and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _validate_redirect_uri(uri: str) -> str | None:
+    """Return None if ``uri`` passes the DCR allowlist; else an error message."""
+    if len(uri) > _DCR_MAX_URI_CHARS:
+        return f"redirect_uri exceeds {_DCR_MAX_URI_CHARS} chars"
+    try:
+        parsed = urllib.parse.urlparse(uri)
+    except ValueError:
+        return "redirect_uri is not a valid URI"
+    scheme = parsed.scheme.lower()
+    if scheme in _DCR_ALLOWED_SCHEMES:
+        if scheme == "http":
+            host = (parsed.hostname or "").lower()
+            if host not in _DCR_LOOPBACK_HOSTS:
+                return "http redirect_uri is only allowed for loopback hosts"
+        if not parsed.netloc:
+            return "redirect_uri must have a host"
+        return None
+    # Custom schemes (native-app callbacks) — allow if they look like a
+    # reasonable reverse-DNS scheme (com.example.app) and not a known
+    # dangerous one. Reject empty, single-segment, or known-bad.
+    if not scheme:
+        return "redirect_uri must have a scheme"
+    if scheme in {"javascript", "data", "vbscript", "file", "ftp"}:
+        return f"redirect_uri scheme '{scheme}' is not allowed"
+    if "." not in scheme:
+        return "custom scheme must look like reverse-DNS (e.g. com.example.app)"
+    return None
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -110,10 +193,64 @@ async def oauth_register(request: Request) -> Response:
     We accept any client. The client picks its own ``redirect_uris``;
     no human-in-the-loop. Returned client_id + (optional) client_secret
     are then used by the client to authenticate with /oauth/token.
+
+    Hardening (Sec audit I1):
+      * Per-IP rate limit on the unauthenticated endpoint so a single
+        attacker can't enumerate or DoS by registering endlessly.
+      * Body size cap (16 KB) so the JSON parser can't be used to burn
+        memory; below the global 12 MB cap the body-limit middleware
+        applies but far above what legitimate clients need.
+      * redirect_uris validated for count, length, and scheme: http
+        only for loopback, custom schemes only reverse-DNS shapes,
+        outright reject javascript/data/file/ftp.
     """
     settings: Settings = request.app.state.settings
+
+    # Per-IP rate limit — keyed on the platform-supplied client IP. We
+    # consult the limiter BEFORE parsing the body so an attacker can't
+    # use a flood of malformed bodies to bypass the bucket count.
+    ip = _client_ip(request)
+    allowed, retry_after = _DCR_RATE_LIMITER.check(f"dcr:{ip}")
+    if not allowed:
+        retry_seconds = max(1, int(retry_after) + 1)
+        return JSONResponse(
+            {
+                "error": "rate_limited",
+                "error_description": "too many client registrations from this IP",
+            },
+            status_code=429,
+            headers={"Retry-After": str(retry_seconds)},
+        )
+
+    # Body-size hard cap before parsing. The general BodySizeLimit
+    # middleware allows up to 12 MB which is far too generous for DCR.
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is not None:
+        try:
+            content_length = int(content_length_header)
+        except ValueError:
+            return _error(
+                "invalid_client_metadata",
+                description="invalid Content-Length",
+            )
+        if content_length > _DCR_MAX_BODY_BYTES:
+            return _error(
+                "invalid_client_metadata",
+                description=f"body exceeds {_DCR_MAX_BODY_BYTES} bytes",
+                status=413,
+            )
+
+    # Even when Content-Length is missing or lies, cap the actual read.
+    raw_body = await request.body()
+    if len(raw_body) > _DCR_MAX_BODY_BYTES:
+        return _error(
+            "invalid_client_metadata",
+            description=f"body exceeds {_DCR_MAX_BODY_BYTES} bytes",
+            status=413,
+        )
+
     try:
-        body = await request.json()
+        body = json.loads(raw_body) if raw_body else None
     except json.JSONDecodeError:
         return _error("invalid_client_metadata", description="body must be JSON")
 
@@ -126,10 +263,27 @@ async def oauth_register(request: Request) -> Response:
             "invalid_redirect_uri",
             description="redirect_uris is required and must be a non-empty array",
         )
+    if len(redirect_uris) > _DCR_MAX_REDIRECT_URIS:
+        return _error(
+            "invalid_redirect_uri",
+            description=f"redirect_uris cannot exceed {_DCR_MAX_REDIRECT_URIS} entries",
+        )
     if not all(isinstance(u, str) and u for u in redirect_uris):
         return _error("invalid_redirect_uri", description="redirect_uris must be strings")
+    for uri in redirect_uris:
+        problem = _validate_redirect_uri(uri)
+        if problem is not None:
+            return _error("invalid_redirect_uri", description=problem)
 
-    client_name = body.get("client_name") if isinstance(body.get("client_name"), str) else None
+    raw_name = body.get("client_name")
+    client_name: str | None = None
+    if isinstance(raw_name, str):
+        if len(raw_name) > _DCR_MAX_CLIENT_NAME_CHARS:
+            return _error(
+                "invalid_client_metadata",
+                description=f"client_name exceeds {_DCR_MAX_CLIENT_NAME_CHARS} chars",
+            )
+        client_name = raw_name
     # Default to public client (PKCE-only, no secret). Some MCP clients
     # request confidential by setting token_endpoint_auth_method.
     confidential = body.get("token_endpoint_auth_method") == "client_secret_post"

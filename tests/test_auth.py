@@ -161,6 +161,53 @@ def test_loopback_dev_no_token_passes_through(tmp_path: Path) -> None:
     assert response.status_code != 401
 
 
+def test_jwt_sub_drives_rate_limit_identity(tmp_path: Path) -> None:
+    """Rate-limit bucket is keyed on the JWT subject, not the token bytes.
+
+    Without this, a JWT mint-and-rotate loop creates a fresh bucket on
+    every request and the per-identity cap is meaningless (Sec audit I2).
+
+    The test issues TWO different JWTs for the same subject ("gowry"),
+    asserts both succeed for many requests, then verifies the rate
+    limiter saw them under one identity by inspecting the bucket map.
+    """
+    from afair.mcp.oauth.jwt import issue_access_token
+
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
+        jwt_secret="a-secret-long-enough-for-hs256-tests-32+",  # type: ignore[arg-type]
+        identity_allowlist="gowry",  # type: ignore[arg-type]
+    )
+    app = build_app(settings)
+    rate_limiter = next(
+        m.kwargs["limiter"] for m in app.user_middleware if m.cls.__name__ == "RateLimitMiddleware"
+    )
+    rate_limiter.reset()
+
+    token_a = issue_access_token(settings=settings, subject="gowry", email=None).token
+    token_b = issue_access_token(settings=settings, subject="gowry", email=None).token
+    assert token_a != token_b  # different jti / iat → different bytes
+
+    with TestClient(app) as client:
+        for tok in (token_a, token_b):
+            response = client.post(
+                "/mcp/",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+            assert response.status_code != 401, response.text
+
+    # Both tokens must have landed in the SAME bucket. Bucket map size
+    # is the proof — exactly one identity for the same `sub`.
+    assert rate_limiter.size() == 1
+
+
 def test_token_comparison_is_constant_time(tmp_path: Path) -> None:
     """Smoke that we accept the right token and reject any other, regardless
     of length. Doesn't measure timing directly — that would be flaky in CI —
