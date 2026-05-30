@@ -71,23 +71,30 @@ def write_event(
     sorted_parents = sorted(parent_hashes) if parent_hashes else None
     chash = content_hash(kind=kind, origin=origin, payload=payload, parent_hashes=sorted_parents)
 
-    existing = read_event_by_hash(conn, chash)
-    if existing is not None:
-        return existing
-
     event_id = _new_id()
     created_at = _now_iso()
     payload_json = canonical_json(payload)
     parents_json = canonical_json(sorted_parents) if sorted_parents else None
     searchable = derive_searchable_text(payload)
 
+    # Atomic insert-or-return-existing: the previous pattern of
+    # ``read_event_by_hash → INSERT`` had a TOCTOU race — two concurrent
+    # writes with the same content_hash both passed the existence check
+    # on the WAL snapshot, the second INSERT then raised
+    # sqlite3.IntegrityError (UNIQUE on content_hash) and propagated to
+    # the MCP client as a 500. ``ON CONFLICT DO NOTHING RETURNING`` lets
+    # the winner produce a row in the same statement; the loser gets
+    # no row, then re-reads to find the row the winner committed
+    # (audit finding — concurrency).
     with conn:
-        conn.execute(
+        row = conn.execute(
             """
             INSERT INTO events (
                 id, content_hash, created_at, origin, kind,
                 payload, parent_hashes, schema_version
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(content_hash) DO NOTHING
+            RETURNING id, created_at
             """,
             (
                 event_id,
@@ -99,11 +106,31 @@ def write_event(
                 parents_json,
                 SCHEMA_VERSION,
             ),
-        )
+        ).fetchone()
+        if row is None:
+            # Another writer committed the same content_hash first. Fall
+            # through to the existing row — this is the idempotent path
+            # the original docstring promised.
+            existing = read_event_by_hash(conn, chash)
+            if existing is not None:
+                return existing
+            # If we get here something is wrong with the unique index;
+            # fail loud rather than returning a bogus event.
+            msg = (
+                f"INSERT swallowed by ON CONFLICT but content_hash {chash} "
+                "not visible on follow-up read"
+            )
+            raise RuntimeError(msg)
+        # Winner: insert the FTS row in the same transaction.
         conn.execute(
             "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
             (chash, searchable),
         )
+        # Use the actual stored values (id + created_at) in case the
+        # RETURNING clause ever differs from what we sent. Defensive
+        # but cheap.
+        event_id = row["id"]
+        created_at = row["created_at"]
 
     return Event(
         id=event_id,

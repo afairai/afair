@@ -211,6 +211,66 @@ def test_write_is_idempotent_on_content_hash(
     assert count == 1
 
 
+def test_write_is_idempotent_under_concurrency(tmp_path: Path) -> None:
+    """N parallel writers of the same content_hash all return the same row.
+
+    Regression for the TOCTOU race fixed via INSERT … ON CONFLICT DO
+    NOTHING RETURNING (audit concurrency #2). The previous
+    SELECT-then-INSERT pattern raised sqlite3.IntegrityError on the
+    loser thread.
+    """
+    import threading
+
+    payload = {
+        "content_type": "text",
+        "text": "shared content",
+        "context": None,
+        "type_hint": None,
+        "language": None,
+    }
+
+    results: list[Event] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+    start = threading.Event()
+
+    def worker() -> None:
+        start.wait()
+        conn = open_db(tmp_path)
+        try:
+            event = write_event(conn, origin="user", kind="remember", payload=payload)
+            with lock:
+                results.append(event)
+        except BaseException as e:
+            with lock:
+                errors.append(e)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+
+    assert errors == [], f"unexpected errors: {errors}"
+    assert len(results) == 8
+    # All 8 must point at the same row.
+    first_id = results[0].id
+    first_hash = results[0].content_hash
+    assert all(r.id == first_id for r in results)
+    assert all(r.content_hash == first_hash for r in results)
+    # Exactly one row was inserted.
+    conn = open_db(tmp_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        assert count == 1
+    finally:
+        conn.close()
+
+
 def test_different_payloads_get_different_hashes(
     vault: tuple[sqlite3.Connection, Path],
 ) -> None:
