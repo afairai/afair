@@ -571,6 +571,20 @@ def _canonicalize_one_event(
     return stats, last_llm_call
 
 
+_CANDIDATE_POOL_MAX_ROWS = 5000
+"""Hard ceiling on rows loaded into Python before difflib scoring.
+
+At ~100 entities/event and 10 events/day, the user reaches ~365k
+entities after a year. The full-scan-then-difflib approach would
+quadratically slow down canonicalization. The cap below loads at
+most ``_CANDIDATE_POOL_MAX_ROWS`` of the SAME KIND, preferring
+shorter names first (LENGTH heuristic — most similar lexical
+matches share a length neighborhood). Beyond that, the LLM-judge
+stage handles cases the lexical prefilter missed; correctness is
+preserved, only the recall-floor of the prefilter drops.
+(Sec audit M3 — unbounded candidate pool scan.)"""
+
+
 def _candidate_pool(
     conn: sqlite3.Connection, *, surface_form: str, kind: str, limit: int
 ) -> list[Entity]:
@@ -580,15 +594,28 @@ def _candidate_pool(
     surface form so the LLM sees a small relevant menu instead of the
     full entity pool. Future Stage 2.5 will replace this with embedding-
     based similarity once we have entity-level embeddings.
+
+    DB-side bounded: at most ``_CANDIDATE_POOL_MAX_ROWS`` rows are
+    pulled into Python, ordered by length proximity to the surface form
+    (a cheap, indexable heuristic — names of similar length are more
+    likely to be lexically similar). Difflib then ranks within that
+    bounded set.
     """
+    target = surface_form.lower()
+    target_len = len(target)
     rows = conn.execute(
-        "SELECT id, canonical_name, kind, created_at, created_by, confidence, source_event_id "
-        "FROM entities WHERE kind = ?",
-        (kind,),
+        # ORDER BY length-distance keeps the most plausible candidates
+        # within the cap. ABS() over LENGTH(canonical_name) is cheap;
+        # no extra index needed.
+        "SELECT id, canonical_name, kind, created_at, created_by, "
+        "confidence, source_event_id "
+        "FROM entities WHERE kind = ? "
+        "ORDER BY ABS(LENGTH(canonical_name) - ?) "
+        "LIMIT ?",
+        (kind, target_len, _CANDIDATE_POOL_MAX_ROWS),
     ).fetchall()
     if not rows:
         return []
-    target = surface_form.lower()
     scored: list[tuple[float, Entity]] = []
     for row in rows:
         score = difflib.SequenceMatcher(None, target, row["canonical_name"].lower()).ratio()
