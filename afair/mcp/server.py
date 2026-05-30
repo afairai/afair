@@ -34,6 +34,7 @@ from ..agents.pruner import Pruner
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, landing, schemas
 from .auth import BearerTokenMiddleware
+from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .correlation import CorrelationIdMiddleware
@@ -230,8 +231,13 @@ def build_app(settings: Settings) -> Starlette:
         Middleware(GZipMiddleware, minimum_size=500, compresslevel=5),
         # Body-size cap — reject oversized requests BEFORE uvicorn reads
         # the whole body into memory. 12 MB > MAX_REMEMBER_BYTES (10MB)
-        # + JSON envelope overhead.
-        Middleware(BodySizeLimitMiddleware),
+        # + JSON envelope overhead. /internal/blob/upload is exempted
+        # because it has its own per-chunk cap and would never finish
+        # streaming a 100 MB upload under the 12 MB limit.
+        Middleware(
+            BodySizeLimitMiddleware,
+            exempt_paths=("/internal/blob/upload",),
+        ),
         # Authentication — must come BEFORE rate limiting so we don't burn
         # bucket entries on random unauthenticated probes.
         Middleware(
@@ -277,6 +283,11 @@ def build_app(settings: Settings) -> Starlette:
         Route("/oauth/token", oauth_routes.oauth_token, methods=["POST"]),
         Route("/oauth/revoke", oauth_routes.oauth_revoke, methods=["POST"]),
         Route("/internal/signup", signup_endpoint, methods=["POST"]),
+        # Streaming blob upload — Route-based but reads the body via
+        # request.stream() so it never materializes the whole payload.
+        # Exempted from BodySizeLimitMiddleware so files past 12 MB go
+        # through (cap enforced per-chunk inside the handler).
+        Route("/internal/blob/upload", blob_upload_endpoint, methods=["POST"]),
         Mount("/", app=mcp_app),
     ]
 

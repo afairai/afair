@@ -144,3 +144,31 @@ def build_binary_payload(
         "context": context,
         "type_hint": type_hint,
     }
+
+
+def build_blob_ref_payload(
+    *,
+    blob_hash: str,
+    size_bytes: int,
+    mime: str,
+    filename_hint: str | None,
+    context: str | None,
+    type_hint: str | None = None,
+) -> dict[str, Any]:
+    """Construct a binary payload from an ALREADY-uploaded blob.
+
+    Used by ``remember(content=BlobRefContent(...))`` after a client
+    streamed bytes via /internal/blob/upload. Bytes are already in the
+    object store, we just need to wire the event row to them. Identical
+    shape to ``build_binary_payload`` so recall + extractor don't have
+    to branch on how the bytes arrived.
+    """
+    return {
+        "content_type": "binary",
+        "blob_hash": blob_hash,
+        "mime": mime,
+        "size_bytes": size_bytes,
+        "filename_hint": filename_hint,
+        "context": context,
+        "type_hint": type_hint,
+    }
