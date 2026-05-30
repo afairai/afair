@@ -23,6 +23,9 @@ def open_db(vault_dir: Path, *, embedding_dim: int = 1536) -> sqlite3.Connection
     """
     vault_dir.mkdir(parents=True, exist_ok=True)
     (vault_dir / "objects").mkdir(parents=True, exist_ok=True)
+    # Durable event-record dir — every event is dual-written here as
+    # an immutable JSON file. See afair.substrate.event_records.
+    (vault_dir / "event_records").mkdir(parents=True, exist_ok=True)
 
     db_path = vault_dir / "substrate.db"
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
