@@ -49,6 +49,39 @@
   `flyctl deploy --remote-only`, verifies `/health`
 - `docs/operations.md` — runbooks for deploy, backup-to-laptop, snapshot
   restore, future RPO upgrade paths, permanent erasure, secret rotation
+- **Multi-modal content + streaming uploads + compound events
+  (2026-05-30 night)** — substrate now stores + recalls + extracts
+  any modality. Concretely:
+  - **PDF text extraction** via pypdf in the warm-path extractor
+    (`afair/agents/binary_extractors.py`).
+  - **Audio whisper transcription** via litellm
+    (`openai/whisper-1` default, configurable).
+  - **Image vision extraction** via vision-capable LLM with the
+    same tool-use schema as the text path
+    (`anthropic/claude-haiku-4-5` default).
+  - **Streaming blob upload** at `POST /internal/blob/upload` —
+    reads body chunk-by-chunk via `request.stream()` into a new
+    `StreamingObjectWriter`. Peak RAM per request is the buffer
+    (~1 MB) regardless of payload size; default cap raised from
+    10 MB JSON-body to 1 GB streamed.
+  - **BlobRefContent** discriminator on `RememberContent` references
+    already-uploaded blobs by hash.
+  - **CompoundContent** discriminator for atomic multi-part events
+    (transcript + slides + screenshot as one event row with one
+    content_hash and one recall hit).
+  - **FTS enrichment after extraction** — when the extractor lands,
+    it DELETE+INSERTs the events_fts row to include the extractor's
+    summary + salient_facts + the extracted body. PDFs and audio
+    become first-class FTS-searchable by content.
+- **Phase 0.5 observability foundation (2026-05-30 night)** —
+  append-only `pipeline_events` table + lifecycle markers at every
+  key step (event.written, extraction.enqueued/started/completed,
+  embedding.stored, …). Future ExpectationChecker worker will query
+  this for stuck events. See `afair/substrate/pipeline_events.py`.
+- **RPO upgraded from 24h to ~1h (2026-05-30)** — added
+  `.github/workflows/hourly-backup.yml` running `flyctl volumes
+  snapshots create` at :17 every hour. Operations.md §7 reflects the
+  new baseline. Next upgrade rung is LiteFS Cloud when invites scale.
 - **Post-launch hardening pass (2026-05-30 evening)** — all CRITICAL +
   IMPORTANT security and performance audit items closed; selected
   MINOR items too. Concretely:
