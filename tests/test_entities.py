@@ -537,6 +537,132 @@ def test_resolve_canonical_follows_chain(db: sqlite3.Connection, sample_event_id
     assert resolve_canonical(db, a.id) == c.id
 
 
+def test_resolve_canonical_batch_matches_per_id_helper(
+    db: sqlite3.Connection, sample_event_id: str
+) -> None:
+    """Batched CTE walk must produce the same mapping as the per-id loop."""
+    from afair.substrate.entities import resolve_canonical_batch
+
+    a = write_entity(
+        db,
+        canonical_name="A",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    b = write_entity(
+        db,
+        canonical_name="B",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    c = write_entity(
+        db,
+        canonical_name="C",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    d = write_entity(
+        db,
+        canonical_name="D",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    # A → B → C (chain of length 2); D stays canonical.
+    write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=b.id, merged_by="t", reason="x", confidence=1.0
+    )
+    write_entity_merge(
+        db, from_entity_id=b.id, into_entity_id=c.id, merged_by="t", reason="y", confidence=1.0
+    )
+
+    inputs = [a.id, b.id, c.id, d.id]
+    expected = {eid: resolve_canonical(db, eid) for eid in inputs}
+    actual = resolve_canonical_batch(db, inputs)
+
+    assert actual == expected
+    assert actual[a.id] == c.id
+    assert actual[d.id] == d.id
+
+
+def test_resolve_canonical_batch_picks_latest_merge_row(
+    db: sqlite3.Connection, sample_event_id: str
+) -> None:
+    """When the same from_entity_id has two merge rows, latest merged_at wins.
+
+    The per-id helper uses ORDER BY merged_at DESC LIMIT 1. The batched
+    CTE must do the same via the latest_merges CTE rank.
+    """
+    from afair.substrate.entities import resolve_canonical_batch
+
+    a = write_entity(
+        db,
+        canonical_name="A",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    b = write_entity(
+        db,
+        canonical_name="B",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    c = write_entity(
+        db,
+        canonical_name="C",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    # Two sequential merges from the same source. _now_iso() uses
+    # datetime.now() with microsecond precision so the second row has
+    # a strictly later merged_at; ROW_NUMBER ORDER BY merged_at DESC
+    # picks A → C as the winner.
+    import time
+
+    write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=b.id, merged_by="t", reason="first", confidence=0.6
+    )
+    time.sleep(0.001)  # guarantee distinct microsecond stamps even on fast hosts
+    write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=c.id, merged_by="t", reason="second", confidence=0.9
+    )
+
+    assert resolve_canonical(db, a.id) == c.id
+    assert resolve_canonical_batch(db, [a.id]) == {a.id: c.id}
+
+
+def test_resolve_canonical_batch_empty_and_dedup(
+    db: sqlite3.Connection, sample_event_id: str
+) -> None:
+    """Empty input → empty dict; duplicates collapse to one entry."""
+    from afair.substrate.entities import resolve_canonical_batch
+
+    a = write_entity(
+        db,
+        canonical_name="A",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+
+    assert resolve_canonical_batch(db, []) == {}
+    assert resolve_canonical_batch(db, [a.id, a.id, a.id]) == {a.id: a.id}
+
+
 # ── edge invalidation ─────────────────────────────────────────────────────
 
 

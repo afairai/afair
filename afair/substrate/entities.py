@@ -586,13 +586,71 @@ def read_entities_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict
 
 
 def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, str]:
-    """Bulk variant of resolve_canonical — one map call per recall.
+    """Bulk variant of resolve_canonical — one query for the whole batch.
 
-    Falls through to per-id resolve_canonical since the merge chain is
-    rarely deep enough to justify a single recursive CTE. With SQLite's
-    prepared-statement cache + per-connection page cache, this is cheap.
+    Uses a recursive CTE that walks the merge chain from each input ID
+    until it reaches a row not in ``entity_merges.from_entity_id``. With
+    a typical recall returning ~20 hits with ~3 entities each, the old
+    per-id loop ran ~60 SQL queries; the CTE runs ONE (Perf audit C4).
+
+    Depth cap matches the per-id helper (16) to defend against the
+    impossible case of a merge cycle.
     """
-    return {eid: resolve_canonical(conn, eid) for eid in entity_ids}
+    if not entity_ids:
+        return {}
+
+    # Deduplicate while preserving requested-ID set; non-string / falsy
+    # inputs would explode the WHERE clause so filter them first.
+    unique = list({e for e in entity_ids if isinstance(e, str) and e})
+    if not unique:
+        return {}
+
+    # Build the VALUES clause for the seed; each id becomes one row.
+    seed_values = ",".join("(?)" for _ in unique)
+    rows = conn.execute(
+        f"""
+        WITH RECURSIVE
+        latest_merges(from_entity_id, into_entity_id) AS (
+            -- For each from_entity_id keep only the most recent merge row.
+            -- Matches the per-id helper's ORDER BY merged_at DESC LIMIT 1.
+            SELECT from_entity_id, into_entity_id FROM (
+                SELECT
+                    from_entity_id,
+                    into_entity_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY from_entity_id
+                        ORDER BY merged_at DESC
+                    ) AS rn
+                FROM entity_merges
+            ) ranked
+            WHERE rn = 1
+        ),
+        seed(id) AS (VALUES {seed_values}),
+        chain(start_id, current_id, depth) AS (
+            -- seed: every requested id starts as its own chain head
+            SELECT id, id, 0 FROM seed
+            UNION ALL
+            -- step: follow from_entity_id → into_entity_id until exhausted
+            SELECT chain.start_id, lm.into_entity_id, chain.depth + 1
+            FROM chain
+            JOIN latest_merges lm ON lm.from_entity_id = chain.current_id
+            WHERE chain.depth < 16
+        )
+        SELECT start_id, current_id
+        FROM chain AS c1
+        WHERE NOT EXISTS (
+            SELECT 1 FROM chain AS c2
+            WHERE c2.start_id = c1.start_id
+              AND c2.depth > c1.depth
+        )
+        """,
+        unique,
+    ).fetchall()
+
+    # rows contains one entry per start_id whose current_id is the
+    # canonical (deepest-reached) ID. IDs with no merges resolve to
+    # themselves via the seed row at depth 0.
+    return {row["start_id"]: row["current_id"] for row in rows}
 
 
 # ── row mappers ───────────────────────────────────────────────────────────
