@@ -7,9 +7,10 @@
 
 - **App:** `afair` on Fly (personal org)
 - **Region:** `fra` (EU residency by default)
-- **Volume:** `vault`, 1 GB, 5-day snapshot retention
+- **Volume:** `vault`, 1 GB, 5-day Fly snapshot retention
+- **Continuous backup:** Litestream → Cloudflare R2 bucket `afair-prod-vault` (RPO ~1s, 30-day WAL retention, hourly snapshots, EU residency)
 - **Strategy:** `immediate` — single-machine deploys with brief downtime
-- **URL:** `https://afair.fly.dev` (HTTPS auto-provisioned)
+- **URL:** `https://afair.fly.dev` (HTTPS auto-provisioned), MCP at `https://mcp.afair.ai`
 - **Deploy:** GitHub Actions on push to `main` (see `.github/workflows/deploy.yml`)
 
 ---
@@ -200,7 +201,165 @@ fly scale count 1 -a afair
 
 ---
 
-## 7. Permanent erasure (the I2 right-to-erasure path)
+## 7. Continuous WAL replication via Litestream → R2
+
+Fly volume snapshots run daily — that's an RPO up to 24 hours. Litestream
+streams the SQLite WAL continuously to R2 in addition:
+
+- **RPO:** ~1 second (`sync-interval: 1s`)
+- **Hourly snapshots** (compact, full DB state)
+- **WAL retention:** 30 days
+- **Replica location:** R2 EU west (location hint `weur`)
+- **Bucket:** `afair-prod-vault`, prefix `substrate/`
+
+Litestream runs as a sibling process to Python inside the same Fly machine,
+started by `scripts/start.sh`. Config: `litestream.yml`. Credentials come
+from Fly secrets (`R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_BUCKET_PATH`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`).
+
+### Auto-recovery on boot
+
+`scripts/start.sh` checks:
+
+1. R2 credentials in env? (Fly secrets set?)
+2. `/data/vault/substrate.db` missing locally?
+
+If both yes → `litestream restore -if-replica-exists` from R2, then start
+the Python app on the restored DB. If R2 unconfigured → run Python without
+replication (local-dev / self-host path).
+
+### Verify replication is active
+
+```bash
+fly logs -a afair --no-tail | grep -i litestream | tail -20
+# Expected: regular "wal segment written" lines, "snapshot written"
+# every hour, no "level=ERROR" entries.
+```
+
+### List snapshots in R2
+
+```bash
+fly ssh console -a afair -C \
+  'litestream snapshots -config /app/litestream.yml /data/vault/substrate.db'
+# Lists generation, snapshot index, size, timestamp, and replica name.
+```
+
+### Recovery drill (verify the replica is real and restorable)
+
+Run this once after the first deploy and periodically (quarterly) to
+make sure recovery actually works. Drill is non-destructive — uses a
+sibling path for the restore.
+
+```bash
+fly ssh console -a afair
+
+# 1. Inside the machine — pick a sibling path that doesn't collide
+TARGET=/tmp/restored-substrate.db
+
+# 2. Pull the latest replica into TARGET (does not touch live DB)
+litestream restore -config /app/litestream.yml -o "$TARGET" /data/vault/substrate.db
+
+# 3. Compare row counts: restored vs live
+sqlite3 "$TARGET"                       "SELECT COUNT(*) AS restored FROM events;"
+sqlite3 /data/vault/substrate.db        "SELECT COUNT(*) AS live     FROM events;"
+
+# 4. Compare the most recent event hash (live should equal or exceed restored
+#    by at most ~1 second's worth of writes — that's the RPO floor).
+sqlite3 "$TARGET"                       "SELECT content_hash, created_at FROM events ORDER BY created_at DESC LIMIT 1;"
+sqlite3 /data/vault/substrate.db        "SELECT content_hash, created_at FROM events ORDER BY created_at DESC LIMIT 1;"
+
+# 5. Clean up
+rm "$TARGET"
+```
+
+Expected: restored row count ≤ live row count (delta = writes in the
+last second). Restored most-recent hash should be in the live DB.
+
+### Full disaster recovery (do not run without intent)
+
+If the live SQLite is actually destroyed:
+
+```bash
+# 1. SSH in
+fly ssh console -a afair
+
+# 2. The live DB is gone or unusable. Move whatever's left aside:
+mv /data/vault/substrate.db /tmp/broken-$(date +%s).db 2>/dev/null
+rm -f /data/vault/substrate.db-wal /data/vault/substrate.db-shm
+
+# 3. Restore from R2
+litestream restore -config /app/litestream.yml /data/vault/substrate.db
+
+# 4. Verify shape
+sqlite3 /data/vault/substrate.db "SELECT COUNT(*) FROM events;"
+
+# 5. Restart the app to pick up the restored DB
+exit
+fly machine restart -a afair
+```
+
+### Rotate R2 credentials
+
+```bash
+# 1. CF Dashboard → R2 → Manage R2 API Tokens → create new token,
+#    scope: Object Read & Write on bucket afair-prod-vault
+# 2. Update .env.secrets.backup with new keys (and rotation date)
+# 3. Update Fly secrets:
+fly secrets set --app afair \
+  R2_ACCESS_KEY_ID=<new> \
+  R2_SECRET_ACCESS_KEY=<new>
+# 4. Verify a snapshot writes successfully (see "Verify replication is active")
+# 5. Revoke the old token in CF dashboard
+```
+
+### Multi-user provisioning (TODO before first paying invite)
+
+Single-tenant means **one R2 bucket per user**. Cloudflare R2 tokens are
+bucket-scoped (no prefix-level scoping), so shared-bucket-with-prefix is
+not an acceptable isolation model.
+
+Naming convention:
+
+- `afair-prod-vault` — founder dogfood vault (this machine)
+- `afair-user-<user-ulid>` — pattern for each paying-user vault
+
+Provisioning script lives at `scripts/provision_user.py` (not yet
+written — must exist before the first external invite). The script must:
+
+1. Create R2 bucket `afair-user-<id>` via CF API (`POST /accounts/{acct}/r2/buckets`, location `weur`).
+2. Create an R2 API token scoped to that bucket. **Open question:**
+   CF's public API for per-bucket-scoped R2 token creation needs
+   verification (historically dashboard-only). If still manual, the
+   provisioning flow blocks on a human dashboard step — automate via
+   a `cloudflare-go` SDK call or a one-time ops-admin token that issues
+   sub-tokens.
+3. Provision a Fly machine for the user (multi-machine-under-one-app
+   model with subdomain routing, OR one-app-per-user — decision still
+   open, captured here for the next architecture pass).
+4. `fly secrets set --app <user-app>` with the five R2 env vars.
+5. `fly deploy --app <user-app>` to roll out the Litestream-enabled image.
+6. Smoke test: verify a snapshot lands in the new bucket within 2 minutes.
+
+Limits to monitor as user count grows:
+
+- **R2 buckets per CF account:** default 1000 (request increase at ~800).
+- **R2 API tokens per account:** check current limit; may require periodic
+  bulk listing/cleanup.
+- **Fly machines per app / per org:** Fly's limits are generous but
+  count toward billing — track for forecasting.
+
+Cancel / right-to-erasure flow when a user terminates (I2 + I4):
+
+1. Wait for last user-confirmed export window (see §4 backup-to-laptop).
+2. SIGTERM the Fly machine — Litestream flushes any pending WAL.
+3. Destroy machine + Fly volume (irreversible).
+4. After retention window (default 14 days) delete the R2 bucket and
+   revoke its scoped token via CF API.
+5. Audit log entry per Invariant I7: which user, when, who triggered.
+
+---
+
+## 8. Permanent erasure (the I2 right-to-erasure path)
 
 When the user invokes their right to be forgotten and wants the data
 **gone**:
@@ -231,7 +390,7 @@ obvious.
 
 ---
 
-## 8. Secrets management
+## 9. Secrets management
 
 | Secret | Live destination | Backup | Rotation |
 |---|---|---|---|
@@ -253,7 +412,7 @@ Per global `CLAUDE.md`: a secret must always be in `.env.secrets.backup`
 
 ---
 
-## 9. Smoke test the live server
+## 10. Smoke test the live server
 
 ```bash
 # Health endpoint (HTTP — quick liveness check)
@@ -272,7 +431,7 @@ fly ssh console -a afair -C "sqlite3 /data/vault/substrate.db 'SELECT COUNT(*) F
 
 ---
 
-## 10. Rebuild the entity graph from substrate
+## 11. Rebuild the entity graph from substrate
 
 The Phase 4 Track 1 entity graph (`entities`, `entity_mentions`,
 `entity_edges`, `entity_merges`, `edge_invalidations`) is **regenerable**
@@ -320,7 +479,7 @@ upload the result back. Useful when the running server is busy.
 
 ---
 
-## 11. Common failures
+## 12. Common failures
 
 ### `address already in use` on local dev
 You have a `afair` server already running. `lsof -i :8765` to find it.
@@ -338,7 +497,7 @@ to the previous image. Check `fly logs` for the actual error.
 
 ---
 
-## 12. Logo & brand assets
+## 13. Logo & brand assets
 
 Canonical brand files live in `assets/logo/`. Source of truth = the
 original upload (`afair-elephant-original.jpg`); everything else is
