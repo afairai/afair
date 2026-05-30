@@ -72,34 +72,83 @@ class _QueryEmbeddingCache:
         # Value tuple: (vector, inserted_at_monotonic)
         self._cache: OrderedDict[tuple[str, str], tuple[list[float], float]] = OrderedDict()
         self._lock = threading.Lock()
+        # In-flight coordination: when thread A misses, it claims the key
+        # by inserting an Event here. Threads B/C/D that miss the same key
+        # wait on A's Event instead of issuing duplicate API calls. After
+        # A finishes (success or failure), it pops the Event and signals.
+        # See get_or_compute for the wait/wake protocol (Perf audit I1).
+        self._inflight: dict[tuple[str, str], threading.Event] = {}
         self.hits = 0
         self.misses = 0
         self.expired = 0
+        self.coalesced = 0  # how many duplicate-miss calls were absorbed
 
     def get_or_compute(self, *, model: str, text: str, api_key: str | None) -> list[float]:
         key = (model, text)
-        now = time.monotonic()
-        with self._lock:
-            entry = self._cache.get(key)
-            if entry is not None:
-                vec, ts = entry
-                if now - ts <= self._ttl:
+        # Up to two passes: pass 1 may discover an inflight fetch and
+        # wait for it; pass 2 checks if the cache was populated by that
+        # fetch and falls through to issue our own if it wasn't.
+        for attempt in range(2):
+            now = time.monotonic()
+            with self._lock:
+                entry = self._cache.get(key)
+                if entry is not None:
+                    vec, ts = entry
+                    if now - ts <= self._ttl:
+                        self._cache.move_to_end(key)
+                        self.hits += 1
+                        return list(vec)
+                    # Expired — drop the stale entry and fall through.
+                    del self._cache[key]
+                    self.expired += 1
+
+                inflight_event = self._inflight.get(key)
+                if inflight_event is not None and attempt == 0:
+                    # Another thread is fetching this key right now.
+                    # Track for stats, then wait outside the lock.
+                    self.coalesced += 1
+                else:
+                    # We will issue the network call. Claim the key for
+                    # other threads to coalesce on.
+                    our_event = threading.Event()
+                    self._inflight[key] = our_event
+                    inflight_event = None  # signal "we're the leader"
+
+            if inflight_event is not None:
+                # Wait for the leader thread to finish (release lock first
+                # so the leader can wake us up via the same Event).
+                # Bound the wait so a dead leader doesn't block us forever.
+                inflight_event.wait(timeout=60.0)
+                # Loop back to check the cache; if leader succeeded the
+                # entry is there. If leader failed or timed out, we'll
+                # fall through to attempt 1 and become our own leader.
+                continue
+
+            # Leader path — compute outside the lock so other threads can
+            # keep hitting the cache while we wait on the network.
+            try:
+                vec = embed_text(model=model, text=text, api_key=api_key)
+                with self._lock:
+                    self._cache[key] = (list(vec), time.monotonic())
                     self._cache.move_to_end(key)
-                    self.hits += 1
-                    return list(vec)
-                # Expired — treat as miss and drop the stale entry.
-                del self._cache[key]
-                self.expired += 1
-        # Miss — compute outside the lock so other threads can keep hitting
-        # the cache while we wait on the network.
-        vec = embed_text(model=model, text=text, api_key=api_key)
-        with self._lock:
-            self._cache[key] = (list(vec), time.monotonic())
-            self._cache.move_to_end(key)
-            self.misses += 1
-            while len(self._cache) > self._maxsize:
-                self._cache.popitem(last=False)
-        return vec
+                    self.misses += 1
+                    while len(self._cache) > self._maxsize:
+                        self._cache.popitem(last=False)
+                return vec
+            finally:
+                # Always wake waiters, even on exception. They'll loop
+                # back, see no cache entry, and issue their own retry.
+                with self._lock:
+                    # Only pop our own Event; a later leader may have
+                    # claimed the slot if we somehow got pre-empted.
+                    existing = self._inflight.get(key)
+                    if existing is our_event:
+                        del self._inflight[key]
+                our_event.set()
+
+        # Both attempts exhausted (leader timed out twice). Fall back to
+        # a direct call so the caller never gets stuck.
+        return embed_text(model=model, text=text, api_key=api_key)
 
     def clear(self) -> None:
         with self._lock:
@@ -107,6 +156,12 @@ class _QueryEmbeddingCache:
             self.hits = 0
             self.misses = 0
             self.expired = 0
+            self.coalesced = 0
+            # Wake any threads that were waiting on a leader — they will
+            # loop back, see no cache entry, and re-fetch on their own.
+            for event in self._inflight.values():
+                event.set()
+            self._inflight.clear()
 
     def stats(self) -> dict[str, int]:
         with self._lock:
@@ -114,7 +169,9 @@ class _QueryEmbeddingCache:
                 "hits": self.hits,
                 "misses": self.misses,
                 "expired": self.expired,
+                "coalesced": self.coalesced,
                 "size": len(self._cache),
+                "inflight": len(self._inflight),
                 "maxsize": self._maxsize,
                 "ttl_seconds": self._ttl,
             }
