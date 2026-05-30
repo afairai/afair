@@ -17,20 +17,47 @@ be added or removed.
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def _canon_json(obj: Any) -> str:
+    """Cheap deterministic serializer for size-bound checks (not for storage)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 # 10 MB cap on `remember` content — v1 lock. Raising the cap later is
 # additive (smaller clients still work); lowering would break I1.
 MAX_REMEMBER_BYTES = 10 * 1024 * 1024
 """Raw-byte ceiling for a single `remember` call's content."""
 
+# Bounded list sizes for kwargs that loop server-side. Bounded string
+# lengths for fields that hit FTS5 / embedding chunkers. All caps are
+# generous for legitimate use (no real user passes 50+ parent_hashes
+# in one call, no real user writes 4KB of context). Adversarial loads
+# above these would DOS the validator / FTS index / embedding pipeline.
+# Per I1: tightening bounds on a never-documented-unbounded surface is
+# additive (no compliant caller depended on infinite-length lists).
+MAX_PARENT_HASHES_PER_CALL = 50
+MAX_INVALIDATES_PER_CALL = 50
+MAX_CONTEXT_CHARS = 4_000
+MAX_TYPE_HINT_CHARS = 200
+MAX_MIME_CHARS = 200
+MAX_FILENAME_HINT_CHARS = 500
+
+
 # ── remember ────────────────────────────────────────────────────────────────
 
 
 class TextContent(BaseModel):
-    """Text variant of the remember content union."""
+    """Text variant of the remember content union.
+
+    NB: ``text`` length isn't capped by Pydantic so the handler can raise
+    a typed :class:`ContentTooLargeError` with the actual size in the
+    message. Defense-in-depth: the body-size middleware (12 MB raw cap)
+    is the first gate; the handler is the second.
+    """
 
     type: Literal["text"]
     text: str
@@ -44,8 +71,8 @@ class BinaryContent(BaseModel):
 
     type: Literal["binary"]
     data_b64: str
-    mime: str = Field(min_length=1)
-    filename_hint: str | None = None
+    mime: str = Field(min_length=1, max_length=MAX_MIME_CHARS)
+    filename_hint: str | None = Field(default=None, max_length=MAX_FILENAME_HINT_CHARS)
 
 
 RememberContent = Annotated[
@@ -213,19 +240,29 @@ class RecallResult(BaseModel):
 # ── observe ─────────────────────────────────────────────────────────────────
 
 
+MAX_OBSERVE_ACTION_CHARS = 200
+MAX_OBSERVE_SUBJECT_CHARS = 1_000
+MAX_OBSERVE_RESULT_CHARS = 2_000
+MAX_OBSERVE_EXTRAS_BYTES = 64 * 1024
+"""Caps for observe() inputs. ``extras`` is the free-form open dict; the
+size cap and nesting check below stop deeply-nested JSON bombs and
+extras floods that would inflate FTS index / SQLite payload row."""
+
+
 class ObserveEvent(BaseModel):
     """An agent-self-logged event. ``action`` is required; other keys are
     recognized or preserved verbatim.
 
     Configured to allow arbitrary additional fields so different AI clients
-    can use whatever shape fits their mental model.
+    can use whatever shape fits their mental model. The extras are size-
+    and nesting-bounded — see ``_bound_extras``.
     """
 
     model_config = {"extra": "allow"}
 
-    action: str = Field(min_length=1)
-    subject: str | None = None
-    result: str | None = None
+    action: str = Field(min_length=1, max_length=MAX_OBSERVE_ACTION_CHARS)
+    subject: str | None = Field(default=None, max_length=MAX_OBSERVE_SUBJECT_CHARS)
+    result: str | None = Field(default=None, max_length=MAX_OBSERVE_RESULT_CHARS)
 
     @field_validator("action")
     @classmethod
@@ -235,6 +272,30 @@ class ObserveEvent(BaseModel):
             msg = "event.action must be a non-empty string"
             raise ValueError(msg)
         return stripped
+
+    @model_validator(mode="after")
+    def _bound_extras(self) -> ObserveEvent:
+        """Cap the size + nesting of the free-form extras dict.
+
+        Pydantic stores extras (the keys beyond action/subject/result)
+        in ``__pydantic_extra__``. Without a cap an adversarial client
+        could send a 12MB nested-bomb payload that DOSes the FTS index
+        and inflates every recall hit's row deserialization cost.
+        """
+        extras = self.__pydantic_extra__
+        if not extras:
+            return self
+        serialized = _canon_json(extras)
+        if len(serialized) > MAX_OBSERVE_EXTRAS_BYTES:
+            msg = f"observe extras must be <= {MAX_OBSERVE_EXTRAS_BYTES} bytes serialized"
+            raise ValueError(msg)
+        # Cheap nesting check — too many braces/brackets means the dict
+        # is either huge or arbitrarily nested. Block before the recursion
+        # hits Python's RecursionError on deserialize.
+        if serialized.count("{") + serialized.count("[") > 200:
+            msg = "observe extras exceed nesting threshold (200 containers)"
+            raise ValueError(msg)
+        return self
 
 
 class ObserveResult(BaseModel):

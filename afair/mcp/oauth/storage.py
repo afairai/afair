@@ -162,7 +162,12 @@ def save_authorization_code(
     user_email: str | None,
     ttl_seconds: int = 600,
 ) -> AuthorizationCode:
+    # The plaintext `code` is what we hand back to the client; the DB
+    # stores ONLY its sha256 hash (same pattern as refresh tokens). A
+    # backup/snapshot leak then doesn't expose live exchangeable codes
+    # during their 10-min TTL window. Closes Sec audit finding I8.
     code = f"nfac_{secrets.token_urlsafe(32)}"
+    code_hash = _hash_token(code)
     expires_at = int(time.time()) + ttl_seconds
 
     with conn:
@@ -175,7 +180,7 @@ def save_authorization_code(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                code,
+                code_hash,
                 client_id,
                 redirect_uri,
                 scope,
@@ -189,7 +194,7 @@ def save_authorization_code(
         )
 
     return AuthorizationCode(
-        code=code,
+        code=code,  # plaintext returned to caller (one-time)
         client_id=client_id,
         redirect_uri=redirect_uri,
         scope=scope,
@@ -202,17 +207,22 @@ def save_authorization_code(
 
 
 def consume_authorization_code(conn: sqlite3.Connection, code: str) -> AuthorizationCode | None:
-    """Get + delete an authorization code in one shot (one-time use)."""
-    row = conn.execute("SELECT * FROM oauth_codes WHERE code = ?", (code,)).fetchone()
+    """Get + delete an authorization code in one shot (one-time use).
+
+    Looks up by hash (the DB only ever holds the hash); the caller passes
+    in the plaintext code from the client's authorization_code grant.
+    """
+    code_hash = _hash_token(code)
+    row = conn.execute("SELECT * FROM oauth_codes WHERE code = ?", (code_hash,)).fetchone()
     if row is None:
         return None
 
     with conn:
-        conn.execute("DELETE FROM oauth_codes WHERE code = ?", (code,))
+        conn.execute("DELETE FROM oauth_codes WHERE code = ?", (code_hash,))
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
     return AuthorizationCode(
-        code=row["code"],
+        code=code,  # return the plaintext we were given (callers expect it)
         client_id=row["client_id"],
         redirect_uri=row["redirect_uri"],
         scope=row["scope"],
@@ -258,7 +268,12 @@ def save_login_state(
     client_state: str | None,
     ttl_seconds: int = 600,
 ) -> LoginState:
+    # Same pattern as authorization codes (Sec I8): plaintext to caller,
+    # sha256 to DB. The state is the CSRF anchor for the OAuth dance —
+    # a snapshot/backup leak during its 10-min TTL would otherwise let
+    # an attacker reuse it to swap in their own authorization_code.
     state = secrets.token_urlsafe(32)
+    state_hash = _hash_token(state)
     expires_at = int(time.time()) + ttl_seconds
 
     with conn:
@@ -271,7 +286,7 @@ def save_login_state(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                state,
+                state_hash,
                 client_id,
                 redirect_uri,
                 scope,
@@ -284,7 +299,7 @@ def save_login_state(
         )
 
     return LoginState(
-        state=state,
+        state=state,  # plaintext returned to caller for the OAuth redirect
         client_id=client_id,
         redirect_uri=redirect_uri,
         scope=scope,
@@ -297,16 +312,19 @@ def save_login_state(
 
 def consume_login_state(conn: sqlite3.Connection, state: str) -> LoginState | None:
     """Get + delete a login-state row in one shot."""
-    row = conn.execute("SELECT * FROM oauth_login_state WHERE state = ?", (state,)).fetchone()
+    state_hash = _hash_token(state)
+    row = conn.execute(
+        "SELECT * FROM oauth_login_state WHERE state = ?", (state_hash,)
+    ).fetchone()
     if row is None:
         return None
 
     with conn:
-        conn.execute("DELETE FROM oauth_login_state WHERE state = ?", (state,))
+        conn.execute("DELETE FROM oauth_login_state WHERE state = ?", (state_hash,))
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
     return LoginState(
-        state=row["state"],
+        state=state,  # return the plaintext we were given
         client_id=row["client_id"],
         redirect_uri=row["redirect_uri"],
         scope=row["scope"],
