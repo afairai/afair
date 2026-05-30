@@ -28,15 +28,23 @@ def open_db(vault_dir: Path, *, embedding_dim: int = 1536) -> sqlite3.Connection
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Pragmas — durability + concurrency + performance
+    # Pragmas — durability + concurrency + performance.
+    #
+    # busy_timeout MUST be set first: the engine consults it on every
+    # subsequent lock attempt, including the next PRAGMA. Setting
+    # journal_mode = WAL briefly requires an exclusive lock on the file;
+    # without the busy timeout in place, two concurrent open_db calls on
+    # the same vault (admin backfill running alongside the server, two
+    # tests sharing a tmp_path, even just the test runner re-opening
+    # during teardown on a slow disk) race and one raises
+    # "database is locked" immediately. With the timeout set first the
+    # second opener simply waits its turn. Was the source of an
+    # occasional CI flake on test_observe_via_mcp_protocol.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA temp_store = MEMORY")
-    # Wait up to 5s for a busy lock before raising. Lets the admin
-    # backfill coexist with the running server on the same database
-    # without "database is locked" errors on briefly-contended writes.
-    conn.execute("PRAGMA busy_timeout = 5000")
     # Memory-mapped reads — SQLite mmaps the database file up to this many
     # bytes. Reads skip the OS-cache→userspace copy when the page is hot.
     # 256MB is far larger than the current vault but cheap (only mapped
