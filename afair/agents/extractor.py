@@ -521,9 +521,7 @@ def _enrich_fts_after_extraction(
         return  # nothing to add; leave existing row in place
 
     with db:
-        db.execute(
-            "DELETE FROM events_fts WHERE content_hash = ?", (content_hash,)
-        )
+        db.execute("DELETE FROM events_fts WHERE content_hash = ?", (content_hash,))
         db.execute(
             "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
             (content_hash, enriched),
