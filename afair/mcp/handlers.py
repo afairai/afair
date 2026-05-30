@@ -39,9 +39,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
-from ..agents.binder import get_linked_event_ids
+from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
 from ..agents.conflict_resolver import read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
+from ..agents.interpretation import read_latest_interpretations_batch
 from ..agents.invalidation import (
     INVALIDATE_KIND,
     InvalidationInfo,
@@ -230,16 +231,22 @@ def _event_to_hit(
     invalidation: InvalidationInfo | None = None,
     conflicts: list[dict[str, Any]] | None = None,
     entity_overlay: dict[str, Any] | None = None,
+    interpretation_extraction: dict[str, Any] | None = None,
+    linked_event_ids: list[str] | None = None,
 ) -> RecallHit:
     """Build one RecallHit. When ``full_payload`` is True the payload is
     materialized in full (text-large blobs read back from the object
     store); when False, the payload is the truncated summary view.
 
+    All per-hit DB lookups (interpretation, bind, invalidation, conflict,
+    entity overlay) MUST be batched at the call site and passed in as
+    kwargs — this function does no I/O of its own. The batched-version
+    closed Perf audit C3 (was N+1 with limit=20 → 40+ queries; now 2).
+
     ``entity_overlay`` carries the Phase 4 Track 1 enrichment —
     pre-computed ``canonical_entities`` + ``entity_edges`` for this
     event's content_hash. The recall handler batch-fetches these once
-    per call and threads the per-event slice in here, so this function
-    stays I/O-free besides interpretation + bind reads."""
+    per call and threads the per-event slice in here."""
     if full_payload:
         ctx = get_context()
         payload_view = _materialize_full_payload(event.payload, ctx.vault_dir)
@@ -248,9 +255,18 @@ def _event_to_hit(
         payload_view = _payload_summary(event.payload)
         truncated = _text_was_truncated(event.payload)
 
-    interp = read_latest_interpretation(db, event.content_hash)
+    # interpretation_extraction is the raw dict from the batch helper.
+    # When unset (legacy callers that didn't migrate), fall back to the
+    # per-hit query — keeps the function backward-compatible for any
+    # test that hasn't been updated.
+    if interpretation_extraction is None:
+        interp = read_latest_interpretation(db, event.content_hash)
+        interpretation_extraction = interp.extraction if interp is not None else None
+
     interpretation: dict[str, Any] | None = (
-        _interpretation_summary(interp.extraction) if interp is not None else None
+        _interpretation_summary(interpretation_extraction)
+        if interpretation_extraction is not None
+        else None
     )
     # Layer in canonical entities + edges. We keep them inside the
     # ``interpretation`` dict so no new RecallHit fields are needed (the
@@ -266,6 +282,10 @@ def _event_to_hit(
         # would silently drop those.
         interpretation.update(entity_overlay)
 
+    # Same fall-back for linked_event_ids when the caller didn't batch.
+    if linked_event_ids is None:
+        linked_event_ids = get_linked_event_ids(db, event.content_hash)
+
     conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
         event_id=event.id,
@@ -276,7 +296,7 @@ def _event_to_hit(
         payload=payload_view,
         truncated=truncated,
         interpretation=interpretation,
-        linked_event_ids=get_linked_event_ids(db, event.content_hash),
+        linked_event_ids=linked_event_ids,
         parent_hashes=list(event.parent_hashes or []),
         invalidation=_invalidation_to_summary(invalidation),
         conflicts=conflict_flags,
@@ -730,6 +750,9 @@ def recall(
         invalidations = _attach_invalidations([target], db)
         conflicts = _attach_conflicts([target], db)
         overlay = _build_entity_overlay([target], db)
+        interp_map = read_latest_interpretations_batch(db, [target.content_hash])
+        linked_map = get_linked_event_ids_batch(db, [target.content_hash])
+        interp_for_target = interp_map.get(target.content_hash)
         return RecallResult(
             hits=[
                 _event_to_hit(
@@ -739,6 +762,10 @@ def recall(
                     invalidation=invalidations.get(target.content_hash),
                     conflicts=conflicts.get(target.content_hash),
                     entity_overlay=overlay.get(target.content_hash),
+                    interpretation_extraction=(
+                        interp_for_target.extraction if interp_for_target else None
+                    ),
+                    linked_event_ids=linked_map.get(target.content_hash, []),
                 )
             ],
             depth_used="shallow",
@@ -800,6 +827,12 @@ def recall(
     invalidations = _attach_invalidations(events, db)
     conflicts = _attach_conflicts(events, db)
     overlay = _build_entity_overlay(events, db)
+    # Batch the per-hit DB calls that previously ran N+1 (Perf audit C3).
+    # Two queries replace 2*N queries for N hits — biggest single win on
+    # the recall hot path.
+    event_hashes = [e.content_hash for e in events]
+    interp_map = read_latest_interpretations_batch(db, event_hashes)
+    linked_map = get_linked_event_ids_batch(db, event_hashes)
     return RecallResult(
         hits=[
             _event_to_hit(
@@ -809,6 +842,10 @@ def recall(
                 invalidation=invalidations.get(e.content_hash),
                 conflicts=conflicts.get(e.content_hash),
                 entity_overlay=overlay.get(e.content_hash),
+                interpretation_extraction=(
+                    interp_map[e.content_hash].extraction if e.content_hash in interp_map else None
+                ),
+                linked_event_ids=linked_map.get(e.content_hash, []),
             )
             for e in events
         ],

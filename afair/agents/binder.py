@@ -123,3 +123,42 @@ def get_linked_event_ids(conn: sqlite3.Connection, event_hash: str) -> list[str]
     data = json.loads(row["extraction"])
     links = data.get("links", [])
     return [link["event_hash"] for link in links if "event_hash" in link]
+
+
+def get_linked_event_ids_batch(
+    conn: sqlite3.Connection,
+    event_hashes: list[str],
+) -> dict[str, list[str]]:
+    """Batch variant — one query for N event_hashes instead of N queries.
+
+    Used by recall to avoid the per-hit query pattern. Keeps the
+    semantic of :func:`get_linked_event_ids`: hashes with no bind
+    record are absent from the result, hashes with a bind record map
+    to their list of linked content_hashes.
+    """
+    import json
+
+    if not event_hashes:
+        return {}
+
+    placeholders = ",".join("?" * len(event_hashes))
+    params = [*event_hashes, BINDER_PRODUCED_BY]
+    rows = conn.execute(
+        f"""
+        SELECT event_hash, extraction FROM interpretations
+        WHERE event_hash IN ({placeholders})
+          AND produced_by = ?
+        ORDER BY event_hash, produced_at DESC
+        """,
+        params,
+    ).fetchall()
+
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        h = row["event_hash"]
+        if h in out:
+            continue  # already kept the latest per hash
+        data = json.loads(row["extraction"])
+        links = data.get("links", [])
+        out[h] = [link["event_hash"] for link in links if "event_hash" in link]
+    return out
