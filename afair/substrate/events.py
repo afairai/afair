@@ -1,11 +1,4 @@
-"""Event reading & writing — the substrate's primary API.
-
-Every successful insert dual-writes: one row into the SQLite ``events``
-table (the working index) AND one immutable JSON file under
-``vault/event_records/`` (the durable record). The records directory
-is the true source of truth; SQLite can be rebuilt from it via
-:mod:`afair.substrate.recovery`.
-"""
+"""Event reading & writing — the substrate's primary API."""
 
 from __future__ import annotations
 
@@ -16,14 +9,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel
 from ulid import ULID
 
-from .event_records import write_record
 from .payload import canonical_json, content_hash, derive_searchable_text
 from .schema import SCHEMA_VERSION
 
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 class Event(BaseModel):
@@ -68,7 +59,6 @@ def write_event(
     kind: str,
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
-    vault_dir: Path | None = None,
 ) -> Event:
     """Insert one event, idempotent on its content hash.
 
@@ -77,11 +67,6 @@ def write_event(
 
     The payload is canonicalized (sorted keys, no whitespace) before storage
     and hashing, so insertion order of keys does not affect identity.
-
-    When ``vault_dir`` is provided (the normal case), the event is also
-    durably written to the event-records directory — see module docstring.
-    Pass ``None`` only for tests that explicitly want SQLite-only writes;
-    production code paths always pass the vault.
     """
     sorted_parents = sorted(parent_hashes) if parent_hashes else None
     chash = content_hash(kind=kind, origin=origin, payload=payload, parent_hashes=sorted_parents)
@@ -118,24 +103,6 @@ def write_event(
         conn.execute(
             "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
             (chash, searchable),
-        )
-
-    # Durable persistence: write the immutable event record. Runs after
-    # the SQLite transaction commits, so a crash here leaves SQLite ahead
-    # of the record-store; the next write or a startup-time audit will
-    # catch up. The opposite order would risk an orphan record on the
-    # disk if SQLite insert failed.
-    if vault_dir is not None:
-        write_record(
-            vault_dir,
-            event_id=event_id,
-            content_hash=chash,
-            created_at=created_at,
-            origin=origin,
-            kind=kind,
-            payload=payload,
-            parent_hashes=sorted_parents,
-            schema_version=SCHEMA_VERSION,
         )
 
     return Event(

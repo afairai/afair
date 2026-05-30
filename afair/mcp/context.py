@@ -70,44 +70,9 @@ _thread_local = threading.local()
 
 
 def set_context(ctx: ServerContext) -> None:
-    """Install the active context. Called once at server startup.
-
-    Also runs a one-time durability-backfill: if SQLite has events but
-    the event-records directory is empty, every event gets its immutable
-    JSON record dropped on disk. This makes the upgrade from the
-    pre-dual-write era transparent. Subsequent server starts on an
-    already-backfilled vault are near-instant (the loop short-circuits
-    on the first existing record).
-    """
+    """Install the active context. Called once at server startup."""
     global _context
     _context = ctx
-    _maybe_backfill_records(ctx)
-
-
-def _maybe_backfill_records(ctx: ServerContext) -> None:
-    """Auto-populate event_records/ for vaults that pre-date dual-write."""
-    records_dir = ctx.vault_dir / "event_records"
-    # Cheap check first: any record file at all?
-    if records_dir.exists() and any(records_dir.iterdir()):
-        return  # already backfilled (or fresh vault — either way, leave alone)
-
-    from ..substrate.recovery import backfill_records_from_events
-
-    db = open_db(ctx.vault_dir, embedding_dim=ctx.embedding_dim)
-    try:
-        # SQLite empty too? Then nothing to backfill.
-        row = db.execute("SELECT COUNT(*) AS c FROM events").fetchone()
-        if row["c"] == 0:
-            return
-        stats = backfill_records_from_events(db, ctx.vault_dir)
-        # Use plain print so this is visible even without structlog configured.
-        # Fine in production: runs once per vault, on startup.
-        print(
-            f"[afair] backfilled {stats['records_written']} event records "
-            f"into {records_dir} (already present: {stats['records_already_present']})",
-        )
-    finally:
-        db.close()
 
 
 def get_context() -> ServerContext:
