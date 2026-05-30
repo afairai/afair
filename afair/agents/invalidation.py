@@ -29,6 +29,7 @@ from ..substrate.events import Event, write_event
 
 if TYPE_CHECKING:
     import sqlite3
+    from pathlib import Path
 
 
 INVALIDATE_KIND = "invalidate"
@@ -61,6 +62,7 @@ def write_invalidation(
     target_hash: str,
     reason: str | None,
     origin: str,
+    vault_dir: Path | None = None,
 ) -> Event:
     """Record that ``target_hash`` is no longer considered current.
 
@@ -83,6 +85,7 @@ def write_invalidation(
         kind=INVALIDATE_KIND,
         payload=payload,
         parent_hashes=[target_hash],
+        vault_dir=vault_dir,
     )
 
 

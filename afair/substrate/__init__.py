@@ -37,6 +37,7 @@ from .entities import (
     write_entity_mention,
     write_entity_merge,
 )
+from .event_records import iter_records, read_record, record_exists, record_path, write_record
 from .events import (
     Event,
     iter_events,
@@ -52,6 +53,7 @@ from .payload import (
     content_hash,
     derive_searchable_text,
 )
+from .recovery import backfill_records_from_events, rebuild_events_from_records
 from .schema import SCHEMA_VERSION
 from .search import hybrid_search, rrf_merge, search_fts, search_vec
 
@@ -63,6 +65,7 @@ __all__ = [
     "EntityMention",
     "EntityMerge",
     "Event",
+    "backfill_records_from_events",
     "build_binary_payload",
     "build_text_payload",
     "canonical_json",
@@ -76,6 +79,7 @@ __all__ = [
     "iter_edges_for_entity",
     "iter_events",
     "iter_mentions_for_event",
+    "iter_records",
     "object_path",
     "open_db",
     "read_edge_invalidations",
@@ -86,6 +90,10 @@ __all__ = [
     "read_event_by_id",
     "read_mentions_batch",
     "read_object",
+    "read_record",
+    "rebuild_events_from_records",
+    "record_exists",
+    "record_path",
     "resolve_canonical",
     "resolve_canonical_batch",
     "rrf_merge",
@@ -99,4 +107,5 @@ __all__ = [
     "write_entity_merge",
     "write_event",
     "write_object",
+    "write_record",
 ]
