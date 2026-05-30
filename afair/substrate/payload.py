@@ -61,6 +61,7 @@ def derive_searchable_text(payload: dict[str, Any]) -> str:
     For inline-text payloads: the text plus context/metadata.
     For object-store payloads: the metadata fields (mime, filename_hint, etc.).
     For observe-event payloads: action/subject/result.
+    For compound events: each part's text + label, concatenated.
     The blob bytes themselves are not searchable from here; a future
     Extractor may produce searchable summaries via the Interpretation layer.
     """
@@ -86,6 +87,19 @@ def derive_searchable_text(payload: dict[str, Any]) -> str:
         value = payload.get(key)
         if isinstance(value, str) and value:
             parts.append(value)
+    # Compound events — walk each part's contribution into the same
+    # FTS row. Text parts yield their full text + label; blob parts
+    # yield filename + mime + label (bytes aren't text, the extractor
+    # will enrich later via the binary-modality dispatch).
+    compound_parts = payload.get("parts")
+    if isinstance(compound_parts, list):
+        for part in compound_parts:
+            if not isinstance(part, dict):
+                continue
+            for key in ("text", "label", "filename_hint", "mime"):
+                value = part.get(key)
+                if isinstance(value, str) and value:
+                    parts.append(value)
     return "\n".join(parts)
 
 
@@ -141,6 +155,27 @@ def build_binary_payload(
         "mime": mime,
         "size_bytes": len(data),
         "filename_hint": filename_hint,
+        "context": context,
+        "type_hint": type_hint,
+    }
+
+
+def build_compound_payload(
+    *,
+    parts: list[dict[str, Any]],
+    context: str | None,
+    type_hint: str | None = None,
+) -> dict[str, Any]:
+    """Construct a substrate payload for a compound multi-part event.
+
+    Each part dict is already shaped (text or blob-ref) — the handler
+    materializes user-side schema objects into these dicts before
+    calling. Compound payloads don't spill the parts list itself; if
+    any part is a blob the bytes are already in the object store.
+    """
+    return {
+        "content_type": "compound",
+        "parts": parts,
         "context": context,
         "type_hint": type_hint,
     }
