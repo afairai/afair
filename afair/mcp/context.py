@@ -92,6 +92,12 @@ def clear_context() -> None:
         with contextlib.suppress(Exception):
             _thread_local.db.close()
         delattr(_thread_local, "db")
+    # Same for the extractor pool's thread-local connection (Perf I3 cache).
+    # Tests reuse the same worker thread across tmp_paths, so a stale
+    # cached connection would point at the previous test's tmp dir.
+    from ..agents.extractor import clear_extractor_thread_db
+
+    clear_extractor_thread_db()
 
 
 def connect_for_thread() -> sqlite3.Connection:

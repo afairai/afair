@@ -490,6 +490,10 @@ def _attach_conflicts(events: list[Event], db: Any) -> dict[str, list[dict[str, 
     return read_conflicts_batch(db, hashes)
 
 
+_ENTITY_MATCH_MAX_TOKENS = 2
+_ENTITY_MATCH_MAX_TOKEN_LEN = 30
+
+
 def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
     """Find events whose canonical entities or surface forms match the query.
 
@@ -501,9 +505,21 @@ def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
     Returns most-recent-first events, capped at ``limit``. Empty result
     when nothing matches — caller treats this as "no entity boost" and
     falls back to plain FTS+vec.
+
+    Perf audit C5: this query does ``LOWER(name) = LOWER(?)`` which the
+    indexes on canonical_name / surface_form cannot use (function on
+    LHS). For multi-token / very-long queries — typical of prose
+    questions, never entity references — we bail out immediately. That
+    skips a full scan + Python materialization for the 95% of recalls
+    where this never returns anything anyway.
     """
     stripped = query.strip()
     if not stripped:
+        return []
+    tokens = stripped.split()
+    if len(tokens) > _ENTITY_MATCH_MAX_TOKENS:
+        return []
+    if any(len(t) > _ENTITY_MATCH_MAX_TOKEN_LEN for t in tokens):
         return []
     rows = db.execute(
         """
