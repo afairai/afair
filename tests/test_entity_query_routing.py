@@ -215,6 +215,16 @@ def test_query_for_entity_returns_canonical_entities_in_hits(
     """End-to-end: entity-aware query + the Stage 3 overlay together
     means the AI sees both the right events AND knows which entities
     they involve."""
+    # Pre-seed Sajinth so the relation edge has one pre-existing endpoint
+    # (defense against fabricated edges between two same-event-born entities).
+    _seed(
+        ctx,
+        text="Sajinth introduced himself",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        relations=[],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
     _seed(
         ctx,
         text="Sajinth proposed a new roadmap for Athara",
