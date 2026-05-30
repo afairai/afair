@@ -40,6 +40,7 @@ from .correlation import CorrelationIdMiddleware
 from .oauth import routes as oauth_routes
 from .rate_limit import RateLimitMiddleware, TokenBucketRateLimiter
 from .security_headers import SecurityHeadersMiddleware
+from .signup_route import signup_endpoint
 
 log = structlog.get_logger(__name__)
 
@@ -201,6 +202,11 @@ def build_app(settings: Settings) -> Starlette:
         "/health",
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-authorization-server",
+        # Scoped signup endpoint — does its own auth against the
+        # signup-only bearer token. NOT exempted from auth in absolute
+        # terms; the route handler enforces its own narrower credential
+        # so the general bearer doesn't gate it.
+        "/internal/signup",
     }
     exempt_prefixes = ("/oauth/",)
 
@@ -267,6 +273,7 @@ def build_app(settings: Settings) -> Starlette:
         ),
         Route("/oauth/token", oauth_routes.oauth_token, methods=["POST"]),
         Route("/oauth/revoke", oauth_routes.oauth_revoke, methods=["POST"]),
+        Route("/internal/signup", signup_endpoint, methods=["POST"]),
         Mount("/", app=mcp_app),
     ]
 
