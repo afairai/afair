@@ -102,6 +102,70 @@ def test_consume_unknown_code_returns_none(db: sqlite3.Connection) -> None:
     assert storage.consume_authorization_code(db, "nfac_nope") is None
 
 
+def test_consume_authorization_code_is_atomic_under_concurrency(tmp_path: Path) -> None:
+    """Two threads racing the same code: exactly one wins (audit concurrency #1).
+
+    The old SELECT-then-DELETE pattern was non-atomic — both readers
+    passed the existence check on the WAL snapshot, both DELETEs ran,
+    and both proceeded to mint refresh tokens / JWTs for ONE
+    authorization. With DELETE … RETURNING the writer is serialized
+    by SQLite and exactly one consumer sees a row.
+    """
+    import threading
+
+    # open_db is imported at module level. Pre-seed the code on a
+    # dedicated connection so the racing
+    # consumers open fresh connections that go through normal WAL flow.
+    seed_conn = open_db(tmp_path)
+    try:
+        client, _ = storage.register_client(
+            seed_conn,
+            redirect_uris=["https://example.test/cb"],
+            client_name="t",
+            confidential=False,
+            metadata={"redirect_uris": ["https://example.test/cb"]},
+        )
+        saved = storage.save_authorization_code(
+            seed_conn,
+            client_id=client.client_id,
+            redirect_uri="https://example.test/cb",
+            scope="mcp",
+            code_challenge="abc",
+            code_challenge_method="S256",
+            user_sub="gowry",
+            user_email="g@example.test",
+        )
+    finally:
+        seed_conn.close()
+
+    winners: list[storage.AuthorizationCode] = []
+    losers: list[None] = []
+    lock = threading.Lock()
+    start = threading.Event()
+
+    def worker() -> None:
+        start.wait()
+        conn = open_db(tmp_path)
+        try:
+            result = storage.consume_authorization_code(conn, saved.code)
+        finally:
+            conn.close()
+        with lock:
+            (winners if result is not None else losers).append(result)  # type: ignore[arg-type]
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+
+    assert len(winners) == 1, f"expected exactly one winner, got {len(winners)}"
+    assert len(losers) == 7
+    assert winners[0].client_id == client.client_id
+
+
 # ── login state (the identity-backend dance) ───────────────────────────────
 
 

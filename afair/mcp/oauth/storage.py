@@ -207,18 +207,28 @@ def save_authorization_code(
 
 
 def consume_authorization_code(conn: sqlite3.Connection, code: str) -> AuthorizationCode | None:
-    """Get + delete an authorization code in one shot (one-time use).
+    """Atomically get + delete an authorization code (one-time use).
 
     Looks up by hash (the DB only ever holds the hash); the caller passes
     in the plaintext code from the client's authorization_code grant.
+
+    Atomic via ``DELETE ... RETURNING``: SQLite serializes the writer side,
+    so if two concurrent /oauth/token requests race the same code, only
+    ONE sees a returned row — the other gets None and gets a normal
+    "invalid_grant" response. The previous SELECT-then-DELETE pattern
+    was non-atomic: both readers passed the existence check on the WAL
+    snapshot, both DELETEs returned rowcount semantics that didn't
+    block the duplicate (audit finding — race condition on RFC 6749
+    one-shot codes).
     """
     code_hash = _hash_token(code)
-    row = conn.execute("SELECT * FROM oauth_codes WHERE code = ?", (code_hash,)).fetchone()
+    with conn:
+        row = conn.execute(
+            "DELETE FROM oauth_codes WHERE code = ? RETURNING *",
+            (code_hash,),
+        ).fetchone()
     if row is None:
         return None
-
-    with conn:
-        conn.execute("DELETE FROM oauth_codes WHERE code = ?", (code_hash,))
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
     return AuthorizationCode(
@@ -232,14 +242,6 @@ def consume_authorization_code(conn: sqlite3.Connection, code: str) -> Authoriza
         user_email=row["user_email"],
         expires_at=int(expires_at_dt.timestamp()),
     )
-
-
-def cleanup_expired_codes(conn: sqlite3.Connection) -> int:
-    """Best-effort cleanup of stale codes. Safe to call periodically."""
-    now = _now_iso()
-    with conn:
-        cursor = conn.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
-    return cursor.rowcount or 0
 
 
 # ── oauth_login_state (identity-backend dance) ─────────────────────────────
@@ -311,14 +313,20 @@ def save_login_state(
 
 
 def consume_login_state(conn: sqlite3.Connection, state: str) -> LoginState | None:
-    """Get + delete a login-state row in one shot."""
+    """Atomically get + delete a login-state row.
+
+    Same DELETE ... RETURNING pattern as ``consume_authorization_code``;
+    two concurrent /oauth/identity/github/callback requests carrying the
+    same state value will see exactly one success and one None.
+    """
     state_hash = _hash_token(state)
-    row = conn.execute("SELECT * FROM oauth_login_state WHERE state = ?", (state_hash,)).fetchone()
+    with conn:
+        row = conn.execute(
+            "DELETE FROM oauth_login_state WHERE state = ? RETURNING *",
+            (state_hash,),
+        ).fetchone()
     if row is None:
         return None
-
-    with conn:
-        conn.execute("DELETE FROM oauth_login_state WHERE state = ?", (state_hash,))
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
     return LoginState(
