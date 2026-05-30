@@ -31,6 +31,11 @@ SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS events_created_at_idx ON events(created_at)",
     "CREATE INDEX IF NOT EXISTS events_kind_idx       ON events(kind)",
     "CREATE INDEX IF NOT EXISTS events_origin_idx     ON events(origin)",
+    # Composite for the hot _recent_canonical_context query (Perf audit C1):
+    # filters kind IN (...) then orders by created_at DESC. Without this
+    # composite, SQLite picks one of the two single-column indexes and
+    # sorts in-Python — ~15-25ms p95 cost per recall on a 50k-event vault.
+    "CREATE INDEX IF NOT EXISTS events_kind_created_at_idx ON events(kind, created_at DESC)",
     # ── append-only enforcement at the DB level (Invariant I2) ──────────────
     """
     CREATE TRIGGER IF NOT EXISTS events_no_update

@@ -10,9 +10,11 @@ observable without touching the substrate.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -33,6 +35,10 @@ from .prompts import (
     EXTRACTOR_TOOL_SCHEMA,
     build_user_message,
 )
+
+# Thread-local DB connection for the extractor pool. See
+# _conn_for_extractor_thread for the rationale (Perf audit I3).
+_extractor_thread_local = threading.local()
 
 # NOTE: `from ..mcp.context import get_context` is intentionally NOT at the
 # top of the module. mcp/__init__.py loads server.py which loads handlers.py
@@ -107,6 +113,55 @@ def extract_sync(event_id: str) -> None:
     )
 
 
+def _conn_for_extractor_thread(vault_dir: Path, embedding_dim: int) -> Any:
+    """Reuse one SQLite connection per ThreadPoolExecutor worker thread.
+
+    ``open_db`` is not free: it runs ~30 idempotent DDL statements, loads
+    the sqlite-vec extension, runs PRAGMA optimize. Pre-Perf-audit-I3
+    we paid this cost (~10-30ms) on every event extraction. At 30 events/s
+    sustained that's ~600ms/sec of pure CPU spent opening connections —
+    ~60% of one CPU on shared-cpu-1x. Holding a thread-local connection
+    for the worker's lifetime drops this to one open per worker per
+    process lifetime.
+
+    NB: cached connection is keyed only by thread, not by vault_dir.
+    Production has one vault per process so this is fine. Tests that
+    reuse the executor across different ``tmp_path`` fixtures MUST call
+    ``clear_extractor_thread_db()`` between cases (the test conftest /
+    ``clear_context`` already does this).
+    """
+    conn = getattr(_extractor_thread_local, "db", None)
+    cached_vault = getattr(_extractor_thread_local, "vault_dir", None)
+    # If the cached connection is for a different vault_dir (test mode
+    # switching tmp_paths), drop it and open fresh. Production never
+    # hits this branch.
+    if conn is not None and cached_vault != vault_dir:
+        with contextlib.suppress(Exception):
+            conn.close()
+        conn = None
+    if conn is None:
+        conn = open_db(vault_dir, embedding_dim=embedding_dim)
+        _extractor_thread_local.db = conn
+        _extractor_thread_local.vault_dir = vault_dir
+    return conn
+
+
+def clear_extractor_thread_db() -> None:
+    """Close + drop the thread-local extractor DB connection.
+
+    Used by tests' clear_context() to ensure each fixture starts with a
+    fresh connection to its own ``tmp_path``. Idempotent and silent if
+    no connection is cached.
+    """
+    conn = getattr(_extractor_thread_local, "db", None)
+    if conn is not None:
+        with contextlib.suppress(Exception):
+            conn.close()
+        del _extractor_thread_local.db
+    if hasattr(_extractor_thread_local, "vault_dir"):
+        del _extractor_thread_local.vault_dir
+
+
 def _run_extraction(
     *,
     event_id: str,
@@ -118,8 +173,8 @@ def _run_extraction(
     embedding_dim: int = 1536,
     semantic_recall_enabled: bool = True,
 ) -> None:
-    """The actual extraction work. Opens its own DB connection per thread."""
-    db = open_db(vault_dir, embedding_dim=embedding_dim)
+    """The actual extraction work. Reuses a thread-local DB connection."""
+    db = _conn_for_extractor_thread(vault_dir, embedding_dim)
     try:
         event = read_event_by_id(db, event_id)
         if event is None:
@@ -220,7 +275,9 @@ def _run_extraction(
                     model=embedding_model,
                 )
     finally:
-        db.close()
+        # Connection lives on the thread for the worker's lifetime — see
+        # _conn_for_extractor_thread for the rationale. No close here.
+        pass
 
 
 def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> str:
