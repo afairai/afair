@@ -115,14 +115,75 @@ def read_conflicts_batch(
     conn: sqlite3.Connection, event_hashes: list[str]
 ) -> dict[str, list[dict[str, Any]]]:
     """Batch variant — one map per anchor hash, mirroring the
-    invalidation batch helper used by recall."""
+    invalidation batch helper used by recall.
+
+    Two queries total (anchor side + other-side), regardless of N.
+    Previously this was a per-hash loop calling read_conflicts_for_event,
+    which itself ran 2 queries — so 2*N queries became 2 (Perf audit I5).
+    """
     if not event_hashes:
         return {}
+
+    # Side A: rows where ANY of the asked hashes appear as the anchor
+    # (event_hash column). One query with WHERE event_hash IN (...).
+    placeholders = ",".join("?" * len(event_hashes))
+    anchor_rows = conn.execute(
+        f"""
+        SELECT event_hash, extraction FROM interpretations
+        WHERE event_hash IN ({placeholders})
+          AND produced_by LIKE 'conflict_resolver:v0:%'
+        """,
+        event_hashes,
+    ).fetchall()
+
+    # Side B: rows where ANY of the asked hashes is encoded in the
+    # producer string. One query with WHERE produced_by IN (...).
+    other_producers = [f"{CONFLICT_RESOLVER_PRODUCED_BY}:{h}" for h in event_hashes]
+    o_placeholders = ",".join("?" * len(other_producers))
+    other_rows = conn.execute(
+        f"""
+        SELECT produced_by, extraction FROM interpretations
+        WHERE produced_by IN ({o_placeholders})
+        """,
+        other_producers,
+    ).fetchall()
+
+    asked_set = set(event_hashes)
     result: dict[str, list[dict[str, Any]]] = {}
-    for h in event_hashes:
-        flags = read_conflicts_for_event(conn, h)
-        if flags:
-            result[h] = flags
+
+    def _flag_for_anchor(data: dict[str, Any], anchor_hash: str) -> dict[str, Any]:
+        other_hash = (
+            data.get("event_b_hash")
+            if data.get("event_a_hash") == anchor_hash
+            else data.get("event_a_hash")
+        )
+        return {
+            "with_event_id": data.get("event_b_id", ""),
+            "with_content_hash": other_hash or "",
+            "verdict": data.get("verdict", "unclear"),
+            "reason": data.get("reason", ""),
+            "confidence": float(data.get("confidence", 0.0)),
+        }
+
+    for row in anchor_rows:
+        anchor = row["event_hash"]
+        data = json.loads(row["extraction"])
+        result.setdefault(anchor, []).append(_flag_for_anchor(data, anchor))
+
+    for row in other_rows:
+        # Producer is "conflict_resolver:v0:<other-hash>" — strip the
+        # prefix to recover the hash this row was filed under (which is
+        # the OTHER side of the pair from the anchor row's perspective).
+        producer = row["produced_by"]
+        prefix = f"{CONFLICT_RESOLVER_PRODUCED_BY}:"
+        if not producer.startswith(prefix):
+            continue
+        the_other = producer[len(prefix) :]
+        if the_other not in asked_set:
+            continue
+        data = json.loads(row["extraction"])
+        result.setdefault(the_other, []).append(_flag_for_anchor(data, the_other))
+
     return result
 
 
