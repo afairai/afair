@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ..substrate import object_path, open_db
+from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_id
 from .binary_extractors import (
     AudioTranscriptionError,
@@ -110,9 +111,19 @@ def schedule_extraction(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
+    from ..mcp.context import connect_for_thread
+
     try:
         _EXECUTOR.submit(_run_extraction, event_id=event_id, **_capture_extractor_kwargs(ctx))
     except RuntimeError as exc:
+        pe.record_safe(
+            connect_for_thread,
+            event_id=event_id,
+            stage=pe.STAGE_EXTRACTION_ENQUEUED,
+            status=pe.STATUS_FAILED,
+            producer="schedule_extraction",
+            detail=f"submit_after_shutdown: {exc}",
+        )
         # Interpreter teardown: atexit fired _EXECUTOR.shutdown() while
         # we were mid-request. The event row is already durable; a future
         # boot's backfill (or the cold-path interpretation re-runs) will
@@ -124,6 +135,13 @@ def schedule_extraction(event_id: str) -> None:
             event_id=event_id,
             detail=str(exc),
         )
+        return
+    pe.record_safe(
+        connect_for_thread,
+        event_id=event_id,
+        stage=pe.STAGE_EXTRACTION_ENQUEUED,
+        producer="schedule_extraction",
+    )
 
 
 def extract_sync(event_id: str) -> None:
@@ -216,7 +234,22 @@ def _run_extraction(
     event = read_event_by_id(db, event_id)
     if event is None:
         log.warning("extractor.event_missing", event_id=event_id)
+        pe.record(
+            db,
+            event_id=event_id,
+            stage=pe.STAGE_EXTRACTION_STARTED,
+            status=pe.STATUS_FAILED,
+            producer=f"extractor:{model}",
+            detail="event row not found",
+        )
         return
+    pe.record(
+        db,
+        event_id=event_id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EXTRACTION_STARTED,
+        producer=f"extractor:{model}",
+    )
 
     payload = event.payload or {}
     content_type = payload.get("content_type")
@@ -375,6 +408,15 @@ def _run_extraction(
             error_type=LLMResponseError.error_type,
             error_message=validated_or_error,
         )
+        pe.record(
+            db,
+            event_id=event_id,
+            event_hash=event.content_hash,
+            stage=pe.STAGE_EXTRACTION_FAILED,
+            status=pe.STATUS_FAILED,
+            producer=produced_by,
+            detail=f"validation: {validated_or_error}",
+        )
         return
 
     validated_or_error["status"] = "success"
@@ -412,6 +454,14 @@ def _run_extraction(
         model=model,
         modality=modality,
     )
+    pe.record(
+        db,
+        event_id=event_id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EXTRACTION_COMPLETED,
+        producer=produced_by,
+        detail=f"modality={modality}",
+    )
 
     # Generate + store the embedding for semantic recall. Failure here
     # is non-fatal — the substrate event is durable; only the vector
@@ -432,6 +482,14 @@ def _run_extraction(
                 dim=len(vector),
                 model=embedding_model,
             )
+            pe.record(
+                db,
+                event_id=event_id,
+                event_hash=event.content_hash,
+                stage=pe.STAGE_EMBEDDING_STORED,
+                producer=f"embedding:{embedding_model}",
+                detail=f"dim={len(vector)}",
+            )
             # Bind agent v0 — find prior semantically-similar events
             # and record the links. Soft-fail per binder.py.
             find_and_record_links(db, event=event, embedding=vector)
@@ -441,6 +499,15 @@ def _run_extraction(
                 event_id=event_id,
                 error=str(e),
                 model=embedding_model,
+            )
+            pe.record(
+                db,
+                event_id=event_id,
+                event_hash=event.content_hash,
+                stage=pe.STAGE_EMBEDDING_FAILED,
+                status=pe.STATUS_FAILED,
+                producer=f"embedding:{embedding_model}",
+                detail=str(e)[:200],
             )
 
 
