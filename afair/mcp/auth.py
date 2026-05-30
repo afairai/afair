@@ -106,6 +106,11 @@ class BearerOrJwtMiddleware(BaseHTTPMiddleware):
 
         # Try static bearer first (cheap constant-time compare).
         if self._token is not None and hmac.compare_digest(provided, self._token):
+            # All static-bearer traffic shares a single rate-limit bucket.
+            # Hashing the bytes works too but a stable label keeps logs
+            # readable and means rotating the token doesn't create a new
+            # bucket with a fresh burst window.
+            request.state.rate_limit_identity = "static-bearer"
             return await call_next(request)
 
         # Try JWT.
@@ -122,6 +127,11 @@ class BearerOrJwtMiddleware(BaseHTTPMiddleware):
                         self._settings,
                         f"identity '{claims.sub}' is not on the allowlist",
                     )
+                # Key rate-limit buckets by the verified JWT subject — NOT
+                # by the raw token bytes — so a flood of fresh JWT mints
+                # for the same identity still lands in one bucket
+                # (Sec audit I2).
+                request.state.rate_limit_identity = f"jwt:{claims.sub.lower()}"
                 return await call_next(request)
 
         return _unauthorized(self._settings, "invalid token")

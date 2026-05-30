@@ -142,13 +142,22 @@ class TokenBucketRateLimiter:
 
 
 def _identity_from_request(request: Request) -> str | None:
-    """Derive a stable per-identity key from the request's auth header.
+    """Derive a stable per-identity key for the rate-limit bucket.
 
-    We hash the raw token rather than store it as the dict key — keeps
-    secrets out of memory dumps, debugger inspections, and structlog
-    output. SHA-256 is overkill for a 4096-bound dict but the few extra
-    microseconds are invisible.
+    Precedence:
+      1. ``request.state.rate_limit_identity`` set by the auth middleware
+         — uses the verified JWT subject (``jwt:<sub>``) or a constant
+         label for the static bearer. Same identity stays in one bucket
+         across refreshes / rotations (Sec audit I2).
+      2. Fallback: hash the raw bearer bytes. Reached only when this
+         middleware runs without the auth middleware in front of it
+         (tests, or future endpoints that wire it alone). Keeps the
+         old behavior for those callers.
     """
+    state_identity = getattr(request.state, "rate_limit_identity", None)
+    if isinstance(state_identity, str) and state_identity:
+        return state_identity
+
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
         return None
