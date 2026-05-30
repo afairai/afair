@@ -18,6 +18,13 @@ hundreds requires guesswork.
 Foundation for the eventual Sentry integration — Sentry's transaction
 id slot will use the same value so server-side errors map back to the
 client's request id.
+
+Implementation note (Perf audit C2): this is pure ASGI — it does NOT
+inherit from BaseHTTPMiddleware. Starlette's BaseHTTPMiddleware
+materializes the request body to provide the high-level Request/Response
+API, which roughly doubles request overhead for streaming responses
+(every chunk crosses an extra anyio bridge). Pure ASGI lets the SSE
+stream from the MCP app pass through untouched.
 """
 
 from __future__ import annotations
@@ -26,16 +33,13 @@ import secrets
 from typing import TYPE_CHECKING
 
 import structlog
-from starlette.middleware.base import BaseHTTPMiddleware
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from starlette.requests import Request
-    from starlette.responses import Response
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 _HEADER = "X-Request-ID"
+_HEADER_LOWER_BYTES = b"x-request-id"
 _MAX_INCOMING_LEN = 128
 """Caps incoming request-id length so a malicious client can't blow up
 log fields with a megabyte-long header value."""
@@ -59,30 +63,57 @@ def _accept_or_mint(provided: str | None) -> str:
     return cleaned
 
 
-class CorrelationIdMiddleware(BaseHTTPMiddleware):
-    """Bind a request id to structlog's contextvars for the duration of
-    one request, and echo it back in the response.
+def _header_value(headers: list[tuple[bytes, bytes]], name_lower: bytes) -> str | None:
+    """Linear scan over the raw ASGI header list. Cheap for the small
+    number of headers a request carries; avoids materializing a
+    case-insensitive Headers object until we actually need it."""
+    for k, v in headers:
+        if k.lower() == name_lower:
+            try:
+                return v.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+class CorrelationIdMiddleware:
+    """ASGI middleware: bind a request id to structlog's contextvars for
+    the duration of one request, and echo it back in the response.
 
     Should sit FAR OUT in the middleware stack — outermost is best —
     so even errors thrown by other middlewares carry the id in their
     log output.
     """
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        request_id = _accept_or_mint(request.headers.get(_HEADER))
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        # structlog.contextvars.bind_contextvars is task-local. Cleanup
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        provided = _header_value(scope["headers"], _HEADER_LOWER_BYTES)
+        request_id = _accept_or_mint(provided)
+        header_pair = (_HEADER_LOWER_BYTES, request_id.encode("latin-1"))
+
+        async def send_wrapped(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                # Inject our header onto outgoing response.start. Use a
+                # fresh list so we don't mutate any caller's reference.
+                headers = list(message.get("headers") or [])
+                # Replace any existing X-Request-ID rather than appending —
+                # double-headers cause caching/proxy weirdness.
+                headers = [h for h in headers if h[0].lower() != _HEADER_LOWER_BYTES]
+                headers.append(header_pair)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        # structlog.contextvars.bind_contextvars is task-local. Clean up
         # at the end of the request to keep the binding from leaking
         # across event-loop iterations.
         structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_wrapped)
         finally:
             structlog.contextvars.unbind_contextvars("request_id")
-
-        response.headers[_HEADER] = request_id
-        return response

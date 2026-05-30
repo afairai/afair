@@ -13,26 +13,49 @@ uvicorn's own request-line / header limits stop those much earlier.
 
 12 MB cap is ~MAX_REMEMBER_BYTES (10 MB) plus JSON-envelope overhead
 plus a generous tolerance.
+
+Implementation (Perf audit C2): pure ASGI — header check happens on
+the scope dict; no body read, no Request wrapper. The 413 reject is
+a hand-rolled response so we don't allocate a JSONResponse object.
 """
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
-
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from starlette.requests import Request
-    from starlette.responses import Response
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 DEFAULT_MAX_BODY_BYTES = 12 * 1024 * 1024  # 12 MB
 
+_CONTENT_LENGTH = b"content-length"
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+
+def _header_value(headers: list[tuple[bytes, bytes]], name_lower: bytes) -> str | None:
+    for k, v in headers:
+        if k.lower() == name_lower:
+            try:
+                return v.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+async def _send_json(send: Send, *, status: int, body: dict[str, str], close: bool = False) -> None:
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(payload)).encode("ascii")),
+    ]
+    if close:
+        headers.append((b"connection", b"close"))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": payload, "more_body": False})
+
+
+class BodySizeLimitMiddleware:
     """Reject requests whose Content-Length exceeds ``max_body_bytes``.
 
     The check is header-only — we never read the body just to measure
@@ -40,31 +63,36 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     own body limits handle them.
     """
 
-    def __init__(self, app: object, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
-        super().__init__(app)  # type: ignore[arg-type]
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
+        self.app = app
         self._max = max_body_bytes
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        length_header = request.headers.get("content-length")
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        length_header = _header_value(scope["headers"], _CONTENT_LENGTH)
         if length_header:
             try:
                 length = int(length_header)
             except ValueError:
-                return JSONResponse(
-                    {"error": "bad_request", "detail": "malformed Content-Length"},
-                    status_code=400,
+                await _send_json(
+                    send,
+                    status=400,
+                    body={"error": "bad_request", "detail": "malformed Content-Length"},
                 )
+                return
             if length > self._max:
-                return JSONResponse(
-                    {
+                await _send_json(
+                    send,
+                    status=413,
+                    body={
                         "error": "payload_too_large",
                         "detail": f"request body {length} bytes exceeds {self._max}",
                     },
-                    status_code=413,
-                    headers={"Connection": "close"},
+                    close=True,
                 )
-        return await call_next(request)
+                return
+
+        await self.app(scope, receive, send)
