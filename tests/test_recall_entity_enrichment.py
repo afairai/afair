@@ -131,6 +131,15 @@ def test_recall_surfaces_canonical_entities_for_each_hit(
 
 def test_recall_surfaces_entity_edges_for_relations(ctx: ServerContext, settings: Settings) -> None:
     """Edges with this event as source appear under entity_edges."""
+    # Pre-seed Sajinth so the edge below has one pre-existing endpoint
+    # (defense against fabricated edges between two same-event-born entities).
+    _seed_event_with_entities(
+        ctx,
+        text="Sajinth introduced himself",
+        entities=[{"name": "Sajinth", "type": "person"}],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
     _seed_event_with_entities(
         ctx,
         text="Sajinth runs Athara",
@@ -143,10 +152,15 @@ def test_recall_surfaces_entity_edges_for_relations(ctx: ServerContext, settings
     EntityCanonicalizer().run(ctx.db, settings)
 
     result = handlers.recall(query="Sajinth", depth="shallow")
-    interp = result.hits[0].interpretation
+    # Two events match "Sajinth"; find the one with the edge.
+    hit_with_edge = next(
+        (h for h in result.hits if h.interpretation and h.interpretation.get("entity_edges")),
+        None,
+    )
+    assert hit_with_edge is not None, "expected at least one hit to carry the edge overlay"
+    interp = hit_with_edge.interpretation
     assert interp is not None
-    edges = interp.get("entity_edges")
-    assert edges is not None
+    edges = interp.get("entity_edges") or []
     assert len(edges) == 1
     assert edges[0]["subject"] == "Sajinth"
     assert edges[0]["predicate"] == "runs"
@@ -206,6 +220,14 @@ def test_recall_dedupes_canonical_entities_when_same_entity_mentioned_twice(
 
 def test_recall_attaches_overlay_to_lookup_by_id(ctx: ServerContext, settings: Settings) -> None:
     """recall(by_id=...) carries the same overlay."""
+    # Pre-seed Sajinth so the relation edge below has one pre-existing endpoint.
+    _seed_event_with_entities(
+        ctx,
+        text="Sajinth introduced himself",
+        entities=[{"name": "Sajinth", "type": "person"}],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
     event_id = _seed_event_with_entities(
         ctx,
         text="Sajinth runs Athara",
