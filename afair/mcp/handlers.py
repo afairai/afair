@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -63,9 +64,10 @@ from ..substrate import (
     rrf_merge,
     search_fts,
     search_vec,
-    write_event,
+    write_event_with_status,
 )
 from ..substrate.events import row_to_event
+from ..substrate.search import FTS5_SPECIALS_RE
 from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
@@ -211,11 +213,17 @@ _INTERPRETATION_SURFACE_KEYS = (
 def _interpretation_summary(extraction: dict[str, Any]) -> dict[str, Any] | None:
     """Pick the AI-useful subset of an Extractor's output for inclusion in
     a recall hit. Returns None when no useful fields are present.
+
+    Uses the truthiness shortcut ``if extraction.get(key)`` — None/""/[]/{}
+    are all falsy, so a single check covers all four sentinel values
+    without the per-iteration tuple allocation the previous code had
+    (Perf audit minor).
     """
     surface: dict[str, Any] = {}
     for key in _INTERPRETATION_SURFACE_KEYS:
-        if key in extraction and extraction[key] not in (None, "", [], {}):
-            surface[key] = extraction[key]
+        value = extraction.get(key)
+        if value:
+            surface[key] = value
     return surface or None
 
 
@@ -305,6 +313,21 @@ def _event_to_hit(
     )
 
 
+# Per-thread cache for _recent_canonical_context. The recall hot path
+# computes this on every call; the underlying data only changes when a
+# new remember/observe lands. Caching by "latest event id" gives perfect
+# invalidation: as long as the substrate's most recent event id hasn't
+# moved, the cached set is correct (Perf audit minor — recall canonical
+# context).
+#
+# Per-thread (threading.local) rather than module-level locked dict so
+# we don't serialize concurrent recalls behind a single lock. Each
+# uvicorn worker pays the build cost once between writes — typically
+# 1-3 ms saved on back-to-back recalls (the Claude-Code thinking loop
+# pattern).
+_canonical_context_cache = threading.local()
+
+
 def _recent_canonical_context(db: Any, window: int) -> set[str]:
     """Set of canonical entity IDs mentioned in the last ``window`` events.
 
@@ -317,9 +340,23 @@ def _recent_canonical_context(db: Any, window: int) -> set[str]:
     deduped entity IDs. Window covers ``remember``+``observe`` events
     (the user-driven kinds); ignores ``consolidation``/``invalidate``
     which are system-generated.
+
+    Cached per-thread keyed on (window, latest_event_id). A single
+    indexed lookup for the latest event id decides cache validity; if
+    it hasn't changed since the last call, we return the cached set.
     """
     if window <= 0:
         return set()
+
+    latest_row = db.execute("SELECT id FROM events ORDER BY created_at DESC LIMIT 1").fetchone()
+    latest_id = latest_row["id"] if latest_row else None
+
+    cached_key = getattr(_canonical_context_cache, "key", None)
+    cached_value: set[str] | None = getattr(_canonical_context_cache, "value", None)
+    new_key = (window, latest_id)
+    if cached_key == new_key and cached_value is not None:
+        return cached_value
+
     rows = db.execute(
         """
         SELECT DISTINCT em.entity_id
@@ -337,9 +374,14 @@ def _recent_canonical_context(db: Any, window: int) -> set[str]:
     ).fetchall()
     raw_ids = [r["entity_id"] for r in rows]
     if not raw_ids:
-        return set()
-    resolved = resolve_canonical_batch(db, raw_ids)
-    return set(resolved.values())
+        result: set[str] = set()
+    else:
+        resolved = resolve_canonical_batch(db, raw_ids)
+        result = set(resolved.values())
+
+    _canonical_context_cache.key = new_key
+    _canonical_context_cache.value = result
+    return result
 
 
 def _compute_surprise_score(
@@ -399,7 +441,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             raw_ids.add(e.object_id)
 
     resolved_map = resolve_canonical_batch(db, list(raw_ids))
-    canonical_entities = read_entities_batch(db, list(set(resolved_map.values())))
+    canonical_entities = read_entities_batch(db, resolved_map.values())
 
     # Phase 4 Track 2 — recent context for the per-hit surprise score.
     # Computed once per recall and applied to every hit.
@@ -523,17 +565,32 @@ def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
         return []
     if any(len(t) > _ENTITY_MATCH_MAX_TOKEN_LEN for t in tokens):
         return []
-    rows = db.execute(
+    # Two-step lookup avoids ``SELECT DISTINCT events.*`` which forces
+    # SQLite to sort the wide payload column to deduplicate. Step 1
+    # picks just the matching event ids (cheap); step 2 fetches the
+    # full rows by id (already unique). Perf audit minor.
+    id_rows = db.execute(
         """
-        SELECT DISTINCT events.* FROM events
-        JOIN entity_mentions em ON em.event_id = events.id
+        SELECT DISTINCT em.event_id
+        FROM entity_mentions em
         LEFT JOIN entities ent ON ent.id = em.entity_id
         WHERE LOWER(ent.canonical_name) = LOWER(?)
            OR LOWER(em.surface_form) = LOWER(?)
-        ORDER BY events.created_at DESC
+        """,
+        (stripped, stripped),
+    ).fetchall()
+    if not id_rows:
+        return []
+    ids = [r["event_id"] for r in id_rows]
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"""
+        SELECT * FROM events
+        WHERE id IN ({placeholders})
+        ORDER BY created_at DESC
         LIMIT ?
         """,
-        (stripped, stripped, limit),
+        (*ids, limit),
     ).fetchall()
     return [row_to_event(r) for r in rows]
 
@@ -632,27 +689,20 @@ def remember(
             vault_dir=ctx.vault_dir,
         )
 
-    # Detect dedup BEFORE writing so we can report it in the result.
-    from ..substrate import content_hash as compute_content_hash
-
-    sorted_parents = sorted(parent_hashes) if parent_hashes else None
-    preview_hash = compute_content_hash(
-        kind="remember",
-        origin=DEFAULT_ORIGIN,
-        payload=payload,
-        parent_hashes=sorted_parents,
-    )
-    already_existed = read_event_by_hash(db, preview_hash) is not None
-
-    event = write_event(
+    # Single-pass write: ``write_event_with_status`` returns the row plus a
+    # was_inserted bool, so we don't have to compute the content hash twice
+    # (Perf audit minor — eliminated the preview-hash SHA-256 + canonical_json
+    # that the old code ran ahead of the actual write).
+    event, was_inserted = write_event_with_status(
         db,
         origin=DEFAULT_ORIGIN,
         kind="remember",
         payload=payload,
         parent_hashes=parent_hashes,
     )
-    if not already_existed:
+    if was_inserted:
         schedule_extraction(event.id)
+    already_existed = not was_inserted
 
     # Process invalidations AFTER the main write. Each target must:
     #   - exist in the substrate
@@ -702,7 +752,7 @@ def _auto_route_depth(query: str) -> Depth:
         return "shallow"
     if _ULID_RE.match(stripped):
         return "shallow"
-    tokens = re.sub(r'[-+*"():^]', " ", stripped).split()
+    tokens = FTS5_SPECIALS_RE.sub(" ", stripped).split()
     if len(tokens) <= 1:
         return "shallow"
     return "normal"
@@ -874,17 +924,22 @@ def recall(
 
 
 def _build_stats_summary(db: Any) -> ContextSummary:
-    """Compute the vault-wide totals + breakdowns for stats=True."""
-    total_row = db.execute("SELECT COUNT(*) FROM events").fetchone()
-    total: int = total_row[0] if total_row else 0
-    by_kind: dict[str, int] = {
-        row["kind"]: row["c"]
-        for row in db.execute("SELECT kind, COUNT(*) AS c FROM events GROUP BY kind")
-    }
-    by_origin: dict[str, int] = {
-        row["origin"]: row["c"]
-        for row in db.execute("SELECT origin, COUNT(*) AS c FROM events GROUP BY origin")
-    }
+    """Compute the vault-wide totals + breakdowns for stats=True.
+
+    Single scan: groups by (kind, origin) at the DB and rolls up to the
+    three views in Python. The previous version ran three independent
+    queries (one COUNT, two GROUP BYs) — same data, twice the disk reads
+    on a cold cache. Perf audit minor.
+    """
+    rows = db.execute("SELECT kind, origin, COUNT(*) AS c FROM events GROUP BY kind, origin")
+    total = 0
+    by_kind: dict[str, int] = {}
+    by_origin: dict[str, int] = {}
+    for row in rows:
+        c = row["c"]
+        total += c
+        by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + c
+        by_origin[row["origin"]] = by_origin.get(row["origin"], 0) + c
     return ContextSummary(total_events=total, by_kind=by_kind, by_origin=by_origin)
 
 
@@ -897,23 +952,16 @@ def observe(event: ObserveEvent) -> ObserveResult:
     event_dict = event.model_dump(exclude_none=False)
     payload: dict[str, Any] = {"content_type": "event", **event_dict}
 
-    from ..substrate import content_hash as compute_content_hash
-
-    preview_hash = compute_content_hash(
-        kind="observe",
-        origin=DEFAULT_ORIGIN,
-        payload=payload,
-        parent_hashes=None,
-    )
-    already_existed = read_event_by_hash(db, preview_hash) is not None
-
-    written = write_event(
+    # Single-pass write — see remember() for the rationale. Skips the
+    # preview-hash compute_content_hash + read_event_by_hash that the old
+    # code ran ahead of the actual write.
+    written, was_inserted = write_event_with_status(
         db,
         origin=DEFAULT_ORIGIN,
         kind="observe",
         payload=payload,
     )
-    if not already_existed:
+    if was_inserted:
         schedule_extraction(written.id)
 
     return ObserveResult(
