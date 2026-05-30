@@ -43,6 +43,7 @@ from .events import (
     read_event_by_hash,
     read_event_by_id,
     write_event,
+    write_event_with_status,
 )
 from .objects import object_path, read_object, write_object
 from .payload import (
@@ -98,5 +99,6 @@ __all__ = [
     "write_entity_mention",
     "write_entity_merge",
     "write_event",
+    "write_event_with_status",
     "write_object",
 ]
