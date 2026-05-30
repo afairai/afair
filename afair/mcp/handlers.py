@@ -52,8 +52,11 @@ from ..agents.invalidation import (
 )
 from ..substrate import (
     build_binary_payload,
+    build_blob_ref_payload,
     build_text_payload,
     iter_events,
+    object_exists,
+    object_size,
     read_edges_by_source_event_ids,
     read_entities_batch,
     read_event_by_hash,
@@ -72,6 +75,7 @@ from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
+    BinaryContent,
     ConflictFlag,
     ContextSummary,
     Depth,
@@ -671,7 +675,7 @@ def remember(
             vault_dir=ctx.vault_dir,
             inline_text_max_bytes=ctx.inline_text_max_bytes,
         )
-    else:  # BinaryContent
+    elif isinstance(content, BinaryContent):
         try:
             raw = base64.b64decode(content.data_b64, validate=True)
         except (binascii.Error, ValueError) as e:
@@ -687,6 +691,21 @@ def remember(
             context=context,
             type_hint=type_hint,
             vault_dir=ctx.vault_dir,
+        )
+    else:  # BlobRefContent — bytes already in the object store via
+        # /internal/blob/upload. Validate the hash exists; reject otherwise
+        # so we don't write a dangling event row.
+        if not object_exists(ctx.vault_dir, content.blob_hash):
+            msg = f"blob_hash {content.blob_hash!r} not found in object store"
+            raise InvalidateTargetError(msg)
+        size_bytes = object_size(ctx.vault_dir, content.blob_hash)
+        payload = build_blob_ref_payload(
+            blob_hash=content.blob_hash,
+            size_bytes=size_bytes,
+            mime=content.mime,
+            filename_hint=content.filename_hint,
+            context=context,
+            type_hint=type_hint,
         )
 
     # Single-pass write: ``write_event_with_status`` returns the row plus a

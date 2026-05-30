@@ -45,9 +45,17 @@ from .events import (
     write_event,
     write_event_with_status,
 )
-from .objects import object_path, read_object, write_object
+from .objects import (
+    StreamingObjectWriter,
+    object_exists,
+    object_path,
+    object_size,
+    read_object,
+    write_object,
+)
 from .payload import (
     build_binary_payload,
+    build_blob_ref_payload,
     build_text_payload,
     canonical_json,
     content_hash,
@@ -64,7 +72,9 @@ __all__ = [
     "EntityMention",
     "EntityMerge",
     "Event",
+    "StreamingObjectWriter",
     "build_binary_payload",
+    "build_blob_ref_payload",
     "build_text_payload",
     "canonical_json",
     "content_hash",
@@ -77,7 +87,9 @@ __all__ = [
     "iter_edges_for_entity",
     "iter_events",
     "iter_mentions_for_event",
+    "object_exists",
     "object_path",
+    "object_size",
     "open_db",
     "read_edge_invalidations",
     "read_edges_by_source_event_ids",
