@@ -49,6 +49,43 @@
   `flyctl deploy --remote-only`, verifies `/health`
 - `docs/operations.md` — runbooks for deploy, backup-to-laptop, snapshot
   restore, future RPO upgrade paths, permanent erasure, secret rotation
+- **Post-launch hardening pass (2026-05-30 evening)** — all CRITICAL +
+  IMPORTANT security and performance audit items closed; selected
+  MINOR items too. Concretely:
+  - **Security:** prompt-injection defenses across the four LLM
+    cold-path workers (extractor, canonicalizer, conflict_resolver,
+    consolidator) via a shared `untrusted.py` delimiter helper +
+    structural defense against fabricated edges; scoped
+    `/internal/signup` endpoint with its own bearer (web app no
+    longer needs the full `AFAIR_AUTH_TOKEN`); bounded inputs on
+    all MCP tool params (parent_hashes ≤ 50, context ≤ 4000 chars,
+    observe extras ≤ 64 KB nested ≤ 200); per-IP rate limit + scheme
+    allowlist on `/oauth/register` and `/oauth/revoke`; JWT-sub
+    based rate-limit identity so a mint-and-rotate flood lands in
+    one bucket; OAuth code/state hashed at rest; modern
+    Permissions-Policy; CSP; `OAUTH_ISSUER` required in prod.
+  - **Performance:** N+1 → 2 batched queries in `recall`;
+    composite `events(kind, created_at DESC)` index;
+    thread-local extractor connections; recursive-CTE
+    `resolve_canonical_batch`; single-flight embedding cache to
+    coalesce concurrent misses; whole middleware stack
+    (`CorrelationIdMiddleware`, `SecurityHeadersMiddleware`,
+    `BodySizeLimitMiddleware`, `BearerOrJwtMiddleware`,
+    `RateLimitMiddleware`) rewritten from `BaseHTTPMiddleware` to
+    pure ASGI; capped entity candidate pool at 5000 rows.
+  - **Concurrency correctness:** WAL `busy_timeout` now precedes
+    `journal_mode` so concurrent `open_db` calls wait the lock out
+    instead of raising; OAuth code/state consume rewritten as
+    atomic `DELETE … RETURNING` (RFC 6749 §4.1.2 one-shot now
+    enforced under racing /oauth/token); `write_event` rewritten as
+    `INSERT … ON CONFLICT(content_hash) DO NOTHING RETURNING`
+    (idempotent under concurrent identical writes — the previous
+    SELECT-then-INSERT TOCTOU surfaced as 500s); extractor's
+    `submit` now tolerates atexit shutdown gracefully.
+  - **Dead-code sweep:** removed `read_conflicts_for_event`,
+    `_wait_for_pending`, `cleanup_expired_codes` — all zero
+    callers, superseded by batch / scheduled-GC variants.
+  Full session 2026-05-30 19:00–22:00 UTC; commits f3e161f..362b2cd.
 
 ### 0.2 What's in flight
 
