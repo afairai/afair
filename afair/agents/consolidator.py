@@ -53,6 +53,7 @@ from .llm import LLMError, call_tool
 
 if TYPE_CHECKING:
     import sqlite3
+    from pathlib import Path
 
     from ..settings import Settings
     from ..substrate.events import Event
@@ -187,7 +188,13 @@ class Consolidator(ColdPathWorker):
                 log.warning("consolidator.llm_error", day=str(target), error=str(e))
                 stats["llm_errors"] += 1
                 continue
-            _write_consolidation(conn, target_day=target, events=events, summary=summary)
+            _write_consolidation(
+                conn,
+                target_day=target,
+                events=events,
+                summary=summary,
+                vault_dir=settings.vault_dir,
+            )
             stats["days_consolidated"] += 1
             log.info(
                 "consolidator.day_consolidated",
@@ -345,6 +352,7 @@ def _write_consolidation(
     target_day: date,
     events: list[Event],
     summary: _DaySummary,
+    vault_dir: Path,
 ) -> Event:
     """Write the consolidation as a NEW substrate event.
 
@@ -371,4 +379,5 @@ def _write_consolidation(
         kind=CONSOLIDATION_KIND,
         payload=payload,
         parent_hashes=[e.content_hash for e in events],
+        vault_dir=vault_dir,
     )
