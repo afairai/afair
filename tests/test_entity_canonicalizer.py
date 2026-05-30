@@ -354,6 +354,17 @@ def test_relation_creates_edge_between_entities(
         ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
     )
 
+    # Seed Sajinth in a prior event so the edge has at least one
+    # pre-existing endpoint (structural defense against fabricated edges
+    # between two same-event-born entities — see _is_safe_edge logic).
+    _write_event_with_extraction(
+        db,
+        text="Sajinth said hi",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        relations=[],
+    )
+    EntityCanonicalizer().run(db, settings)
+
     _write_event_with_extraction(
         db,
         text="Sajinth runs Athara",
@@ -369,6 +380,38 @@ def test_relation_creates_edge_between_entities(
     assert len(edges) == 1
     edge = edges[0]
     assert edge["predicate"] == "runs"
+
+
+def test_edge_with_two_new_entities_in_same_event_is_rejected(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense against prompt-injection that fabricates both endpoints.
+
+    An attacker pasting 'NewName1 knows NewName2' shouldn't be able to
+    write a graph edge claiming a relationship between two people who
+    never appeared anywhere else in the substrate.
+    """
+    _no_sleep(monkeypatch)
+    # LLM mock returns "no match" so each name becomes a NEW entity.
+    # (Stage 2 fires for the second name because Stage 3 just created the
+    # first as a candidate of the same kind; the LLM correctly says no match
+    # because the surface forms differ.)
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
+
+    _write_event_with_extraction(
+        db,
+        text="Adversarial paste: Alice knows Bob",
+        entities=[
+            {"name": "Alice", "type": "person"},
+            {"name": "Bob", "type": "person"},
+        ],
+        relations=[{"subject": "Alice", "predicate": "knows", "object": "Bob"}],
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+
+    edges = db.execute("SELECT * FROM entity_edges").fetchall()
+    assert edges == [], "edge between two new entities must be rejected"
+    assert stats.get("edges_rejected_both_new", 0) == 1
 
 
 def test_relation_with_unresolved_subject_is_skipped(
@@ -491,6 +534,16 @@ def test_cascade_invalidation_marks_edges(
         ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
     )
 
+    # Seed Sajinth as a pre-existing entity so the edge in the next event
+    # passes the "no edge between two same-event-born entities" defense.
+    _write_event_with_extraction(
+        db,
+        text="Sajinth introduced himself",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        relations=[],
+    )
+    EntityCanonicalizer().run(db, settings)
+
     _write_event_with_extraction(
         db,
         text="Sajinth runs Athara",
@@ -502,9 +555,10 @@ def test_cascade_invalidation_marks_edges(
     )
     EntityCanonicalizer().run(db, settings)
 
-    # One edge exists.
+    # One edge exists (the one from the second event — first event has no relations).
     target_event_id = db.execute(
-        "SELECT id FROM events WHERE kind = 'remember' LIMIT 1"
+        "SELECT e.id FROM events e WHERE e.kind = 'remember' "
+        "AND EXISTS (SELECT 1 FROM entity_edges WHERE source_event_id = e.id)"
     ).fetchone()["id"]
     edges = find_edges_for_source_event(db, target_event_id)
     assert len(edges) == 1
@@ -708,6 +762,16 @@ def test_edges_hidden_after_cascade(
         ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
     )
 
+    # Seed Sajinth first so the second event's edge has one pre-existing
+    # endpoint (passes the structural defense).
+    _write_event_with_extraction(
+        db,
+        text="Sajinth introduced himself",
+        entities=[{"name": "Sajinth", "type": "person"}],
+        relations=[],
+    )
+    EntityCanonicalizer().run(db, settings)
+
     _write_event_with_extraction(
         db,
         text="Sajinth runs Athara",
@@ -726,9 +790,10 @@ def test_edges_hidden_after_cascade(
     # Before invalidation: edge visible.
     assert len(iter_edges_for_entity(db, sajinth_id)) == 1
 
-    # Invalidate and cascade.
+    # Invalidate the EVENT that produced the edge (the second one).
     target_hash = db.execute(
-        "SELECT content_hash FROM events WHERE kind = 'remember' LIMIT 1"
+        "SELECT e.content_hash FROM events e WHERE e.kind = 'remember' "
+        "AND EXISTS (SELECT 1 FROM entity_edges WHERE source_event_id = e.id)"
     ).fetchone()["content_hash"]
     write_invalidation(db, target_hash=target_hash, reason="moved on", origin="user")
     EntityCanonicalizer().run(db, settings)
