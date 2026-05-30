@@ -585,7 +585,6 @@ def remember(
         kind="remember",
         payload=payload,
         parent_hashes=parent_hashes,
-        vault_dir=ctx.vault_dir,
     )
     if not already_existed:
         schedule_extraction(event.id)
@@ -609,13 +608,7 @@ def remember(
         reason = (
             content.text if isinstance(content, TextContent) else f"superseded by event {event.id}"
         )
-        write_invalidation(
-            db,
-            target_hash=target_hash,
-            reason=reason,
-            origin=DEFAULT_ORIGIN,
-            vault_dir=ctx.vault_dir,
-        )
+        write_invalidation(db, target_hash=target_hash, reason=reason, origin=DEFAULT_ORIGIN)
         invalidated_ok.append(target_hash)
 
     return RememberResult(
@@ -818,7 +811,6 @@ def _build_stats_summary(db: Any) -> ContextSummary:
 
 def observe(event: ObserveEvent) -> ObserveResult:
     db = connect_for_thread()
-    ctx = get_context()
 
     event_dict = event.model_dump(exclude_none=False)
     payload: dict[str, Any] = {"content_type": "event", **event_dict}
@@ -838,7 +830,6 @@ def observe(event: ObserveEvent) -> ObserveResult:
         origin=DEFAULT_ORIGIN,
         kind="observe",
         payload=payload,
-        vault_dir=ctx.vault_dir,
     )
     if not already_existed:
         schedule_extraction(written.id)
