@@ -56,6 +56,7 @@ from .objects import (
 from .payload import (
     build_binary_payload,
     build_blob_ref_payload,
+    build_compound_payload,
     build_text_payload,
     canonical_json,
     content_hash,
@@ -75,6 +76,7 @@ __all__ = [
     "StreamingObjectWriter",
     "build_binary_payload",
     "build_blob_ref_payload",
+    "build_compound_payload",
     "build_text_payload",
     "canonical_json",
     "content_hash",

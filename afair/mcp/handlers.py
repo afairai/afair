@@ -53,6 +53,7 @@ from ..agents.invalidation import (
 from ..substrate import (
     build_binary_payload,
     build_blob_ref_payload,
+    build_compound_payload,
     build_text_payload,
     iter_events,
     object_exists,
@@ -76,6 +77,9 @@ from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_REMEMBER_BYTES,
     BinaryContent,
+    CompoundBlobRefPart,
+    CompoundContent,
+    CompoundTextPart,
     ConflictFlag,
     ContextSummary,
     Depth,
@@ -156,6 +160,27 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         for k in ("action", "subject", "result"):
             if k in payload:
                 summary[k] = payload[k]
+    elif content_type == "compound":
+        # Compound events surface each part's identity + a truncated
+        # text preview. Blob parts stay as references; the caller
+        # uses full_payload=True if they need the bytes path.
+        parts_summary: list[dict[str, Any]] = []
+        for part in payload.get("parts", []):
+            if not isinstance(part, dict):
+                continue
+            part_view: dict[str, Any] = {"type": part.get("type")}
+            if part.get("label"):
+                part_view["label"] = part["label"]
+            if part.get("type") == "text":
+                part_text = part.get("text", "")
+                if isinstance(part_text, str):
+                    part_view["text"] = part_text[:SUMMARY_TEXT_CHARS]
+            elif part.get("type") == "blob-ref":
+                for k in ("blob_hash", "size_bytes", "mime", "filename_hint"):
+                    if k in part:
+                        part_view[k] = part[k]
+            parts_summary.append(part_view)
+        summary["parts"] = parts_summary
 
     # Common metadata across content types
     for k in ("context", "type_hint", "language", "target_hash", "reason"):
@@ -691,6 +716,44 @@ def remember(
             context=context,
             type_hint=type_hint,
             vault_dir=ctx.vault_dir,
+        )
+    elif isinstance(content, CompoundContent):
+        # Materialize each part into its on-disk representation. Text
+        # parts pass through inline. Blob-ref parts validate against
+        # the object store and inflate with size_bytes — same shape
+        # as the single-payload BlobRefContent path so the extractor
+        # and recall can treat parts uniformly.
+        materialized_parts: list[dict[str, Any]] = []
+        for idx, part in enumerate(content.parts):
+            if isinstance(part, CompoundTextPart):
+                part_dict: dict[str, Any] = {
+                    "type": "text",
+                    "text": part.text,
+                }
+                if part.label:
+                    part_dict["label"] = part.label
+                materialized_parts.append(part_dict)
+            elif isinstance(part, CompoundBlobRefPart):
+                if not object_exists(ctx.vault_dir, part.blob_hash):
+                    msg = (
+                        f"compound part {idx}: blob_hash {part.blob_hash!r} "
+                        "not found in object store"
+                    )
+                    raise InvalidateTargetError(msg)
+                materialized_parts.append(
+                    {
+                        "type": "blob-ref",
+                        "blob_hash": part.blob_hash,
+                        "size_bytes": object_size(ctx.vault_dir, part.blob_hash),
+                        "mime": part.mime,
+                        "filename_hint": part.filename_hint,
+                        "label": part.label,
+                    }
+                )
+        payload = build_compound_payload(
+            parts=materialized_parts,
+            context=context,
+            type_hint=type_hint,
         )
     else:  # BlobRefContent — bytes already in the object store via
         # /internal/blob/upload. Validate the hash exists; reject otherwise

@@ -97,8 +97,69 @@ class BlobRefContent(BaseModel):
     filename_hint: str | None = Field(default=None, max_length=MAX_FILENAME_HINT_CHARS)
 
 
+# ── compound (Tier 3 — atomic multi-payload events) ────────────────────────
+
+
+MAX_COMPOUND_PARTS = 20
+"""Hard cap on parts per compound event. A meeting = transcript +
+slides + screenshot is 3; even an aggressive multimodal event
+(article + 5 images + 2 audio clips + comments) tops out around 10.
+20 is generous and bounds adversarial loads."""
+
+
+class CompoundTextPart(BaseModel):
+    """One text payload inside a compound event."""
+
+    type: Literal["text"]
+    text: str
+    label: str | None = Field(default=None, max_length=200)
+    """Optional human-readable label for the part (e.g. 'transcript',
+    'caption'). Stored verbatim; surfaces in recall hits so an AI
+    client can address parts by name."""
+
+
+class CompoundBlobRefPart(BaseModel):
+    """One already-uploaded blob inside a compound event."""
+
+    type: Literal["blob-ref"]
+    blob_hash: str = Field(min_length=71, max_length=71)
+    mime: str = Field(min_length=1, max_length=MAX_MIME_CHARS)
+    filename_hint: str | None = Field(default=None, max_length=MAX_FILENAME_HINT_CHARS)
+    label: str | None = Field(default=None, max_length=200)
+
+
+CompoundPart = Annotated[
+    CompoundTextPart | CompoundBlobRefPart,
+    Field(discriminator="type"),
+]
+
+
+class CompoundContent(BaseModel):
+    """Atomic event composed of multiple parts.
+
+    Use when a single semantic memory has more than one representation
+    that should travel together: meeting = transcript + slides +
+    screenshot; receipt = photo + extracted line items; podcast = mp3
+    + transcript + show-notes-markdown.
+
+    Each part is either inline text or a blob-ref to a previously
+    streamed-uploaded blob. The compound is stored as ONE event row
+    (one content_hash) with the parts array in the payload; recall
+    returns it as a single hit with the parts inline.
+
+    Why not just call remember() three times with parent_hashes
+    linking? Because atomicity matters: a meeting is one observation,
+    not three. parent_hashes is for events that ACTUALLY reference
+    earlier events (an update supersedes a previous claim); compound
+    is for events that have multiple FACETS.
+    """
+
+    type: Literal["compound"]
+    parts: list[CompoundPart] = Field(min_length=1, max_length=MAX_COMPOUND_PARTS)
+
+
 RememberContent = Annotated[
-    TextContent | BinaryContent | BlobRefContent,
+    TextContent | BinaryContent | BlobRefContent | CompoundContent,
     Field(discriminator="type"),
 ]
 
