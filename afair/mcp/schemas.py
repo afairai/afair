@@ -27,6 +27,7 @@ def _canon_json(obj: Any) -> str:
     """Cheap deterministic serializer for size-bound checks (not for storage)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
+
 # 10 MB cap on `remember` content — v1 lock. Raising the cap later is
 # additive (smaller clients still work); lowering would break I1.
 MAX_REMEMBER_BYTES = 10 * 1024 * 1024
