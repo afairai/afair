@@ -27,21 +27,20 @@ their own machine.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from .auth import SCOPE_IDENTITY_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Iterable
 
     from starlette.requests import Request
-    from starlette.responses import Response
-    from starlette.types import ASGIApp
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 DEFAULT_REQUESTS_PER_MINUTE = 120
@@ -141,12 +140,15 @@ class TokenBucketRateLimiter:
             return len(self._buckets)
 
 
-def _identity_from_request(request: Request) -> str | None:
+_AUTHORIZATION = b"authorization"
+
+
+def _scope_identity(scope: Scope) -> str | None:
     """Derive a stable per-identity key for the rate-limit bucket.
 
     Precedence:
-      1. ``request.state.rate_limit_identity`` set by the auth middleware
-         — uses the verified JWT subject (``jwt:<sub>``) or a constant
+      1. ``scope[SCOPE_IDENTITY_KEY]`` set by the auth middleware —
+         uses the verified JWT subject (``jwt:<sub>``) or a constant
          label for the static bearer. Same identity stays in one bucket
          across refreshes / rotations (Sec audit I2).
       2. Fallback: hash the raw bearer bytes. Reached only when this
@@ -154,11 +156,18 @@ def _identity_from_request(request: Request) -> str | None:
          (tests, or future endpoints that wire it alone). Keeps the
          old behavior for those callers.
     """
-    state_identity = getattr(request.state, "rate_limit_identity", None)
+    state_identity = scope.get(SCOPE_IDENTITY_KEY)
     if isinstance(state_identity, str) and state_identity:
         return state_identity
 
-    auth = request.headers.get("authorization", "")
+    auth = ""
+    for k, v in scope.get("headers", []):
+        if k.lower() == _AUTHORIZATION:
+            try:
+                auth = v.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+            break
     if not auth.lower().startswith("bearer "):
         return None
     token = auth[7:].strip()
@@ -167,8 +176,18 @@ def _identity_from_request(request: Request) -> str | None:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Starlette middleware applying per-identity rate-limiting to /mcp
+def _identity_from_request(request: Request) -> str | None:
+    """BaseHTTPMiddleware-era helper kept for the old test surface.
+
+    Modern code paths go through ``_scope_identity`` directly. This
+    wrapper just adapts a Request back into a scope read so the legacy
+    helper keeps the same semantics.
+    """
+    return _scope_identity(request.scope)
+
+
+class RateLimitMiddleware:
+    """ASGI middleware applying per-identity rate-limiting to /mcp
     and other authenticated paths. Exempt paths bypass the check entirely.
 
     Order matters: this should sit BELOW the bearer/JWT auth middleware
@@ -185,42 +204,55 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         exempt_paths: Iterable[str] = (),
         exempt_prefixes: Iterable[str] = (),
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self._limiter = limiter
         self._exempt = frozenset(exempt_paths)
         self._exempt_prefixes = tuple(exempt_prefixes)
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        path = request.url.path
-        if path in self._exempt:
-            return await call_next(request)
-        if any(path.startswith(p) for p in self._exempt_prefixes):
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        identity = _identity_from_request(request)
+        path = scope.get("path", "")
+        if path in self._exempt or any(path.startswith(p) for p in self._exempt_prefixes):
+            await self.app(scope, receive, send)
+            return
+
+        identity = _scope_identity(scope)
         if identity is None:
             # No bearer — auth middleware will reject. Don't burn a bucket.
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         allowed, retry_after = self._limiter.check(identity)
         if allowed:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         # 429 Too Many Requests — RFC 6585.
         retry_after_seconds = max(1, int(retry_after) + 1)
-        return JSONResponse(
+        body = json.dumps(
             {
                 "error": "rate_limited",
                 "detail": "too many requests for this identity",
                 "retry_after_seconds": retry_after_seconds,
             },
-            status_code=429,
-            headers={
-                "Retry-After": str(retry_after_seconds),
-                "X-RateLimit-Limit": str(int(self._limiter.rate_per_sec * 60)),
-            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"retry-after", str(retry_after_seconds).encode("ascii")),
+                    (
+                        b"x-ratelimit-limit",
+                        str(int(self._limiter.rate_per_sec * 60)).encode("ascii"),
+                    ),
+                ],
+            }
         )
+        await send({"type": "http.response.body", "body": body, "more_body": False})
