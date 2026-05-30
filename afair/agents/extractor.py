@@ -391,6 +391,20 @@ def _run_extraction(
         produced_by=produced_by,
         extraction=validated_or_error,
     )
+
+    # Enrich the FTS index with what the extractor learned about this
+    # event. Without this step an FTS keyword search against a PDF or
+    # image only matches the filename + mime metadata, NOT the body.
+    # With it, a binary becomes first-class text-searchable via the
+    # extractor's summary + salient_facts + the extracted body itself.
+    _enrich_fts_after_extraction(
+        db,
+        content_hash=event.content_hash,
+        payload=payload,
+        extraction=validated_or_error,
+        extracted_text=extracted_text,
+    )
+
     log.info(
         "extractor.success",
         event_id=event_id,
@@ -463,6 +477,57 @@ def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> s
         pieces.extend(n for n in names if isinstance(n, str) and n.strip())
     combined = "\n".join(pieces).strip()
     return combined or "(empty event)"
+
+
+def _enrich_fts_after_extraction(
+    db: Any,
+    *,
+    content_hash: str,
+    payload: dict[str, Any],
+    extraction: dict[str, Any],
+    extracted_text: str | None,
+) -> None:
+    """Rewrite the events_fts row to include extractor-derived text.
+
+    Two-stage indexing:
+      1. write_event populated events_fts with the payload-derived
+         searchable_text — for binaries that's only filename + mime +
+         context (the bytes themselves aren't text).
+      2. After the extractor lands, we REPLACE that row with the
+         original searchable_text PLUS the extractor's distilled
+         signal: summary, salient_facts, and (for PDFs / audio) the
+         extracted body text itself.
+
+    DELETE + INSERT rather than UPDATE so the FTS5 inverted-index
+    rebuild stays uniform regardless of whether the row pre-existed.
+    Lives inside the extractor's transaction window for atomicity.
+    """
+    from ..substrate.payload import derive_searchable_text
+
+    pieces: list[str] = []
+    base = derive_searchable_text(payload)
+    if base:
+        pieces.append(base)
+    if extracted_text:
+        pieces.append(extracted_text)
+    summary = extraction.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        pieces.append(summary.strip())
+    salient = extraction.get("salient_facts")
+    if isinstance(salient, list):
+        pieces.extend(s for s in salient if isinstance(s, str) and s.strip())
+    enriched = "\n".join(pieces).strip()
+    if not enriched:
+        return  # nothing to add; leave existing row in place
+
+    with db:
+        db.execute(
+            "DELETE FROM events_fts WHERE content_hash = ?", (content_hash,)
+        )
+        db.execute(
+            "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
+            (content_hash, enriched),
+        )
 
 
 def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None:

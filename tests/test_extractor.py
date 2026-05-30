@@ -259,6 +259,20 @@ def test_extract_pdf_routes_through_pypdf(
     # build_user_message received the extracted text
     assert seen_text == ["PDF body extracted by mock"]
 
+    # FTS enrichment: the extractor's summary + salient_facts + the
+    # extracted PDF body should all be findable via events_fts now,
+    # not just the filename + mime metadata that write_event indexed.
+    from afair.substrate.search import search_fts
+
+    by_summary = search_fts(ctx.db, "Sajinth")
+    assert any(h.content_hash == e.content_hash for h in by_summary), (
+        "FTS should find the PDF event via the extractor's summary"
+    )
+    by_body = search_fts(ctx.db, "extracted by mock")
+    assert any(h.content_hash == e.content_hash for h in by_body), (
+        "FTS should find the PDF event via the extracted body text"
+    )
+
 
 def test_extract_audio_routes_through_whisper(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
