@@ -18,8 +18,17 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ..substrate import open_db
+from ..substrate import object_path, open_db
 from ..substrate.events import read_event_by_id
+from .binary_extractors import (
+    AudioTranscriptionError,
+    ImageDescriptionError,
+    PdfExtractionError,
+    describe_image,
+    extract_pdf_text,
+    modality_for_mime,
+    transcribe_audio,
+)
 from .binder import find_and_record_links
 from .embedding import EmbeddingError, embed_text, serialize_vector
 from .interpretation import (
@@ -69,6 +78,27 @@ def _api_key_for(model: str, ctx: object) -> str | None:
     return key.get_secret_value() if key is not None else None
 
 
+def _capture_extractor_kwargs(ctx: Any) -> dict[str, Any]:
+    """Snapshot the per-call settings the background extractor needs.
+
+    Captured at submit time so the worker thread doesn't reach back into
+    the live ServerContext (which could mutate between submit + run).
+    """
+    return {
+        "vault_dir": ctx.vault_dir,
+        "model": ctx.extractor_model,
+        "api_key": _api_key_for(ctx.extractor_model, ctx),
+        "embedding_model": ctx.embedding_model,
+        "embedding_api_key": _api_key_for(ctx.embedding_model, ctx),
+        "embedding_dim": ctx.embedding_dim,
+        "semantic_recall_enabled": ctx.semantic_recall_enabled,
+        "vision_model": ctx.vision_model,
+        "vision_api_key": _api_key_for(ctx.vision_model, ctx),
+        "transcription_model": ctx.transcription_model,
+        "transcription_api_key": _api_key_for(ctx.transcription_model, ctx),
+    }
+
+
 def schedule_extraction(event_id: str) -> None:
     """Fire-and-forget the extraction for ``event_id``. Returns immediately.
 
@@ -81,17 +111,7 @@ def schedule_extraction(event_id: str) -> None:
 
     ctx = get_context()
     try:
-        _EXECUTOR.submit(
-            _run_extraction,
-            event_id=event_id,
-            vault_dir=ctx.vault_dir,
-            model=ctx.extractor_model,
-            api_key=_api_key_for(ctx.extractor_model, ctx),
-            embedding_model=ctx.embedding_model,
-            embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
-            embedding_dim=ctx.embedding_dim,
-            semantic_recall_enabled=ctx.semantic_recall_enabled,
-        )
+        _EXECUTOR.submit(_run_extraction, event_id=event_id, **_capture_extractor_kwargs(ctx))
     except RuntimeError as exc:
         # Interpreter teardown: atexit fired _EXECUTOR.shutdown() while
         # we were mid-request. The event row is already durable; a future
@@ -114,16 +134,7 @@ def extract_sync(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
-    _run_extraction(
-        event_id=event_id,
-        vault_dir=ctx.vault_dir,
-        model=ctx.extractor_model,
-        api_key=_api_key_for(ctx.extractor_model, ctx),
-        embedding_model=ctx.embedding_model,
-        embedding_api_key=_api_key_for(ctx.embedding_model, ctx),
-        embedding_dim=ctx.embedding_dim,
-        semantic_recall_enabled=ctx.semantic_recall_enabled,
-    )
+    _run_extraction(event_id=event_id, **_capture_extractor_kwargs(ctx))
 
 
 def _conn_for_extractor_thread(vault_dir: Path, embedding_dim: int) -> Any:
@@ -185,22 +196,144 @@ def _run_extraction(
     embedding_api_key: str | None = None,
     embedding_dim: int = 1536,
     semantic_recall_enabled: bool = True,
+    vision_model: str = "anthropic/claude-haiku-4-5",
+    vision_api_key: str | None = None,
+    transcription_model: str = "openai/whisper-1",
+    transcription_api_key: str | None = None,
 ) -> None:
-    """The actual extraction work. Reuses a thread-local DB connection."""
+    """The actual extraction work. Reuses a thread-local DB connection.
+
+    Modality dispatch (Phase 1 multi-modal):
+      - text / text-large / observe-event  → text-LLM tool-use call
+      - binary + mime=application/pdf       → pypdf text extract, then text-LLM
+      - binary + mime=audio/*               → whisper transcript, then text-LLM
+      - binary + mime=image/*               → vision-LLM tool-use call
+
+    All paths converge on a single ``write_interpretation`` row carrying
+    the same JSON shape so recall + downstream agents stay modality-blind.
+    """
     db = _conn_for_extractor_thread(vault_dir, embedding_dim)
-    try:
-        event = read_event_by_id(db, event_id)
-        if event is None:
-            log.warning("extractor.event_missing", event_id=event_id)
+    event = read_event_by_id(db, event_id)
+    if event is None:
+        log.warning("extractor.event_missing", event_id=event_id)
+        return
+
+    payload = event.payload or {}
+    content_type = payload.get("content_type")
+    mime = payload.get("mime") if isinstance(payload, dict) else None
+    modality = (
+        modality_for_mime(mime if isinstance(mime, str) else None)
+        if content_type == "binary"
+        else "text"
+    )
+
+    extracted_text: str | None = None
+    extractor_subtag = "text"
+
+    # Pre-LLM binary extraction. PDF + audio produce text that's fed to
+    # the standard text-LLM call (so the extraction schema stays the same).
+    # Image is handled by the vision-LLM branch below instead.
+    if modality == "pdf":
+        blob_hash = payload.get("blob_hash") if isinstance(payload, dict) else None
+        if isinstance(blob_hash, str):
+            try:
+                extracted_text = extract_pdf_text(object_path(vault_dir, blob_hash))
+                extractor_subtag = "pdf"
+                log.info(
+                    "extractor.pdf_text",
+                    event_id=event_id,
+                    chars=len(extracted_text),
+                )
+            except PdfExtractionError as e:
+                log.warning("extractor.pdf_failed", event_id=event_id, error=str(e))
+                write_failed_interpretation(
+                    db,
+                    event=event,
+                    version=EXTRACTOR_SCHEMA_VERSION,
+                    produced_by=f"extractor:pdf:{model}",
+                    error_type="pdf_extraction_error",
+                    error_message=str(e),
+                )
+                return
+    elif modality == "audio":
+        blob_hash = payload.get("blob_hash") if isinstance(payload, dict) else None
+        if isinstance(blob_hash, str):
+            try:
+                extracted_text = transcribe_audio(
+                    path=object_path(vault_dir, blob_hash),
+                    model=transcription_model,
+                    api_key=transcription_api_key,
+                )
+                extractor_subtag = "audio"
+                log.info(
+                    "extractor.audio_transcript",
+                    event_id=event_id,
+                    chars=len(extracted_text),
+                    model=transcription_model,
+                )
+            except AudioTranscriptionError as e:
+                log.warning("extractor.audio_failed", event_id=event_id, error=str(e))
+                write_failed_interpretation(
+                    db,
+                    event=event,
+                    version=EXTRACTOR_SCHEMA_VERSION,
+                    produced_by=f"extractor:audio:{transcription_model}",
+                    error_type="audio_transcription_error",
+                    error_message=str(e),
+                )
+                return
+
+    # Pick the LLM path based on modality. Image goes through a vision-
+    # capable model with the image as a content part; everything else
+    # goes through the text-tool-use path with optional pre-extracted
+    # text augmenting the user message.
+    if modality == "image":
+        blob_hash = payload.get("blob_hash") if isinstance(payload, dict) else None
+        if not isinstance(blob_hash, str) or not isinstance(mime, str):
+            log.warning("extractor.image_missing_blob", event_id=event_id)
+            write_failed_interpretation(
+                db,
+                event=event,
+                version=EXTRACTOR_SCHEMA_VERSION,
+                produced_by=f"extractor:image:{vision_model}",
+                error_type="image_payload_error",
+                error_message="image payload missing blob_hash or mime",
+            )
             return
-
-        produced_by = f"extractor:{model}"
-
+        produced_by = f"extractor:image:{vision_model}"
+        try:
+            extraction = describe_image(
+                path=object_path(vault_dir, blob_hash),
+                mime=mime,
+                user_message=build_user_message(event),
+                system_prompt=EXTRACTOR_SYSTEM_PROMPT,
+                tool_name=EXTRACTOR_TOOL_NAME,
+                tool_description=EXTRACTOR_TOOL_DESCRIPTION,
+                tool_schema=EXTRACTOR_TOOL_SCHEMA,
+                model=vision_model,
+                api_key=vision_api_key,
+            )
+        except ImageDescriptionError as e:
+            log.warning("extractor.image_failed", event_id=event_id, error=str(e))
+            write_failed_interpretation(
+                db,
+                event=event,
+                version=EXTRACTOR_SCHEMA_VERSION,
+                produced_by=produced_by,
+                error_type="image_description_error",
+                error_message=str(e),
+            )
+            return
+        validated_or_error = _validate_extraction(extraction)
+    else:
+        produced_by = (
+            f"extractor:{extractor_subtag}:{model}" if extracted_text else f"extractor:{model}"
+        )
         try:
             result = call_tool(
                 model=model,
                 system=EXTRACTOR_SYSTEM_PROMPT,
-                user=build_user_message(event),
+                user=build_user_message(event, extracted_text=extracted_text),
                 tool_name=EXTRACTOR_TOOL_NAME,
                 tool_description=EXTRACTOR_TOOL_DESCRIPTION,
                 tool_schema=EXTRACTOR_TOOL_SCHEMA,
@@ -223,82 +356,87 @@ def _run_extraction(
                 error_message=str(e),
             )
             return
-
-        # Validate the extraction has at least the mandatory top-level keys.
         validated_or_error = _validate_extraction(result.data)
-        if isinstance(validated_or_error, str):
-            log.warning(
-                "extractor.validation_error",
-                event_id=event_id,
-                error=validated_or_error,
-                model=model,
-            )
-            write_failed_interpretation(
-                db,
-                event=event,
-                version=EXTRACTOR_SCHEMA_VERSION,
-                produced_by=produced_by,
-                error_type=LLMResponseError.error_type,
-                error_message=validated_or_error,
-            )
-            return
 
-        validated_or_error["status"] = "success"
-        write_interpretation(
+    # Validate the extraction has at least the mandatory top-level keys.
+    if isinstance(validated_or_error, str):
+        log.warning(
+            "extractor.validation_error",
+            event_id=event_id,
+            error=validated_or_error,
+            model=model,
+            modality=modality,
+        )
+        write_failed_interpretation(
             db,
             event=event,
             version=EXTRACTOR_SCHEMA_VERSION,
             produced_by=produced_by,
-            extraction=validated_or_error,
+            error_type=LLMResponseError.error_type,
+            error_message=validated_or_error,
         )
-        log.info(
-            "extractor.success",
-            event_id=event_id,
-            best_guess_kind=validated_or_error.get("best_guess_kind"),
-            model=model,
-        )
+        return
 
-        # Generate + store the embedding for semantic recall. Failure here
-        # is non-fatal — the substrate event is durable; only the vector
-        # store doesn't get populated, and recall falls back to FTS for
-        # this event.
-        if semantic_recall_enabled:
-            embedding_text = _embedding_text_for_event(event, validated_or_error)
-            try:
-                vector = embed_text(
-                    model=embedding_model,
-                    text=embedding_text,
-                    api_key=embedding_api_key,
-                )
-                _store_embedding(db, event.content_hash, vector)
-                log.info(
-                    "extractor.embedding_stored",
-                    event_id=event_id,
-                    dim=len(vector),
-                    model=embedding_model,
-                )
-                # Bind agent v0 — find prior semantically-similar events
-                # and record the links. Soft-fail per binder.py.
-                find_and_record_links(db, event=event, embedding=vector)
-            except EmbeddingError as e:
-                log.warning(
-                    "extractor.embedding_failed",
-                    event_id=event_id,
-                    error=str(e),
-                    model=embedding_model,
-                )
-    finally:
-        # Connection lives on the thread for the worker's lifetime — see
-        # _conn_for_extractor_thread for the rationale. No close here.
-        pass
+    validated_or_error["status"] = "success"
+    # Stash the extracted source text on the interpretation row when we
+    # ran a pre-LLM binary extractor. Future cold-path workers (and the
+    # embedding step below) can use it; recall surfaces it via
+    # ``interpretation.extracted_text`` when full-payload mode is on.
+    if extracted_text:
+        validated_or_error["extracted_text"] = extracted_text
+    write_interpretation(
+        db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by=produced_by,
+        extraction=validated_or_error,
+    )
+    log.info(
+        "extractor.success",
+        event_id=event_id,
+        best_guess_kind=validated_or_error.get("best_guess_kind"),
+        model=model,
+        modality=modality,
+    )
+
+    # Generate + store the embedding for semantic recall. Failure here
+    # is non-fatal — the substrate event is durable; only the vector
+    # store doesn't get populated, and recall falls back to FTS for
+    # this event.
+    if semantic_recall_enabled:
+        embedding_text = _embedding_text_for_event(event, validated_or_error)
+        try:
+            vector = embed_text(
+                model=embedding_model,
+                text=embedding_text,
+                api_key=embedding_api_key,
+            )
+            _store_embedding(db, event.content_hash, vector)
+            log.info(
+                "extractor.embedding_stored",
+                event_id=event_id,
+                dim=len(vector),
+                model=embedding_model,
+            )
+            # Bind agent v0 — find prior semantically-similar events
+            # and record the links. Soft-fail per binder.py.
+            find_and_record_links(db, event=event, embedding=vector)
+        except EmbeddingError as e:
+            log.warning(
+                "extractor.embedding_failed",
+                event_id=event_id,
+                error=str(e),
+                model=embedding_model,
+            )
 
 
 def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> str:
     """Choose the text to embed for an event.
 
-    We use a composed signal: the inline payload text (if any) plus the
-    extractor's summary plus the entity names. This gives the embedding
-    both raw content and the LLM's distilled understanding.
+    We use a composed signal: the inline payload text (if any), the
+    extracted text from any binary modality (PDF body, audio transcript),
+    plus the extractor's summary and entity names. This gives the
+    embedding raw content + binary-extract + the LLM's distilled view.
     """
     pieces: list[str] = []
     payload = getattr(event, "payload", {}) or {}
@@ -310,6 +448,12 @@ def _embedding_text_for_event(event: object, extraction: dict[str, object]) -> s
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 pieces.append(value.strip())
+    # Binary-extracted text (PDF body, whisper transcript) was stored on
+    # the interpretation row by _run_extraction — include it so semantic
+    # recall finds the binary by its contents, not just its metadata.
+    extracted = extraction.get("extracted_text")
+    if isinstance(extracted, str) and extracted.strip():
+        pieces.append(extracted.strip())
     summary = extraction.get("summary")
     if isinstance(summary, str) and summary.strip():
         pieces.append(summary.strip())

@@ -209,6 +209,168 @@ def test_extract_missing_required_field_writes_failed_interpretation(
 # ── handler → extractor integration ────────────────────────────────────────
 
 
+def test_extract_pdf_routes_through_pypdf(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary event with mime=application/pdf:
+    pypdf extracts text, the text-LLM call receives it via user_message."""
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+
+    # Capture what extract_pdf_text was called with + what build_user_message saw.
+    seen_text: list[str | None] = []
+
+    monkeypatch.setattr(
+        "afair.agents.extractor.extract_pdf_text",
+        lambda _path: "PDF body extracted by mock",
+    )
+
+    real_build = extractor.build_user_message
+
+    def spy_build_user_message(event: Any, *, extracted_text: str | None = None) -> str:
+        seen_text.append(extracted_text)
+        return real_build(event, extracted_text=extracted_text)
+
+    monkeypatch.setattr("afair.agents.extractor.build_user_message", spy_build_user_message)
+
+    from afair.substrate import write_event, write_object
+
+    blob_hash = write_object(ctx.vault_dir, b"%PDF-1.4 fake pdf bytes")
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob_hash,
+            "mime": "application/pdf",
+            "size_bytes": 25,
+            "filename_hint": "report.pdf",
+            "context": "uploaded report",
+            "type_hint": None,
+        },
+    )
+    extractor.extract_sync(e.id)
+
+    assert _count_interpretations(ctx) == 1
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "success"
+    # extracted_text persisted on the interpretation row
+    assert extraction["extracted_text"] == "PDF body extracted by mock"
+    # build_user_message received the extracted text
+    assert seen_text == ["PDF body extracted by mock"]
+
+
+def test_extract_audio_routes_through_whisper(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary event with mime=audio/*:
+    transcribe_audio runs, text-LLM call receives transcript via user_message."""
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+    monkeypatch.setattr(
+        "afair.agents.extractor.transcribe_audio",
+        lambda **_: "transcribed audio content",
+    )
+
+    from afair.substrate import write_event, write_object
+
+    blob_hash = write_object(ctx.vault_dir, b"fake-audio-bytes")
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob_hash,
+            "mime": "audio/mpeg",
+            "size_bytes": 16,
+            "filename_hint": "memo.mp3",
+            "context": None,
+            "type_hint": None,
+        },
+    )
+    extractor.extract_sync(e.id)
+
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "success"
+    assert extraction["extracted_text"] == "transcribed audio content"
+
+
+def test_extract_image_routes_through_vision(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary event with mime=image/*:
+    describe_image runs (NOT the text-LLM call) and returns directly."""
+
+    def fake_call_tool(**_: object) -> LLMResult:
+        # This MUST NOT be reached for image events.
+        msg = "text-LLM call_tool reached on image event"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("afair.agents.extractor.call_tool", fake_call_tool)
+    monkeypatch.setattr(
+        "afair.agents.extractor.describe_image",
+        lambda **_: GOOD_EXTRACTION,
+    )
+
+    from afair.substrate import write_event, write_object
+
+    blob_hash = write_object(ctx.vault_dir, b"PNG fake bytes")
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob_hash,
+            "mime": "image/png",
+            "size_bytes": 14,
+            "filename_hint": "screenshot.png",
+            "context": "from claude code",
+            "type_hint": None,
+        },
+    )
+    extractor.extract_sync(e.id)
+
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "success"
+    assert extraction["best_guess_kind"] == "email"  # from GOOD_EXTRACTION
+
+
+def test_extract_pdf_failure_writes_failed_interpretation(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from afair.agents.binary_extractors import PdfExtractionError
+
+    def fail_pdf(_path: Any) -> str:
+        msg = "corrupt PDF"
+        raise PdfExtractionError(msg)
+
+    monkeypatch.setattr("afair.agents.extractor.extract_pdf_text", fail_pdf)
+
+    from afair.substrate import write_event, write_object
+
+    blob_hash = write_object(ctx.vault_dir, b"garbage")
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob_hash,
+            "mime": "application/pdf",
+            "size_bytes": 7,
+            "context": None,
+            "type_hint": None,
+        },
+    )
+    extractor.extract_sync(e.id)
+
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "failed"
+    assert extraction["error_type"] == "pdf_extraction_error"
+    assert "corrupt PDF" in extraction["error_message"]
+
+
 def test_remember_handler_triggers_extraction(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

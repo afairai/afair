@@ -48,6 +48,10 @@ class ServerContext:
     inline_text_max_bytes: int
     # Extractor / LLM (Invariant I5 — model string drives provider via litellm)
     extractor_model: str = "anthropic/claude-haiku-4-5"
+    # Multi-modal extraction models (Phase 1 binary extraction). Vision
+    # handles image content; transcription handles audio.
+    vision_model: str = "anthropic/claude-haiku-4-5"
+    transcription_model: str = "openai/whisper-1"
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None

@@ -45,6 +45,13 @@ dependencies = [
     "structlog>=24.4.0",
     # HTTP client
     "httpx>=0.27.0",
+    # Binary content extraction (multi-modal Phase 1 — PDF text, audio
+    # via litellm/whisper, image via litellm vision-capable models).
+    # pypdf is pure-Python, MIT, no system deps — extracts text from any
+    # PDF that has a text layer. Scanned (image-only) PDFs fall through
+    # to the image-vision path automatically because their text extract
+    # comes back empty and the page-renders are sent to a vision model.
+    "pypdf>=4.0.0",
 ]
 
 [project.scripts]
