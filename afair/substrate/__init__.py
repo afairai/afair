@@ -11,6 +11,7 @@ constitutional review.
 
 from __future__ import annotations
 
+from . import pipeline_events
 from .checkpoint import start_checkpoint_loop
 from .db import init_db, open_db
 from .entities import (
@@ -93,6 +94,7 @@ __all__ = [
     "object_path",
     "object_size",
     "open_db",
+    "pipeline_events",
     "read_edge_invalidations",
     "read_edges_by_source_event_ids",
     "read_entities_batch",

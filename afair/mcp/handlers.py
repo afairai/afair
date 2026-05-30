@@ -70,6 +70,7 @@ from ..substrate import (
     search_vec,
     write_event_with_status,
 )
+from ..substrate import pipeline_events as pe
 from ..substrate.events import row_to_event
 from ..substrate.search import FTS5_SPECIALS_RE
 from . import schemas
@@ -783,6 +784,13 @@ def remember(
         parent_hashes=parent_hashes,
     )
     if was_inserted:
+        pe.record(
+            db,
+            event_id=event.id,
+            event_hash=event.content_hash,
+            stage=pe.STAGE_EVENT_WRITTEN,
+            producer="remember",
+        )
         schedule_extraction(event.id)
     already_existed = not was_inserted
 
@@ -1044,6 +1052,13 @@ def observe(event: ObserveEvent) -> ObserveResult:
         payload=payload,
     )
     if was_inserted:
+        pe.record(
+            db,
+            event_id=written.id,
+            event_hash=written.content_hash,
+            stage=pe.STAGE_EVENT_WRITTEN,
+            producer="observe",
+        )
         schedule_extraction(written.id)
 
     return ObserveResult(

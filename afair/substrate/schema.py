@@ -310,6 +310,49 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_invalidations is append-only (Invariant I2)');
     END
     """,
+    # ── pipeline_events: end-to-end lifecycle tracing (Phase 0.5 obs) ───────
+    # Every step in an event's journey gets a row:
+    #   event.written            — write_event_with_status returned ok
+    #   extraction.enqueued      — schedule_extraction submitted the job
+    #   extraction.completed     — extractor wrote a success interpretation
+    #   extraction.failed        — extractor wrote a failed interpretation
+    #   embedding.stored         — vec row inserted
+    #   binder.linked            — find_and_record_links recorded N links
+    #   canonicalizer.processed  — entity_canonicalizer ran on this event
+    #   consolidator.included    — consolidator pulled this into a day-roll
+    #   conflict_resolver.judged — conflict_resolver verdict written
+    #
+    # Designed to answer "where did event X get stuck?" without grepping
+    # logs. Append-only like everything else; readers compose the
+    # timeline with ORDER BY recorded_at.
+    """
+    CREATE TABLE IF NOT EXISTS pipeline_events (
+        id              TEXT PRIMARY KEY,
+        event_id        TEXT NOT NULL,
+        event_hash      TEXT,
+        stage           TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        recorded_at     TEXT NOT NULL,
+        producer        TEXT,
+        detail          TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS pipeline_events_event_id_idx ON pipeline_events(event_id, recorded_at)",
+    "CREATE INDEX IF NOT EXISTS pipeline_events_stage_idx ON pipeline_events(stage, recorded_at DESC)",
+    """
+    CREATE TRIGGER IF NOT EXISTS pipeline_events_no_update
+    BEFORE UPDATE ON pipeline_events
+    BEGIN
+        SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS pipeline_events_no_delete
+    BEFORE DELETE ON pipeline_events
+    BEGIN
+        SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
+    END
+    """,
 )
 
 
