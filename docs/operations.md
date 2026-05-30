@@ -330,6 +330,11 @@ obvious.
 | `ANTHROPIC_API_KEY` | Fly secret + `.env.local` | `.env.secrets.backup` | console.anthropic.com |
 | `OPENAI_API_KEY` | Fly secret + `.env.local` | `.env.secrets.backup` | platform.openai.com |
 | `FLY_API_TOKEN` (for CI) | GitHub repo secret | `.env.secrets.backup` | `fly tokens create deploy` |
+| `AFAIR_AUTH_TOKEN` | Fly secret | `.env.secrets.backup` | regenerate via `python -c 'import secrets; print(secrets.token_urlsafe(32))'` |
+| `AFAIR_SIGNUP_TOKEN` | Fly secret (afair) + GH secret (afair-web) | `.env.secrets.backup` | same |
+| `AFAIR_JWT_SECRET` | Fly secret | `.env.secrets.backup` | `afair.mcp.oauth.jwt.generate_secret()` |
+| `GITHUB_OAUTH_CLIENT_ID` / `SECRET` | Fly secret | `.env.secrets.backup` | github.com/settings/developers |
+| `OAUTH_ISSUER` | Fly secret (not secret-secret, just config — required in prod) | `.env.secrets.backup` | n/a (URL doesn't rotate) |
 
 To rotate any of these:
 
@@ -339,6 +344,15 @@ To rotate any of these:
 4. Update `.env.secrets.backup` (the annotated canonical record)
 5. If it's a CI token, update GH secret too: `gh secret set FLY_API_TOKEN`
 6. Revoke the old value at the provider
+
+### Production boot requires these to be set
+
+The `environment=fly` model validator refuses to start without:
+
+- `AFAIR_AUTH_TOKEN` — otherwise the substrate would be world-writable
+- `OAUTH_ISSUER` — otherwise JWTs are minted with the wrong `iss` claim
+  and every OAuth handshake silently breaks (audit M1). For
+  `mcp.afair.ai` set `OAUTH_ISSUER=https://mcp.afair.ai`.
 
 Per global `CLAUDE.md`: a secret must always be in `.env.secrets.backup`
 **before** it goes live anywhere else.
@@ -419,6 +433,9 @@ You have a `afair` server already running. `lsof -i :8765` to find it.
 
 ### `database is locked` during deploy
 The volume is still attached to a stopping machine. Wait 10s, retry.
+(If you see it at runtime instead of at deploy, that's the audit
+issue fixed in 749f5cb — `busy_timeout` now precedes `journal_mode`,
+so concurrent `open_db` calls wait the lock out instead of raising.)
 
 ### `/health` returns 503
 Run `fly logs -a afair`. Most common cause is the substrate DB being
