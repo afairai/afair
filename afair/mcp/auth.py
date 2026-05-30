@@ -13,29 +13,35 @@ signatures stay locked, only the transport layer adds a check.
 /health is exempt so Fly's orchestrator can probe liveness.
 OAuth metadata + dance endpoints are also exempt (clients need to
 discover and authenticate WITHOUT credentials).
+
+Implementation (Perf audit C2): pure ASGI — header checks run on the
+scope dict directly. The verified identity is stashed under a private
+scope key (``afair_rate_limit_identity``) for the downstream rate-limit
+middleware to pick up; that path used to thread through request.state
+which required BaseHTTPMiddleware to materialize a Request object.
 """
 
 from __future__ import annotations
 
 import hmac
+import json
 from typing import TYPE_CHECKING
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
 
 from .oauth import jwt as jwt_mod
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Iterable
 
-    from starlette.requests import Request
-    from starlette.responses import Response
-    from starlette.types import ASGIApp
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
     from ..settings import Settings
 
 
 _BEARER_PREFIX = "Bearer "
+_AUTHORIZATION = b"authorization"
+SCOPE_IDENTITY_KEY = "afair_rate_limit_identity"
+"""Scope key the auth middleware sets after a successful auth so the
+rate-limit middleware can bucket on identity rather than token bytes."""
 
 
 def _www_authenticate_header(settings: Settings) -> str:
@@ -51,7 +57,38 @@ def _www_authenticate_header(settings: Settings) -> str:
     )
 
 
-class BearerOrJwtMiddleware(BaseHTTPMiddleware):
+def _header_value(headers: list[tuple[bytes, bytes]], name_lower: bytes) -> str | None:
+    for k, v in headers:
+        if k.lower() == name_lower:
+            try:
+                return v.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+async def _send_unauthorized(send: Send, *, settings: Settings, detail: str) -> None:
+    payload = json.dumps({"error": "unauthorized", "detail": detail}, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(payload)).encode("ascii")),
+                (
+                    b"www-authenticate",
+                    _www_authenticate_header(settings).encode("latin-1"),
+                ),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": payload, "more_body": False})
+
+
+class BearerOrJwtMiddleware:
     """ASGI middleware enforcing bearer-token OR JWT auth on /mcp.
 
     Auth modes accepted at the same endpoint:
@@ -74,44 +111,53 @@ class BearerOrJwtMiddleware(BaseHTTPMiddleware):
         exempt_paths: Iterable[str] = (),
         exempt_prefixes: Iterable[str] = (),
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self._settings = settings
         self._token = static_token
-        self._exempt = frozenset(exempt_paths)
-        self._exempt_prefixes = tuple(exempt_prefixes)
+        # Normalize exempt-path lookups once. The set uses the original
+        # value AND a trailing-slash-stripped variant so both spellings
+        # match without per-request string ops.
+        self._exempt: frozenset[str] = frozenset(p for p in exempt_paths) | frozenset(
+            p.rstrip("/") for p in exempt_paths
+        )
+        self._exempt_prefixes: tuple[str, ...] = tuple(exempt_prefixes)
         self._allowlist = settings.allowlist
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        path = request.url.path
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        # Exempt paths bypass auth entirely (health, /.well-known/*, /oauth/*)
-        if path in self._exempt or path.rstrip("/") in {p.rstrip("/") for p in self._exempt}:
-            return await call_next(request)
+        path = scope.get("path", "")
+
+        # Exempt paths bypass auth entirely (health, /.well-known/*, /oauth/*).
+        if path in self._exempt or path.rstrip("/") in self._exempt:
+            await self.app(scope, receive, send)
+            return
         if any(path.startswith(p) for p in self._exempt_prefixes):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         # No static token AND no JWT secret → pure dev mode (loopback only).
         if self._token is None and self._settings.jwt_secret is None:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        auth_header = request.headers.get("authorization", "")
+        auth_header = _header_value(scope["headers"], _AUTHORIZATION) or ""
         if not auth_header.startswith(_BEARER_PREFIX):
-            return _unauthorized(self._settings, "missing Bearer credential")
+            await _send_unauthorized(
+                send, settings=self._settings, detail="missing Bearer credential"
+            )
+            return
 
         provided = auth_header[len(_BEARER_PREFIX) :].strip()
 
         # Try static bearer first (cheap constant-time compare).
         if self._token is not None and hmac.compare_digest(provided, self._token):
             # All static-bearer traffic shares a single rate-limit bucket.
-            # Hashing the bytes works too but a stable label keeps logs
-            # readable and means rotating the token doesn't create a new
-            # bucket with a fresh burst window.
-            request.state.rate_limit_identity = "static-bearer"
-            return await call_next(request)
+            scope[SCOPE_IDENTITY_KEY] = "static-bearer"
+            await self.app(scope, receive, send)
+            return
 
         # Try JWT.
         if self._settings.jwt_secret is not None:
@@ -123,26 +169,21 @@ class BearerOrJwtMiddleware(BaseHTTPMiddleware):
                 # Enforce allowlist at the auth layer too (defense in depth
                 # — the OAuth /authorize callback also enforces it).
                 if self._allowlist and claims.sub.lower() not in self._allowlist:
-                    return _unauthorized(
-                        self._settings,
-                        f"identity '{claims.sub}' is not on the allowlist",
+                    await _send_unauthorized(
+                        send,
+                        settings=self._settings,
+                        detail=f"identity '{claims.sub}' is not on the allowlist",
                     )
+                    return
                 # Key rate-limit buckets by the verified JWT subject — NOT
                 # by the raw token bytes — so a flood of fresh JWT mints
                 # for the same identity still lands in one bucket
                 # (Sec audit I2).
-                request.state.rate_limit_identity = f"jwt:{claims.sub.lower()}"
-                return await call_next(request)
+                scope[SCOPE_IDENTITY_KEY] = f"jwt:{claims.sub.lower()}"
+                await self.app(scope, receive, send)
+                return
 
-        return _unauthorized(self._settings, "invalid token")
-
-
-def _unauthorized(settings: Settings, detail: str) -> JSONResponse:
-    return JSONResponse(
-        {"error": "unauthorized", "detail": detail},
-        status_code=401,
-        headers={"WWW-Authenticate": _www_authenticate_header(settings)},
-    )
+        await _send_unauthorized(send, settings=self._settings, detail="invalid token")
 
 
 # Backwards-compatible alias for the older single-mode middleware name.
