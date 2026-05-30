@@ -232,3 +232,57 @@ def test_dcr_rate_limit_is_per_ip(tmp_path: Path) -> None:
             headers={"Fly-Client-IP": "203.0.113.2"},
         )
         assert r.status_code == 201
+
+
+# ── /oauth/revoke rate limit (Sec audit M2) ────────────────────────────────
+
+
+def test_revoke_rate_limit_per_ip(tmp_path: Path) -> None:
+    """Unauthenticated revoke needs DoS protection — burst beyond the cap
+    returns 429 with Retry-After."""
+    with _client(tmp_path) as client:
+        for _ in range(10):
+            r = client.post(
+                "/oauth/revoke",
+                data={"token": "anything-nonsense"},
+                headers={"Fly-Client-IP": "203.0.113.7"},
+            )
+            assert r.status_code == 200
+        denied = client.post(
+            "/oauth/revoke",
+            data={"token": "anything-nonsense"},
+            headers={"Fly-Client-IP": "203.0.113.7"},
+        )
+        assert denied.status_code == 429
+        assert denied.headers.get("Retry-After")
+
+
+def test_revoke_and_register_buckets_are_separate(tmp_path: Path) -> None:
+    """register and revoke use distinct identity prefixes — burning one
+    doesn't leak into the other."""
+    with _client(tmp_path) as client:
+        # Burn the revoke bucket for IP X.
+        for _ in range(10):
+            client.post(
+                "/oauth/revoke",
+                data={"token": "t"},
+                headers={"Fly-Client-IP": "203.0.113.8"},
+            )
+        # The 11th revoke should be 429.
+        assert (
+            client.post(
+                "/oauth/revoke",
+                data={"token": "t"},
+                headers={"Fly-Client-IP": "203.0.113.8"},
+            ).status_code
+            == 429
+        )
+        # Same IP can still register — separate bucket prefix.
+        assert (
+            client.post(
+                "/oauth/register",
+                json={"redirect_uris": ["https://example.com/cb"]},
+                headers={"Fly-Client-IP": "203.0.113.8"},
+            ).status_code
+            == 201
+        )

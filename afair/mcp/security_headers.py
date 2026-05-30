@@ -37,11 +37,30 @@ _SECURITY_HEADERS: dict[str, str] = {
     # Referrer — leak the origin only on same-origin nav, never any path.
     "Referrer-Policy": "strict-origin-when-cross-origin",
     # Permissions — deny everything by default. We're an API + a static
-    # landing page; we need none of these.
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    # landing page; we need none of these. Modern features (browsing-
+    # topics, FLEDGE / Protected-Audience, attribution-reporting, FedCM,
+    # private-state-tokens) all denied so a future browser surface
+    # can't accidentally opt in via a third-party include (Sec audit M5).
+    "Permissions-Policy": (
+        "camera=(), microphone=(), geolocation=(), "
+        "interest-cohort=(), browsing-topics=(), "
+        "join-ad-interest-group=(), run-ad-auction=(), "
+        "attribution-reporting=(), identity-credentials-get=(), "
+        "private-state-token-issuance=(), private-state-token-redemption=(), "
+        "fullscreen=(), payment=(), autoplay=(), encrypted-media=(), "
+        "usb=(), serial=(), bluetooth=(), hid=(), midi=()"
+    ),
     # Discourage server fingerprinting; Fly's proxy still surfaces its own
     # 'server' header so this is partial cover.
     "X-Robots-Tag": "noindex",
+    # Content-Security-Policy — the backend serves JSON for everything
+    # except the GET / pointer; no scripts, no styles, no images load.
+    # default-src 'none' rejects every fetch type; frame-ancestors 'none'
+    # is the modern X-Frame-Options. Belt-and-suspenders for the day a
+    # future HTML endpoint lands here by accident (Sec audit M4).
+    "Content-Security-Policy": (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    ),
 }
 
 
