@@ -43,11 +43,27 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ── Stage 3: runtime ────────────────────────────────────────────────────────────
 FROM python:3.12-slim-bookworm AS runtime
 
+# Litestream version — pin precisely so binary equivalence across builds.
+ARG LITESTREAM_VERSION=0.3.13
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         libsqlite3-0 \
         tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Install Litestream — continuous WAL replication to S3-compatible store.
+# Pulls the official .deb release from GitHub, verifies it via curl --fail,
+# installs it, then drops the curl dependency to keep the image lean.
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fSL --retry 3 -o /tmp/litestream.deb \
+        "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-${ARCH}.deb" \
+    && dpkg -i /tmp/litestream.deb \
+    && rm /tmp/litestream.deb \
+    && apt-get purge -y curl \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -55,6 +71,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/afair /app/afair
 COPY --from=builder /app/scripts /app/scripts
+COPY litestream.yml /app/litestream.yml
 
 # Persistent vault dir — on Fly this path is overlaid by the mounted volume.
 RUN mkdir -p /data/vault
@@ -76,4 +93,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "afair"]
+CMD ["/app/scripts/start.sh"]

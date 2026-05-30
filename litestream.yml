@@ -1,0 +1,31 @@
+# Litestream — continuous WAL replication of the substrate SQLite to R2.
+#
+# Replicates the events database to a Cloudflare R2 bucket (S3-compatible).
+# RPO target: < 5 seconds. RTO: minutes (download + replay WAL chunks).
+#
+# Credentials come from environment variables — see scripts/start.sh for
+# the bootstrap that runs this config alongside the Python process.
+#
+# Per-user-machine note: each managed user gets their own Litestream
+# instance pointing at their own bucket path (R2_BUCKET_PATH prefix).
+# Self-hosted users may swap to a local replica (file:// type) or skip
+# replication entirely by leaving R2_ACCESS_KEY_ID unset.
+
+dbs:
+  - path: /data/vault/substrate.db
+    replicas:
+      - name: r2
+        type: s3
+        endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+        bucket: ${R2_BUCKET}
+        # Prefix path inside the bucket — keeps per-user-machine state
+        # isolated when one bucket eventually holds many users.
+        path: ${R2_BUCKET_PATH}
+        access-key-id: ${R2_ACCESS_KEY_ID}
+        secret-access-key: ${R2_SECRET_ACCESS_KEY}
+        region: auto
+        # WAL stream + snapshots
+        retention: 720h            # 30 days of WAL history
+        snapshot-interval: 1h      # full snapshot every hour
+        retention-check-interval: 1h
+        sync-interval: 1s          # push WAL frames roughly every second
