@@ -163,11 +163,12 @@ def build_server(settings: Settings) -> FastMCP:
             db = connect_for_thread()
             db.execute("SELECT 1").fetchone()
         except Exception as e:
-            # Log internally with full detail; expose only a generic flag.
-            # The orchestrator (Fly) acts on the HTTP status, not the body —
-            # so leaking str(e) to anyone-on-the-internet buys nothing and
-            # could surface internal paths or library quirks.
-            log.warning("health.degraded", error=str(e), exc_type=type(e).__name__)
+            # Log only the exception class — str(e) often includes the
+            # vault file path (e.g. "unable to open /data/vault/afair.db")
+            # and we don't want that on log aggregators or in any
+            # shared-dashboard pivot path. The orchestrator acts on the
+            # 503 status, not the body (Sec audit I6).
+            log.warning("health.degraded", exc_type=type(e).__name__)
             return JSONResponse(
                 {"status": "degraded"},
                 status_code=503,

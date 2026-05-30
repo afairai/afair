@@ -563,8 +563,26 @@ async def _grant_refresh_token(settings: Settings, form: object) -> Response:
 
 
 async def oauth_revoke(request: Request) -> Response:
-    """RFC 7009. Always returns 200 regardless of token validity."""
+    """RFC 7009. Always returns 200 regardless of token validity.
+
+    Per RFC 7009 the credential to revoke a token IS the token itself,
+    so the endpoint is unauthenticated by spec. We add a per-IP rate
+    limit (Sec audit M2) so an attacker can't use this surface as a
+    cheap DoS vector — every request still costs a hash lookup and a
+    DB write against the refresh-token table.
+    """
     settings: Settings = request.app.state.settings
+
+    ip = _client_ip(request)
+    allowed, retry_after = _DCR_RATE_LIMITER.check(f"revoke:{ip}")
+    if not allowed:
+        retry_seconds = max(1, int(retry_after) + 1)
+        return JSONResponse(
+            {"error": "rate_limited"},
+            status_code=429,
+            headers={"Retry-After": str(retry_seconds)},
+        )
+
     form = await request.form()
     token = _form_str(form, "token")
     if token:
