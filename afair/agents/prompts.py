@@ -167,12 +167,18 @@ Guidance:
 """
 
 
-def build_user_message(event: Event) -> str:
+def build_user_message(event: Event, *, extracted_text: str | None = None) -> str:
     """Compose the per-event user message handed to the LLM.
 
     For over-large payloads (long markdown, large pasted text, big code
     blobs), truncates the ``text`` field with an explicit elision marker
     so the LLM sees the shape (start + end) without burning context.
+
+    ``extracted_text`` is the result of a pre-LLM binary extraction
+    (PDF body via pypdf, audio transcript via whisper). It's injected as
+    the ``text`` field so the LLM treats it as normal content even though
+    the originating event was a binary blob. The blob's metadata
+    (filename, mime, size) is retained alongside so the LLM has provenance.
     """
     payload = event.payload
     content_type = payload.get("content_type", "unknown")
@@ -200,10 +206,15 @@ def build_user_message(event: Event) -> str:
         if value is not None:
             visible[key] = value
 
-    # For binary or oversize text, we surface only metadata — the model
-    # doesn't see the raw bytes. A future multimodal extractor may fetch
-    # the blob and use a vision-capable model.
-    if content_type in {"binary", "text-large"}:
+    if extracted_text:
+        # Surface the binary-extracted body as the dominant text field.
+        # Truncation below applies uniformly to inline text + extracted
+        # text — the LLM sees one consistent shape.
+        visible["text"] = extracted_text
+        visible["source_modality"] = "binary-extracted"
+    elif content_type in {"binary", "text-large"}:
+        # No pre-LLM extraction (image vision path takes a different
+        # route): the LLM sees only metadata.
         visible["note"] = (
             "Content is in the object store; only metadata is shown here. "
             "Extract from filename, mime, and context."

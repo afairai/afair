@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     # Format: "<provider>/<model>" — any litellm-supported model.
     extractor_model: str = "anthropic/claude-haiku-4-5"
 
+    # Vision model for image extraction — must be vision-capable.
+    # Defaults to Haiku 4.5 (cheap, fast, has vision); upgrade to a
+    # Sonnet tier when image understanding requirements grow.
+    vision_model: str = "anthropic/claude-haiku-4-5"
+
+    # Audio transcription model. litellm shape: ``openai/whisper-1``,
+    # ``deepgram/nova-3``, ``groq/whisper-large-v3``. Vendor-neutral
+    # via the model string.
+    transcription_model: str = "openai/whisper-1"
+
     # Provider keys — set whichever your selected model needs. Adding a
     # provider here + a model-prefix branch in handlers._api_key_for_embedding
     # is the only code change to switch embedding/LLM vendors (I5).
