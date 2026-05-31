@@ -30,7 +30,9 @@ from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
 from ..agents.embedding import embed_text
 from ..agents.entity_canonicalizer import EntityCanonicalizer
+from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
+from ..agents.salience import SalienceWorker
 from ..substrate import start_checkpoint_loop
 from . import descriptions, handlers, landing, schemas
 from .auth import BearerTokenMiddleware
@@ -95,6 +97,8 @@ def build_server(settings: Settings) -> FastMCP:
                 ConflictResolver(),
                 Consolidator(),
                 EntityCanonicalizer(),
+                SalienceWorker(),
+                ModeSwitcher(),
             ],
         ).start()
 
