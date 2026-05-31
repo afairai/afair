@@ -156,6 +156,26 @@ class Settings(BaseSettings):
     # instance. Comma-separated GitHub usernames (case-insensitive).
     identity_allowlist: str = ""
 
+    # ── Vault encryption (Stufe 1)
+    # Per-vault encryption key. When set, the SQLite database is opened
+    # via SQLCipher (whole-file AES-256), and filesystem blobs are
+    # written via AES-256-GCM (per-blob random nonce in the file header).
+    # When unset, the substrate runs in plaintext mode — fine for local
+    # dev, REQUIRED to be set in production (validated below).
+    #
+    # Generation: ``python -c 'import secrets; print(secrets.token_urlsafe(32))'``
+    # gives a 32-byte random key suitable for both SQLCipher key derivation
+    # and AES-256-GCM. Once a vault has been written with a key, losing
+    # the key means losing the data — there is no recovery path.
+    vault_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "vault_key",
+            "AFAIR_VAULT_KEY",
+            "afair_vault_key",
+        ),
+    )
+
     # ── Embeddings (Phase 1 — semantic recall via sqlite-vec)
     # Default: OpenAI text-embedding-3-small. We already have OPENAI_API_KEY,
     # 1536 dimensions, ~$0.02 per 1M tokens. Pluggable via litellm's standard
@@ -221,6 +241,32 @@ class Settings(BaseSettings):
                 "AFAIR_AUTH_TOKEN must be set when ENVIRONMENT=fly. "
                 "Generate one with: python -c "
                 "'import secrets; print(secrets.token_urlsafe(32))'"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _vault_key_required_in_prod(self) -> Settings:
+        """Fail boot if production environment lacks a vault encryption key.
+
+        Without a vault key, the substrate runs in plaintext mode. That is
+        fine for local dev but unacceptable for production: a stolen
+        volume snapshot, an exfiltrated SQLite file, or a curious
+        operator could read the data with zero effort. The encryption
+        layer is what makes those scenarios non-events.
+
+        The key is one-shot per vault: once data has been written under
+        a given key, that key is the only way to read it. Losing it
+        means losing the data. The .env.secrets.backup convention is
+        the canonical recovery path; see docs/operations.md.
+        """
+        if self.environment == "fly" and self.vault_key is None:
+            msg = (
+                "AFAIR_VAULT_KEY must be set when ENVIRONMENT=fly. "
+                "Generate one with: python -c "
+                "'import secrets; print(secrets.token_urlsafe(32))'. "
+                "Persist in Fly secret + .env.secrets.backup. "
+                "Losing it = losing the vault."
             )
             raise ValueError(msg)
         return self
