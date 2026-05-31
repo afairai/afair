@@ -98,7 +98,7 @@ def _encrypt_sqlite(db_path: Path, hex_key: str, *, dry_run: bool) -> bool:
         # Order matters: target file must be opened by SQLCipher first
         # (with the key) so it's correctly cipher-initialized.
         target = sqlcipher3.connect(str(tmp_path))
-        target.execute(f'PRAGMA key = "x\'{hex_key}\'"')
+        target.execute(f"PRAGMA key = \"x'{hex_key}'\"")
         # A trivial statement forces SQLCipher to write the header.
         target.execute("CREATE TABLE _seed (x INT)")
         target.execute("DROP TABLE _seed")
@@ -108,9 +108,7 @@ def _encrypt_sqlite(db_path: Path, hex_key: str, *, dry_run: bool) -> bool:
         # Now from the plaintext source, attach the encrypted target +
         # invoke sqlcipher_export to copy the entire schema + data.
         src.enable_load_extension(False)  # safety: don't load any ext here
-        src.execute(
-            f'ATTACH DATABASE \'{tmp_path}\' AS encrypted KEY "x\'{hex_key}\'"'
-        )
+        src.execute(f"ATTACH DATABASE '{tmp_path}' AS encrypted KEY \"x'{hex_key}'\"")
         src.execute("SELECT sqlcipher_export('encrypted')")
         src.execute("DETACH DATABASE encrypted")
     finally:
@@ -181,8 +179,7 @@ def main() -> int:
             print(f"[backup] copying vault to {backup_path}")
             shutil.copytree(settings.vault_dir, backup_path)
     elif args.dry_run:
-        print(f"[dry-run] would back up vault to "
-              f"{settings.vault_dir.with_suffix('.pre-encrypt')}")
+        print(f"[dry-run] would back up vault to {settings.vault_dir.with_suffix('.pre-encrypt')}")
     else:
         print("[skip-backup] --skip-backup was set; no rollback path")
 
