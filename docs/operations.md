@@ -335,6 +335,27 @@ To rotate any of these:
 5. If it's a CI token, update GH secret too: `gh secret set FLY_API_TOKEN`
 6. Revoke the old value at the provider
 
+### Known gap: prod secrets not captured locally
+
+`AFAIR_AUTH_TOKEN`, `AFAIR_JWT_SECRET`, and `AFAIR_SIGNUP_TOKEN` are
+set in Fly (verified via `fly secrets list -a afair`) but their
+plaintext values aren't in `.env.secrets.backup` yet — Fly only
+stores digests after the initial set, so the values can't be read
+back from the platform.
+
+This violates the global secrets-backup convention. The fix is a
+one-time coordinated rotation:
+
+```bash
+NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+fly secrets set AFAIR_AUTH_TOKEN="$NEW" -a afair
+echo "AFAIR_AUTH_TOKEN=$NEW" >> .env.secrets.backup  # plus annotations
+```
+
+`AFAIR_SIGNUP_TOKEN` rotation must be paired with
+`gh secret set AFAIR_SIGNUP_TOKEN -R gowry/afair-web --body <new>`
+so the landing-page form keeps working.
+
 ### Production boot requires these to be set
 
 The `environment=fly` model validator refuses to start without:
