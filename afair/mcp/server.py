@@ -116,7 +116,7 @@ def build_server(settings: Settings) -> FastMCP:
     # so the first real recall isn't penalized.
     _spawn_warmup(settings)
 
-    mcp: FastMCP = FastMCP("afair")
+    mcp: FastMCP = FastMCP("afair", instructions=descriptions.SERVER_INSTRUCTIONS)
 
     # ── tools — descriptions are AI-facing prompts, see descriptions.py ─────
 
