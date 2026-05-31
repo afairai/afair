@@ -566,25 +566,73 @@ EOF
 
 ### 14.2 First-time migration of an existing plaintext vault
 
-If the vault was already populated before the encryption layer landed,
-run the migration script to re-encrypt in place. The script is
-idempotent (skips already-encrypted state) and safe to interrupt.
+The migration runs **inside the live machine** (where the production
+volume is mounted), NOT via Fly's `release_command`. Release-command
+machines are ephemeral and don't mount the app volume, so a
+migration there silently finds an empty `/data/vault` and reports
+"nothing to do" while the real DB stays plaintext.
+
+Correct sequence (operator runs by hand, once per vault):
 
 ```bash
-# On the Fly machine (or wherever the vault lives).
-fly ssh console -a afair -C "AFAIR_VAULT_KEY=<value> python scripts/encrypt_existing_vault.py --dry-run"
-# Review the report (how many blobs, sqlite state), then drop --dry-run:
-fly ssh console -a afair -C "AFAIR_VAULT_KEY=<value> python scripts/encrypt_existing_vault.py"
+# 1. Generate + persist the master key (see 14.1).
+# 2. Take a fresh Fly volume snapshot for rollback:
+fly volumes snapshots create <volume-id> -a afair
+
+# 3. Stage the secret BEFORE pushing the encryption-layer code:
+fly secrets set --stage AFAIR_VAULT_KEY=<value> -a afair
+git push   # triggers deploy
+
+# 4. The new app boots, tries to open the still-plaintext file via
+#    SQLCipher, fails with "HMAC check failed" + /health → 503.
+#    This is expected — the migration hasn't run yet.
+
+# 5. SSH in and run the migration on the production volume:
+fly ssh console -a afair -C \
+  "/usr/bin/env python /app/scripts/encrypt_existing_vault.py --skip-backup"
+
+# 6. Restart the machine so the running process re-opens the now-
+#    encrypted DB:
+fly machine restart <machine-id> -a afair
+
+# 7. Verify:
+curl -sS https://mcp.afair.ai/health   # expect {"status":"ok"}
 ```
 
-The script writes `<vault_dir>.pre-encrypt/` as a backup BEFORE
-touching anything (skip with `--skip-backup` if you're confident +
-already have a Fly snapshot). After a green smoke (`/api/health` 200,
-`recall(stats=True)` returns expected counts), remove the backup:
+`--skip-backup` is appropriate because step 2 already took a Fly
+snapshot — duplicating the vault inside the same 1 GB volume just
+spikes disk usage without adding a recovery path the snapshot
+doesn't already cover.
 
-```bash
-fly ssh console -a afair -C "rm -rf /data/vault.pre-encrypt"
-```
+The script is **idempotent**: subsequent runs on an already-encrypted
+vault detect that state via the SQLite-magic-header probe and return
+"nothing to do".
+
+#### Why not release_command — the failure modes we hit
+
+Earlier we wired
+`release_command = "python scripts/encrypt_existing_vault.py --skip-backup"`
+into `fly.toml`. Two failure modes appeared:
+
+1. **Release-command machines run without the production volume.**
+   The migration saw an empty `/data/vault`, reported "nothing to
+   do", and exited 0. The new image deployed. Then the live machine,
+   with `AFAIR_VAULT_KEY` set and the still-plaintext substrate.db,
+   failed to open the DB via SQLCipher with "HMAC check failed".
+2. **Stdlib-sqlite-on-the-source side bug.** The original migration
+   script opened the plaintext source via `import sqlite3` (stdlib).
+   Stdlib has no `sqlcipher_export` function, and its
+   `ATTACH ... KEY` clause is silently ignored. The script crashed
+   with "file is not a database" on the ATTACH step. The fixed
+   version uses `sqlcipher3` for BOTH source and target — sqlcipher3
+   bundles upstream-compatible SQLite, so opening a plaintext file
+   without setting PRAGMA key works as normal SQLite, then
+   `sqlcipher_export` to the ATTACHed keyed target is what does the
+   in-place encryption.
+
+Both fixed in `scripts/encrypt_existing_vault.py`. The release_command
+stanza was removed because issue #1 is structural — no script change
+makes an ephemeral release machine see the production volume.
 
 ### 14.3 What happens if AFAIR_VAULT_KEY is lost
 

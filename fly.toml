@@ -33,17 +33,19 @@ primary_region = "fra"  # EU residency by default; change deliberately if needed
   strategy = "immediate"
   wait_timeout = "5m"
 
-  # release_command runs ONCE per deploy, in the new image, BEFORE the
-  # main app process starts. Used here to auto-migrate an existing
-  # plaintext vault to the encrypted-at-rest layout (Stufe 1) on the
-  # first deploy after AFAIR_VAULT_KEY is set. Idempotent: once the
-  # vault is encrypted the script detects that on subsequent runs and
-  # exits without touching anything.
+  # NOTE: there is intentionally no release_command for the vault
+  # encryption migration. Fly's release_command runs in an ephemeral
+  # machine that does NOT mount the production volume, so a migration
+  # script there can't touch /data/vault. The migration is a one-off
+  # operator action documented in docs/operations.md §14:
   #
-  # --skip-backup: we rely on Fly volume snapshots (hourly cron, 14d
-  # retention) for the rollback path — no need for the script to
-  # duplicate the vault inside the volume.
-  release_command = "python scripts/encrypt_existing_vault.py --skip-backup"
+  #   fly ssh console -a afair -C \
+  #     "python /app/scripts/encrypt_existing_vault.py --skip-backup"
+  #   fly machine restart <id> -a afair
+  #
+  # The script is idempotent and exits early if the vault is already
+  # encrypted, so re-running on subsequent deploys is harmless but
+  # also unnecessary.
 
 [http_service]
   internal_port = 8080
