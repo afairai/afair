@@ -226,9 +226,7 @@ def test_sqlite_vec_loads_with_sqlcipher(tmp_path: Path):
         ("sha256:" + "0" * 64,),
     ).fetchone()
     assert row is not None
-    assert struct.unpack("<4f", row["embedding"]) == pytest.approx(
-        (0.1, 0.2, 0.3, 0.4)
-    )
+    assert struct.unpack("<4f", row["embedding"]) == pytest.approx((0.1, 0.2, 0.3, 0.4))
     db.close()
 
 
