@@ -34,6 +34,7 @@ from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.salience import SalienceWorker
 from ..substrate import start_checkpoint_loop
+from ..substrate.db import set_vault_key
 from . import descriptions, handlers, landing, resources, schemas
 from .auth import BearerTokenMiddleware
 from .blob_upload_route import blob_upload_endpoint
@@ -65,6 +66,13 @@ def build_server(settings: Settings) -> FastMCP:
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
+    # Install the vault encryption key first, before ANY open_db call
+    # (set_context below itself does not open a connection, but the
+    # warmup thread and cold-path scheduler will). Production refuses
+    # to start without one — see settings._vault_key_required_in_prod.
+    if settings.vault_key is not None:
+        set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
+
     set_context(
         ServerContext(
             vault_dir=settings.vault_dir,

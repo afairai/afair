@@ -29,7 +29,7 @@ import argparse
 import json
 import struct
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 
@@ -38,13 +38,22 @@ from .agents.embedding import EmbeddingError, embed_text, serialize_vector
 from .agents.extractor import _embedding_text_for_event, extract_sync
 from .agents.interpretation import read_latest_interpretation
 from .mcp.context import ServerContext, clear_context, set_context
-from .settings import load_settings
+from .settings import Settings, load_settings
 from .substrate import iter_events, open_db
-
-if TYPE_CHECKING:
-    from .settings import Settings
+from .substrate.db import set_vault_key
 
 log = structlog.get_logger(__name__)
+
+
+def _install_vault_key(settings: Settings) -> None:
+    """Install the substrate's encryption key from settings, if set.
+
+    Every admin command that opens the substrate goes through this so a
+    forgotten ``set_vault_key`` call doesn't cause "file is not a
+    database" deep in a backfill. Idempotent.
+    """
+    if settings.vault_key is not None:
+        set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
 
 
 def _api_key_for_embeddings(settings: Settings) -> str | None:
@@ -67,6 +76,7 @@ def backfill_vectors_and_links(*, dry_run: bool = False) -> dict[str, int]:
              nearest-neighbor queries are productive).
     """
     settings = load_settings()
+    _install_vault_key(settings)
     db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
     api_key = _api_key_for_embeddings(settings)
 
@@ -166,6 +176,7 @@ def reprocess_failed_extractions(*, dry_run: bool = False) -> dict[str, int]:
     is designed to support.
     """
     settings = load_settings()
+    _install_vault_key(settings)
     db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
 
     # Reprocess needs to call extract_sync, which reads context. Set up a
@@ -282,6 +293,7 @@ def switch_embedding_model(
     the old model and break the index.
     """
     settings = load_settings()
+    _install_vault_key(settings)
     db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
 
     # Pick the right API key for the NEW model — switching providers
