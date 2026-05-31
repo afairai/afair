@@ -103,8 +103,10 @@ def open_db(
 
     db_path = vault_dir / "substrate.db"
 
+    # _open_connection installs the right row_factory for the
+    # underlying module (stdlib sqlite3.Row rejects sqlcipher3 cursors
+    # and vice-versa, so it must match the connection's origin).
     conn = _open_connection(db_path, vault_key=effective_key)
-    conn.row_factory = _stdlib_sqlite.Row
 
     # Pragmas — durability + concurrency + performance.
     #
@@ -192,15 +194,22 @@ def _open_connection(
             "_stdlib_sqlite.Connection",
             sqlcipher3.connect(str(db_path), check_same_thread=False),
         )
+        # sqlcipher3 has its own Row class — using stdlib sqlite3.Row
+        # here would raise TypeError("Row() argument 1 must be
+        # sqlite3.Cursor, not sqlcipher3.dbapi2.Cursor") on the first
+        # fetch. Set the matching factory before any row is read.
+        conn.row_factory = sqlcipher3.Row
         # Raw-hex key, see docstring above.
         hex_key = derive_sqlcipher_key(vault_key)
         conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
         # Reading sqlite_version (or any other table) verifies the key
         # is correct — wrong key gives "file is not a database" here.
         # Fail loud at boot rather than silently 100 queries deep.
+        # Catch BOTH error classes: stdlib sqlite3.DatabaseError and
+        # sqlcipher3's parallel DatabaseError (they don't share a base).
         try:
             cast("Any", conn).execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except _stdlib_sqlite.DatabaseError as exc:
+        except (_stdlib_sqlite.DatabaseError, sqlcipher3.DatabaseError) as exc:
             msg = (
                 "SQLCipher failed to open the database with the provided "
                 "AFAIR_VAULT_KEY. Either the key is wrong, the file is "
@@ -210,7 +219,9 @@ def _open_connection(
             raise RuntimeError(msg) from exc
         return conn
 
-    return _stdlib_sqlite.connect(str(db_path), check_same_thread=False)
+    plain_conn = _stdlib_sqlite.connect(str(db_path), check_same_thread=False)
+    plain_conn.row_factory = _stdlib_sqlite.Row
+    return plain_conn
 
 
 def init_db(
