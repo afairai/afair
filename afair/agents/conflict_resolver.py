@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
+from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_hash
 from .binder import BINDER_PRODUCED_BY
 from .cold_path import ColdPathWorker
@@ -246,6 +247,18 @@ class ConflictResolver(ColdPathWorker):
             stats[verdict.verdict] = stats.get(verdict.verdict, 0) + 1
             _write_verdict(conn, event_a=event_a, pair=verdict)
 
+        pe.record(
+            conn,
+            event_id="-",
+            stage="conflict_resolver.cycle",
+            producer="conflict_resolver:v0",
+            detail=(
+                f"pairs={stats.get('pairs_examined', 0)} "
+                f"contradicts={stats.get('contradicts', 0)} "
+                f"compatible={stats.get('compatible', 0)} "
+                f"llm_errors={stats.get('llm_errors', 0)}"
+            ),
+        )
         return stats
 
 
