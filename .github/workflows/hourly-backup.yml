@@ -48,4 +48,10 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          flyctl volumes snapshots list "$VAULT_VOLUME_ID" -a "$VAULT_APP" | head -10
+          # Capture first then truncate. `flyctl ... | head -10` under
+          # ``pipefail`` exits 141 (SIGPIPE) because ``head`` closes the
+          # pipe before flyctl finishes streaming, and pipefail propagates
+          # the upstream signal. Splitting the pipeline keeps flyctl's
+          # exit semantics clean.
+          output=$(flyctl volumes snapshots list "$VAULT_VOLUME_ID" -a "$VAULT_APP")
+          printf '%s\n' "$output" | head -n 10
