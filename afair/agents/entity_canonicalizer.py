@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
+from ..substrate import pipeline_events as pe
 from ..substrate.entities import (
     Entity,
     find_edges_for_source_event,
@@ -299,6 +300,22 @@ class EntityCanonicalizer(ColdPathWorker):
                 },
             )
 
+        # Per-cycle pipeline marker. Tracking each canonicalized event
+        # individually would flood the table; the summary tells the
+        # ExpectationChecker "the worker ran at T and processed N
+        # events" which is what answers "did this fire?" queries.
+        pe.record(
+            conn,
+            event_id="-",  # cycle-level event, not per-row
+            stage="canonicalizer.cycle",
+            producer="entity_canonicalizer:v0",
+            detail=(
+                f"events={stats['events_canonicalized']} "
+                f"entities_created={stats['entities_created']} "
+                f"edges_created={stats['edges_created']} "
+                f"llm_calls={stats['llm_calls']}"
+            ),
+        )
         return stats
 
 

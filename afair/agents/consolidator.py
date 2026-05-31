@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
+from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from .cold_path import ColdPathWorker
 from .llm import LLMError, call_tool
@@ -199,6 +200,18 @@ class Consolidator(ColdPathWorker):
                 theme_count=len(summary.themes),
             )
 
+        pe.record(
+            conn,
+            event_id="-",
+            stage="consolidator.cycle",
+            producer="consolidator:v0",
+            detail=(
+                f"checked={stats['days_checked']} "
+                f"consolidated={stats['days_consolidated']} "
+                f"already_done={stats['days_skipped_already_done']} "
+                f"too_few_events={stats['days_skipped_few_events']}"
+            ),
+        )
         return stats
 
 
