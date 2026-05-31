@@ -37,7 +37,20 @@
   `interpretation.surprise_score ∈ [0,1]` based on entity-novelty against
   the recent context window (last N events, default 20, configurable via
   `SURPRISE_CONTEXT_WINDOW`). Plus `surprise_components` audit dict.
-  Mode-switching agent (Phase 2 dependency) still deferred.
+- **Phase 2 Salience worker** (`afair/agents/salience.py`) — every 5 min
+  scores unscored remember/observe events for salience ∈ [0, 1] using
+  cheap substrate signals (entity_density, link_density, has_conflict,
+  type_hint_bump, is_compound, recency). Stored as
+  `interpretations.produced_by = "salience:v0"` with both the final
+  score and per-component breakdown. Pure substrate-derived, no LLM
+  call — scales linearly with event count.
+- **Phase 2 Mode-switching agent** (`afair/agents/mode_switcher.py`)
+  — every 2 min, reads the rolling 20-event salience sum and decides
+  between CEN (focused, deliberate, cumulative ≥ 8.0) and DMN
+  (wandering, integrative, cumulative ≤ 4.0). Two-threshold
+  hysteresis prevents flapping. Transitions write a normal observe
+  event (origin `agent:mode_switcher`) — current mode is recoverable
+  from substrate at any time via `read_current_mode()`.
 - **Fly deployment live at https://afair.fly.dev** (MCP at `https://mcp.afair.ai`)
   — single-tenant machine in `fra`, 1 GB volume `vault` with **14-day
   auto-snapshots** (RPO ~24h, acceptable for Phase 0). Upgrade paths
@@ -124,13 +137,20 @@
 
 - Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
-- Phase 4 Track 2 mode-switching agent (CEN↔DMN routing driven by cumulative surprise + auto-`observe()` on threshold) — depends on Phase 2 Salience agent which doesn't exist yet. v0 surprise-score per hit IS live.
-- **Multi-user provisioning (`scripts/provision_user.py`)** — must exist
-  before the first paying invite. Creates Fly machine + secrets, sets
-  per-user backup strategy (default: inherit daily snapshots; opt-in:
-  hourly cron, LiteFS Cloud namespace). Open architectural question:
-  many-machines-one-app vs one-app-per-user. RPO upgrade paths in
-  `docs/operations.md` §7.
+- **Cumulative-surprise feed into ModeSwitcher** — currently only
+  cumulative-salience drives CEN↔DMN transitions. Recall-side
+  per-hit surprise score is live; need to fold the per-event
+  variant into the mode-switcher's threshold for a true "attention
+  shifted" signal.
+
+### 0.2-resolved (was in flight, now done)
+
+- ~~Phase 2 Salience agent + Phase 4 Track 2 mode-switching agent~~
+  → both live as cold-path workers (see §0.1).
+- ~~Multi-user provisioning script~~ → live at
+  `scripts/provision_user.py`. App-per-user resolved the
+  "many-machines-one-app vs one-app-per-user" question in favor of
+  one-app-per-user (cleanest per I8).
 
 ### 0.3 What's blocked
 
