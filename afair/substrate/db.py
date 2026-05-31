@@ -176,7 +176,10 @@ def _open_connection(
         # when vault_key is None. Production has the dep so this import
         # never raises.
         try:
-            import sqlcipher3  # type: ignore[import-not-found,unused-ignore]
+            # sqlcipher3 has no PyPI stubs. Bare `type: ignore` avoids the
+            # "unused-ignore" complaint that comes from per-platform mypy
+            # divergence (Linux: import-untyped; macOS: import-not-found).
+            import sqlcipher3  # type: ignore
         except ImportError as exc:
             msg = (
                 "vault_key is set but sqlcipher3 is not installed. "
