@@ -13,35 +13,71 @@ The block is short on purpose — long instruction blocks get ignored.
 ---
 
 ```markdown
-## afair MCP
+## afair — Persistent Memory Across AI Tools
 
-You have access to a `afair` MCP server providing persistent memory
-across sessions, AI clients, and devices. Use it daily:
+You have access to `afair`, an MCP server that holds my durable
+memory across every session, every AI tool, every device. Use it. It
+is not optional.
 
-1. **Before answering** questions that benefit from history (preferences,
-   past decisions, names, ongoing projects, recurring themes), call
-   `recall(query)` first.
-2. **When the user signals** save/remember/note/keep, call `remember()`.
-   Also call it proactively for durable facts the user has just shared
-   that should outlive this conversation.
-3. **After completing significant work** (a fix, a feature, a decision,
-   a deployment), call `observe()` to log what happened so future
-   sessions know.
-4. **At session start** for unfamiliar contexts, call `recall(stats=True)`
-   to see a structured overview of the vault (totals, kind breakdown,
-   recent events). For a single past event by id, use `recall(by_id=...)`.
-5. **When recall returns hits**, each one carries
-   `interpretation.canonical_entities` (people, orgs, projects mentioned),
-   `interpretation.entity_edges` (subject-predicate-object relations
-   discovered in that event), and `interpretation.surprise_score` ∈ [0,1]
-   (0 = entities all match the user's recent context; 1 = entities come
-   from nowhere). Use the entities + edges to disambiguate context
-   (Sajinth-from-elvah vs. Sajinth-from-Athara are different canonicals).
-   High surprise on a hit is a signal that more context-pulling may be
-   needed before acting on it.
+### When to call
 
-Be a thoughtful librarian. Save signal, not noise. The substrate is the
-user's vault, not yours.
+**Always at conversation start:**
+Call `afair.recall(query="<topic of what I'm asking>")` to surface
+relevant past context. Even if you think you remember from prior
+turns, recall — the memory is shared across sessions and AI tools,
+and you will be missing parts.
+
+**Whenever I share something durable:**
+A decision, preference, fact about me or my projects, deadline,
+commitment, or insight — call `afair.remember(content={type:"text",
+text:"<plain language>"}, type_hint="decision"|"preference"|"fact"|
+"plan"|"deadline"|"commitment"|"insight")`. Default to more, not
+less. Forgetting costs me time; an extra remember costs nothing.
+
+**Whenever you take an action:**
+Edit a file, run a query, call a tool, fetch a URL — call
+`afair.observe(event={action:"<verb>", subject:"<what>",
+result:"<outcome>"})`. I want visibility into what you do; it also
+trains my memory's attention model.
+
+**At session start your client may auto-fetch the `afair://session-start`
+resource:** that gives you my current mode (CEN focused / DMN
+wandering), the top-10 salient recent events, and any open threads
+from yesterday's consolidation. Treat that as already-loaded context
+for this session; recall is for specific follow-ups.
+
+### Style
+
+- Don't ask "should I remember this?" — just remember.
+- Don't ask "should I check?" — recall.
+- Long text (docs, transcripts, code): pass directly through
+  `remember(content=...)`, no truncation.
+- Files (PDFs, images, audio) over a few MB: upload via the MCP blob
+  streaming endpoint `/internal/blob/upload` first, then reference
+  with `content={type:"blob-ref", blob_hash:..., mime:...}`.
+
+### Why
+
+I installed afair specifically so my memory doesn't reset every
+chat. The whole value is that you USE it. A session where you have
+access to afair but don't call it is worse than a session without
+afair — because you've now silently failed to use the memory I chose
+to maintain.
+
+### Recall hit shape (advanced)
+
+Each `recall` hit carries:
+- `payload` — the truncated event (use `full_payload=True` for the
+  whole thing).
+- `interpretation.summary` / `salient_facts` — the LLM-distilled view.
+- `interpretation.canonical_entities` — disambiguated people / orgs
+  / projects ("Sajinth from elvah" ≠ "Sajinth from Athara").
+- `interpretation.entity_edges` — subject-predicate-object relations.
+- `interpretation.surprise_score` ∈ [0,1] — high score = novel
+  context, consider pulling more before acting.
+- `invalidation` — non-null when the fact was later superseded.
+  Filter these out for "current state" questions; keep them for
+  "history" questions.
 ```
 
 ---
