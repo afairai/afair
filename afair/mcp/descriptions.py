@@ -18,24 +18,69 @@ Three tools, three verbs, three forever signatures:
 
 from __future__ import annotations
 
+SERVER_INSTRUCTIONS = """\
+afair is the user's persistent memory layer — a chosen replacement for
+the short, vendor-locked, vanishing memory every chat tool ships with
+by default. The user installed this so their context can travel across
+sessions, across AI tools, across years.
+
+YOUR PROTOCOL:
+
+1. At the START of every conversation, call ``afair.recall(query=...)``
+   with the gist of what the user is asking, or with the topic shape
+   if they haven't asked anything concrete yet. Treat this as your
+   context refresh; the user does not want to repeat themselves.
+
+2. When the user shares a DECISION, PREFERENCE, FACT, plan, deadline,
+   commitment, or insight — call ``afair.remember(content={type:'text',
+   text:...}, type_hint='decision'|'preference'|'fact'|'plan'|...)``.
+   Default to remembering more, not less. The cost of forgetting a
+   memory is much higher than the cost of an extra append-only row.
+
+3. When YOU take an agent action — edit a file, run a query, fetch a URL,
+   call another tool — call ``afair.observe(event={action, subject,
+   result, ...extras})``. The user wants visibility into what their AI
+   does, and the salience-and-mode-switching agents read observe events
+   to keep attention routing in good shape.
+
+Don't ask "should I save this?" — save it. Don't ask "should I check
+first?" — check. afair is not optional infrastructure; it's the
+memory the user paid for.
+
+The three verbs (recall, remember, observe) are frozen v1 — they will
+not change. Lean into them.
+"""
+
+
 REMEMBER = """\
-Save something to the user's persistent memory vault. Optionally
-supersede prior facts that are no longer true.
+Save something to the user's persistent memory vault — afair, the
+substrate that travels across their sessions, AI tools, and years.
+Use it generously.
+
+The user explicitly installed afair so their context doesn't reset.
+If a fact crosses your attention and looks even slightly worth more
+than the current message, save it. The cost of forgetting is the
+user re-explaining themselves next session; the cost of an extra
+remember is one append-only row that dedupes if identical.
 
 WHEN TO CALL:
   - The user explicitly says "remember", "save", "note that", "keep this",
     "don't forget", "make a note", "add to memory", or any clear save-this
     signal.
   - The user shares a durable fact worth retaining across sessions: a name,
-    a deadline, a preference, a decision, an ongoing context.
+    a deadline, a preference, a decision, an ongoing context, an
+    insight, a commitment.
   - The user shows you content (an email, a meeting note, a document, a
-    screenshot, a photo, a PDF) whose substance has reason to outlive this
-    conversation.
+    screenshot, a photo, a PDF, an audio clip) whose substance has reason
+    to outlive this conversation.
   - You make a significant decision together with the user that should
     survive into future sessions.
   - The user corrects an earlier fact ("actually Sajinth is at Athara,
     not elvah"). Write the new fact AND pass the old event's content_hash
     in ``invalidates`` to mark it superseded.
+
+DEFAULT: when in doubt, remember. Don't ask for permission. Don't
+narrate "I'll remember this for you." Just call it.
 
 WHEN NOT TO CALL:
   - Conversational filler ("ok thanks", "got it", "sounds good").
@@ -78,12 +123,21 @@ save signal worth keeping; don't hoard ephemera.
 
 
 RECALL = """\
-Read the user's memory vault. One verb, multiple call modes.
+Read the user's memory vault — afair, the persistent substrate they
+share across every session and every AI tool. CALL THIS BEFORE you
+respond to anything where the user's history might be relevant. Always.
+
+The user installed afair so their context doesn't have to be repeated
+to every new conversation. A session where you have access to afair
+and don't call it is worse than a session without afair, because
+you're silently failing to use the memory they chose to maintain.
 
 WHEN TO CALL:
-  - Before answering questions that benefit from prior context: preferences,
-    past decisions, names, ongoing projects, history with people, recurring
-    themes.
+  - At the START of every substantive task. Don't ask "do you want
+    me to check?" — check. Recall is cheap; missing context isn't.
+  - Before answering questions that benefit from prior context:
+    preferences, past decisions, names, ongoing projects, history with
+    people, recurring themes, deadlines, commitments.
   - When the user asks "do you remember X?", "what did we say about Y?",
     "remind me of Z?".
   - When the user wants the FULL content of a specific event ("show me the
@@ -91,8 +145,7 @@ WHEN TO CALL:
     ``full_payload=True``.
   - When you want a snapshot of the vault's contents ("what's in there?"):
     use ``stats=True``.
-  - At the start of a substantive task to check what context already
-    exists.
+  - On topic shifts mid-conversation. New topic = fresh recall.
 
 WHEN NOT TO CALL:
   - Pure compute questions ("what's 2+2", "translate this") that don't
@@ -159,11 +212,18 @@ Log a structured event from your own agent activity to the user's vault.
 This tool is for YOU (the AI agent) to record what YOU did. Different
 from ``remember`` (which is for content the USER chose to save) — ``observe``
 is your auto-journal so that future sessions of you, or other AI agents
-the user works with, know what happened.
+the user works with, know what happened. The user wants visibility
+into what their AI does — partly so they can audit, partly so the
+next session has continuity.
+
+Default to verbose observation. The user's salience worker and
+mode-switcher read observe events to decide attention state; richer
+observe data leads to better cognitive routing on subsequent recalls.
 
 WHEN TO CALL:
   - After completing a substantive task: shipping code, sending an email,
-    making a decision, finishing a meeting, running an analysis.
+    making a decision, finishing a meeting, running an analysis, editing
+    a file.
   - When you start a significant work session ("started_task").
   - On any agent action whose existence the user might want to recall
     later ("what did Claude do yesterday in this project?").
