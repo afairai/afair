@@ -526,3 +526,112 @@ magick -size 1280x640 xc:white \
 
 rm -f master-bw.png master-bw.pbm
 ```
+
+
+## 14. Vault encryption (Stufe 1)
+
+The substrate is encrypted at rest in two layers:
+
+- **SQLite database** (`substrate.db`): SQLCipher whole-file AES-256
+- **Object store** (`objects/<aa>/<rest>`): AES-256-GCM per blob, with
+  a per-blob random nonce in a 4-byte magic prefix header
+
+Both layers derive their working keys from a single master key
+`AFAIR_VAULT_KEY` via HKDF with domain-separating info strings (see
+`afair/substrate/encryption.py`). The boot validator refuses to start
+the server when `ENVIRONMENT=fly` and the key is missing.
+
+### 14.1 Generating + persisting the key
+
+```bash
+# Generate.
+key=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
+
+# Set the Fly secret.
+fly secrets set AFAIR_VAULT_KEY="$key" -a afair
+
+# Persist to the backup file — same canonical-secret convention
+# every other afair token follows. Edit by hand; never commit.
+cat >> .env.secrets.backup <<EOF
+
+# ─── VAULT ENCRYPTION (Stufe 1) ─────────────────
+AFAIR_VAULT_KEY=$key
+# placed: Fly secret on afair
+# created: $(date -u +%F)Z, expires: no expiry (revocable by re-generating)
+# rotation: NO ROTATION — the SQLite + blob ciphertexts under this key cannot
+#   be re-keyed without a full vault re-write. To rotate: provision a fresh
+#   vault under a new key, re-import via the MCP export surface.
+EOF
+```
+
+### 14.2 First-time migration of an existing plaintext vault
+
+If the vault was already populated before the encryption layer landed,
+run the migration script to re-encrypt in place. The script is
+idempotent (skips already-encrypted state) and safe to interrupt.
+
+```bash
+# On the Fly machine (or wherever the vault lives).
+fly ssh console -a afair -C "AFAIR_VAULT_KEY=<value> python scripts/encrypt_existing_vault.py --dry-run"
+# Review the report (how many blobs, sqlite state), then drop --dry-run:
+fly ssh console -a afair -C "AFAIR_VAULT_KEY=<value> python scripts/encrypt_existing_vault.py"
+```
+
+The script writes `<vault_dir>.pre-encrypt/` as a backup BEFORE
+touching anything (skip with `--skip-backup` if you're confident +
+already have a Fly snapshot). After a green smoke (`/api/health` 200,
+`recall(stats=True)` returns expected counts), remove the backup:
+
+```bash
+fly ssh console -a afair -C "rm -rf /data/vault.pre-encrypt"
+```
+
+### 14.3 What happens if AFAIR_VAULT_KEY is lost
+
+The data is gone. There is no recovery path. SQLCipher's key derivation
+is deliberately one-way and AES-GCM is authenticated; without the
+master key, the ciphertext is indistinguishable from random.
+
+This is why the key MUST live in TWO places at all times:
+
+- Fly's secret store (used by the running process)
+- `.env.secrets.backup` on the operator's local machine (used by the
+  operator + as the recovery anchor)
+
+A daily off-machine sync of `.env.secrets.backup` to a separate
+encrypted store (1Password vault, hardware backup) is the
+recommended discipline.
+
+### 14.4 Threat model — what this protects against
+
+| Threat                                  | Stufe 1 status |
+| --------------------------------------- | ---------------- |
+| Disk theft / volume snapshot exfil      | Protected        |
+| Cold backup leaked from Fly             | Protected        |
+| Casual read of `.db` file or blob bytes | Protected        |
+| Operator with `fly ssh` access          | NOT protected    |
+| Fly insider access to running process   | NOT protected    |
+| Side-channel inference via embeddings   | NOT protected    |
+
+For the "NOT protected" rows, see the Stufe 2/3/4 designs in the
+encryption roadmap (Stufe 2: per-event payload encryption with
+operator-audit-logged KEK retrieval; Stufe 3: BYOK with
+customer-managed keys; Stufe 4: Confidential Computing / TEE).
+
+### 14.5 Operator-access transparency
+
+Operators (the team running afair) have shell access to each user's
+Fly machine. Every shell session writes a structured `observe` event
+into THAT user's vault before any other action, so the user can see
+in their own recall history that an admin connected, when, and why.
+
+See `docs/runbooks/operator-vault-touch.md` (TODO) for the explicit
+ritual. Until that runbook lands, the convention is: at the start of
+every ad-hoc `fly ssh` session into a user machine, the operator runs:
+
+```bash
+python -m afair.admin record-operator-touch --reason "<one-line why>"
+```
+
+This writes a `remember` event with type_hint=`operator_action` so
+the touch is auditable from the user's side.

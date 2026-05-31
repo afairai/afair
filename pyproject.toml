@@ -20,6 +20,17 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     # Substrate storage — SQLite + vector search
     "sqlite-vec>=0.1.6",
+    # SQLCipher (Stufe 1 encryption) — whole-database AES-256 encryption.
+    # Drop-in replacement for stdlib sqlite3; PRAGMA key on connect.
+    # Bundled-binary wheel only exists for Linux. macOS local dev runs
+    # without it and falls back to plaintext sqlite3 (acceptable: prod
+    # boot validator forbids missing vault key in fly environment, but
+    # local dev never has the key set in the first place).
+    "sqlcipher3-binary>=0.5.4; sys_platform == 'linux'",
+    # AES-256-GCM for the filesystem blob store (Stufe 1 encryption).
+    # cryptography is widely audited, BSD-licensed; includes Python
+    # bindings to the system-or-bundled OpenSSL.
+    "cryptography>=44.0.0",
     # Time-sortable identifiers for substrate events
     "python-ulid>=3.0.0",
     # OAuth 2.1 authorization server (we are our own IdP; GitHub OAuth as

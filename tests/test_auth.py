@@ -55,6 +55,7 @@ def test_production_boot_requires_auth_token(tmp_path: Path) -> None:
             vault_dir=tmp_path,
             auth_token=None,
             oauth_issuer="https://mcp.example.com",
+            vault_key="x" * 32,  # type: ignore[arg-type]
         )
 
 
@@ -71,6 +72,26 @@ def test_production_boot_requires_oauth_issuer(tmp_path: Path) -> None:
             vault_dir=tmp_path,
             auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
             oauth_issuer=None,
+            vault_key="x" * 32,  # type: ignore[arg-type]
+        )
+
+
+def test_production_boot_requires_vault_key(tmp_path: Path) -> None:
+    """ENVIRONMENT=fly without AFAIR_VAULT_KEY must refuse to boot.
+
+    Without a vault key the substrate runs in plaintext mode — fine
+    locally, a privacy disaster in production. The validator catches
+    this at boot rather than letting the server come up with no
+    encryption silently.
+    """
+    with pytest.raises(ValidationError, match="AFAIR_VAULT_KEY"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            environment="fly",
+            vault_dir=tmp_path,
+            auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
+            oauth_issuer="https://mcp.example.com",
+            vault_key=None,
         )
 
 
