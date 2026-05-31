@@ -14,7 +14,7 @@ additions are new tools, never signature changes to these three.
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import uvicorn
@@ -34,7 +34,7 @@ from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.salience import SalienceWorker
 from ..substrate import start_checkpoint_loop
-from . import descriptions, handlers, landing, schemas
+from . import descriptions, handlers, landing, resources, schemas
 from .auth import BearerTokenMiddleware
 from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
@@ -161,6 +161,21 @@ def build_server(settings: Settings) -> FastMCP:
     @mcp.tool(description=descriptions.OBSERVE, version="1")
     def observe(event: schemas.ObserveEvent) -> schemas.ObserveResult:
         return handlers.observe(event=event)
+
+    # ── resources — auto-fetched by clients at session-init ─────────────────
+
+    @mcp.resource(
+        resources.SESSION_START_URI,
+        name=resources.SESSION_START_NAME,
+        description=resources.SESSION_START_DESCRIPTION,
+        mime_type="application/json",
+    )
+    def session_start() -> dict[str, Any]:
+        """Compact snapshot of the user's vault state for cold-start
+        context. Returns mode + top-salient events + open threads so
+        every new conversation begins already-aware."""
+        db = connect_for_thread()
+        return resources.read_session_start(db)
 
     # ── /health — orchestrator-facing, never goes through MCP protocol ──────
 
