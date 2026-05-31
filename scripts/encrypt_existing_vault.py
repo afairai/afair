@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sqlite3 as _stdlib_sqlite
 import sys
 from pathlib import Path
 
@@ -82,32 +81,37 @@ def _encrypt_sqlite(db_path: Path, hex_key: str, *, dry_run: bool) -> bool:
         return True
 
     print(f"  [encrypt] {db_path.name}")
-    # Use sqlcipher3's sqlcipher_export to copy the plaintext DB into
-    # an encrypted attached DB. This preserves FTS5 + sqlite-vec virtual
-    # tables since it's a logical copy at the SQLite layer.
-    import sqlcipher3  # type: ignore[import-untyped]
+    # Use sqlcipher3 for BOTH connections. Even though the source is
+    # a plaintext SQLite file, opening it with sqlcipher3 (without
+    # setting PRAGMA key) just runs upstream SQLite — sqlcipher3 is a
+    # superset. The KEY in ATTACH then applies the cipher to the
+    # target during sqlcipher_export. Using stdlib for the source
+    # fails because stdlib has no sqlcipher_export AND its ATTACH
+    # doesn't understand the KEY clause.
+    import sqlcipher3  # type: ignore
 
     tmp_path = db_path.with_suffix(".db.encrypting")
     if tmp_path.exists():
         tmp_path.unlink()
 
-    src = _stdlib_sqlite.connect(str(db_path))
+    # Source: open plaintext substrate.db via sqlcipher3, NO key (it
+    # IS plaintext). Target: ATTACH with the derived hex key.
+    src = sqlcipher3.connect(str(db_path))
     try:
-        # sqlcipher3 connection to the empty target file, set its key,
-        # then have the SOURCE attach the target and dump itself.
-        # Order matters: target file must be opened by SQLCipher first
-        # (with the key) so it's correctly cipher-initialized.
+        # Open the target, set its key, write a no-op so the cipher
+        # header is committed to disk. Then close so the source can
+        # ATTACH it as a separate connection.
         target = sqlcipher3.connect(str(tmp_path))
         target.execute(f"PRAGMA key = \"x'{hex_key}'\"")
-        # A trivial statement forces SQLCipher to write the header.
         target.execute("CREATE TABLE _seed (x INT)")
         target.execute("DROP TABLE _seed")
         target.commit()
         target.close()
 
-        # Now from the plaintext source, attach the encrypted target +
-        # invoke sqlcipher_export to copy the entire schema + data.
-        src.enable_load_extension(False)  # safety: don't load any ext here
+        # Source-side: ATTACH the encrypted target with its key, run
+        # sqlcipher_export which copies the entire schema + data
+        # (including FTS5 + sqlite-vec virtual tables — sqlcipher_export
+        # walks the schema at the SQLite layer).
         src.execute(f"ATTACH DATABASE '{tmp_path}' AS encrypted KEY \"x'{hex_key}'\"")
         src.execute("SELECT sqlcipher_export('encrypted')")
         src.execute("DETACH DATABASE encrypted")
