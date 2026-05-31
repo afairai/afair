@@ -191,7 +191,7 @@ def _open_connection(
         )
         # Raw-hex key, see docstring above.
         hex_key = derive_sqlcipher_key(vault_key)
-        conn.execute(f'PRAGMA key = "x\'{hex_key}\'"')
+        conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
         # Reading sqlite_version (or any other table) verifies the key
         # is correct — wrong key gives "file is not a database" here.
         # Fail loud at boot rather than silently 100 queries deep.

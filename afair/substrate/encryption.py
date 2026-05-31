@@ -82,7 +82,7 @@ def derive_sqlcipher_key(master_key: bytes) -> str:
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,  # HKDF salt-less is fine when the input is already
-                   # high-entropy (we require >= 32 random bytes upstream)
+        # high-entropy (we require >= 32 random bytes upstream)
         info=_SQLCIPHER_CONTEXT,
     ).derive(master_key)
     return derived.hex()
