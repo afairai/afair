@@ -5,14 +5,24 @@ Endpoints exposed:
   GET  /.well-known/oauth-authorization-server  metadata (no auth)
   POST /oauth/register                          DCR (RFC 7591)
   GET  /oauth/authorize                         start the flow
-  GET  /oauth/identity/github/callback          identity-backend callback
+  GET  /oauth/identity/accept                   hub-issued JWT lands here (NEW)
+  GET  /oauth/identity/github/callback          LEGACY direct-GitHub callback
   POST /oauth/token                             code → JWT access token
   POST /oauth/revoke                            revoke a refresh token
 
-The actual identity verification is delegated to a pluggable backend
-(Phase 1: GitHub OAuth). The allowlist check is enforced at /callback
-time — unrecognized GitHub usernames get rejected before any code is
-issued.
+Identity verification is federated through afair.ai (the identity
+hub) by default (``identity_backend="hub"``). The hub drives the
+GitHub OAuth dance and sends us a signed JWT at /oauth/identity/
+accept. The hub is the only afair surface that knows about GitHub
+directly — every consumer trusts hub-issued JWTs via a shared HMAC
+secret. The allowlist check is enforced per-server at /accept time;
+each instance owns its own allowlist.
+
+The legacy direct-GitHub backend (``identity_backend="github"``) is
+kept as a fallback during the cutover and will be removed once all
+deployments have migrated. In github mode, /authorize redirects to
+GitHub directly and the response lands at /oauth/identity/github/
+callback (the historical handler).
 """
 
 from __future__ import annotations
@@ -27,8 +37,8 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ...substrate import open_db
 from ..rate_limit import TokenBucketRateLimiter
+from . import identity_hub, metadata, storage
 from . import jwt as jwt_mod
-from . import metadata, storage
 from .identity import GitHubIdentityBackend, IdentityBackend
 
 if TYPE_CHECKING:
@@ -150,9 +160,12 @@ def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
 
 
 def _identity_backend(settings: Settings) -> IdentityBackend:
-    """Construct the configured identity backend. Currently github-only."""
+    """LEGACY direct-GitHub backend. Used only when
+    identity_backend='github' (deprecated fallback). The default
+    'hub' backend skips this and federates through afair.ai.
+    """
     if settings.identity_backend != "github":
-        msg = f"unsupported identity_backend: {settings.identity_backend!r}"
+        msg = f"_identity_backend called with backend={settings.identity_backend!r}"
         raise ValueError(msg)
     if settings.github_oauth_client_id is None or settings.github_oauth_client_secret is None:
         msg = "GitHub identity backend requires GITHUB_OAUTH_CLIENT_ID + SECRET"
@@ -164,7 +177,13 @@ def _identity_backend(settings: Settings) -> IdentityBackend:
 
 
 def _identity_callback_url(settings: Settings) -> str:
+    """Legacy direct-GitHub callback (only meaningful when backend=github)."""
     return f"{settings.effective_oauth_issuer}/oauth/identity/github/callback"
+
+
+def _identity_accept_url(settings: Settings) -> str:
+    """Where the identity hub sends the user back to with our JWT."""
+    return f"{settings.effective_oauth_issuer}/oauth/identity/accept"
 
 
 # ── metadata ────────────────────────────────────────────────────────────────
@@ -365,13 +384,131 @@ async def oauth_authorize(request: Request) -> Response:
     finally:
         db.close()
 
+    # Hub-backed flow (default): redirect to the identity hub. The hub
+    # drives GitHub OAuth and bounces back to /oauth/identity/accept
+    # with a signed JWT. Direct-GitHub backend is retained as a
+    # fallback for environments without a reachable hub.
+    if settings.identity_backend == "hub":
+        if settings.identity_hub_secret is None:
+            return _error(
+                "server_error",
+                description="IDENTITY_HUB_SECRET is not configured on this server",
+                status=500,
+            )
+        hub_url = identity_hub.hub_start_url(
+            hub_url=settings.identity_hub_url,
+            intent="mcp",
+            return_to=_identity_accept_url(settings),
+            state=login.state,
+        )
+        return RedirectResponse(hub_url, status_code=302)
+
     backend = _identity_backend(settings)
     backend_redirect = _identity_callback_url(settings)
     auth_url = await backend.authorize_url(state=login.state, redirect_uri=backend_redirect)
     return RedirectResponse(auth_url, status_code=302)
 
 
-# ── identity callback: GitHub redirects back to us ──────────────────────────
+# ── identity accept: the hub bounces back to us with a signed JWT ──────────
+
+
+async def oauth_identity_accept(request: Request) -> Response:
+    """Receive a hub-issued identity JWT, mint our MCP authorization code.
+
+    The token's ``return_to`` claim must match this server's accept
+    URL exactly — defense against a token issued for another server
+    being replayed here. The ``intent`` claim must be ``"mcp"``.
+    """
+    settings: Settings = request.app.state.settings
+
+    if settings.identity_backend != "hub":
+        return _error(
+            "server_error",
+            description="server is not configured for the identity hub backend",
+            status=500,
+        )
+    if settings.identity_hub_secret is None:
+        return _error(
+            "server_error",
+            description="IDENTITY_HUB_SECRET is not configured on this server",
+            status=500,
+        )
+
+    token = request.query_params.get("token")
+    state = request.query_params.get("state")
+    if not token or not state:
+        return _error(
+            "invalid_request",
+            description="identity hub callback missing token or state",
+        )
+
+    payload = identity_hub.verify_identity_token(
+        token,
+        secret=settings.identity_hub_secret.get_secret_value(),
+        expected_return_to=_identity_accept_url(settings),
+        expected_intent="mcp",
+    )
+    if payload is None:
+        return _error(
+            "invalid_request",
+            description="identity token failed verification",
+            status=400,
+        )
+
+    db = open_db(settings.vault_dir)
+    try:
+        login = storage.consume_login_state(db, state)
+        if login is None:
+            return _error(
+                "invalid_request",
+                description="unknown or expired state",
+                status=400,
+            )
+
+        # Allowlist enforcement (I8 single-tenant — exactly one allowed
+        # user). The hub does not enforce this — each downstream server
+        # owns its own allowlist (different instances have different
+        # owners).
+        if payload.sub.lower() not in settings.allowlist:
+            return _error(
+                "access_denied",
+                description=(f"identity '{payload.sub}' is not in the allowlist for this instance"),
+                status=403,
+            )
+
+        # Mint OUR authorization code (separate from the hub's JWT).
+        our_code = storage.save_authorization_code(
+            db,
+            client_id=login.client_id,
+            redirect_uri=login.redirect_uri,
+            scope=login.scope,
+            code_challenge=login.code_challenge,
+            code_challenge_method=login.code_challenge_method,
+            user_sub=payload.sub,
+            user_email=payload.email,
+        )
+    finally:
+        db.close()
+
+    qs_parts: dict[str, str] = {
+        "code": our_code.code,
+        "iss": settings.effective_oauth_issuer,
+    }
+    if login.client_state:
+        qs_parts["state"] = login.client_state
+    separator = "&" if "?" in login.redirect_uri else "?"
+    return RedirectResponse(
+        f"{login.redirect_uri}{separator}{urllib.parse.urlencode(qs_parts)}",
+        status_code=302,
+    )
+
+
+# ── identity callback: LEGACY direct-GitHub path ───────────────────────────
+#
+# Kept reachable for the deprecated `identity_backend="github"` mode.
+# In hub mode this handler is never hit because GitHub redirects to
+# afair.ai's hub URL, not back here. Will be deleted once the cutover
+# is fully verified across all deployments.
 
 
 async def oauth_identity_github_callback(request: Request) -> Response:

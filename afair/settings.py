@@ -143,11 +143,23 @@ class Settings(BaseSettings):
     oauth_issuer: str | None = None
 
     # — Identity backend selection. Pluggable per-deployment.
-    # "github" = OAuth dance with GitHub (Phase 1 default).
+    # "hub" = federated GitHub OAuth through afair.ai (identity hub).
+    # "github" = LEGACY direct GitHub OAuth dance (deprecated 2026-06-01,
+    #            kept for fallback during the cutover).
     # Future: "magic-link", "clerk", "static-password".
-    identity_backend: Literal["github"] = "github"
+    identity_backend: Literal["hub", "github"] = "hub"
 
-    # — GitHub OAuth credentials (used when identity_backend="github").
+    # — Identity hub (federated GitHub OAuth). Used when
+    # identity_backend="hub" (the new default). The hub lives at
+    # https://afair.ai/oauth/identity/* and issues signed JWTs that
+    # this server verifies with the shared HMAC secret. See
+    # afair/mcp/oauth/identity_hub.py.
+    identity_hub_url: str = "https://afair.ai"
+    identity_hub_secret: SecretStr | None = None
+
+    # — LEGACY GitHub OAuth credentials. Only used when
+    # identity_backend="github". Will be removed once the hub
+    # cutover is verified across all deployments.
     github_oauth_client_id: SecretStr | None = None
     github_oauth_client_secret: SecretStr | None = None
 
