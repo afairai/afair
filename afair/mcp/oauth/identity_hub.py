@@ -30,6 +30,7 @@ Token format: HS256 mini-JWT, three base64url parts:
     header.payload.signature
 Payload: {sub, email, intent, return_to, iat, exp}.
 """
+
 from __future__ import annotations
 
 import base64
