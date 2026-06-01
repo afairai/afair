@@ -137,7 +137,7 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code} — {e.reason}\n{e.read().decode('utf-8', errors='replace')}", file=sys.stderr)
         return 1
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"Failed: {e}", file=sys.stderr)
         return 1
 
