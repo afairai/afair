@@ -82,11 +82,11 @@ def test_salience_guard_empty_input_is_pass() -> None:
 
 
 def test_mode_switcher_guard_valid() -> None:
-    assert check_mode_switcher_outputs(["CEN", "DMN", "CEN"]).passed
+    assert check_mode_switcher_outputs(["cen", "dmn", "cen"]).passed
 
 
 def test_mode_switcher_guard_rejects_garbage() -> None:
-    r = check_mode_switcher_outputs(["CEN", "WAT"])
+    r = check_mode_switcher_outputs(["cen", "WAT"])
     assert not r.passed
 
 
