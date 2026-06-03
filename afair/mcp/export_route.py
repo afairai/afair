@@ -169,7 +169,11 @@ def _iter_export(
                 f"SELECT * FROM {table} ORDER BY rowid ASC",
             )
             for row in rows:
-                d = {k: row[k] for k in row}
+                # sqlite3.Row is dict-like via keys() but iteration yields
+                # column INDICES, not names — the ruff SIM118 suggestion
+                # ("for k in row" instead of "for k in row.keys()") would
+                # be wrong here. Use the explicit .keys() API.
+                d = {k: row[k] for k in row.keys()}  # noqa: SIM118
                 d["kind"] = kind
                 yield json.dumps(d, ensure_ascii=False, sort_keys=True, default=str) + "\n"
 
