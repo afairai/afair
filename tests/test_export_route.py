@@ -118,15 +118,9 @@ def test_export_accepts_either_token_when_both_set(vault_dir) -> None:
     app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
     app.state.settings = settings
     client = TestClient(app)
-    r1 = client.get(
-        "/internal/export", headers={"Authorization": "Bearer main-mcp-token"}
-    )
-    r2 = client.get(
-        "/internal/export", headers={"Authorization": "Bearer scoped-export-token"}
-    )
-    r3 = client.get(
-        "/internal/export", headers={"Authorization": "Bearer something-else"}
-    )
+    r1 = client.get("/internal/export", headers={"Authorization": "Bearer main-mcp-token"})
+    r2 = client.get("/internal/export", headers={"Authorization": "Bearer scoped-export-token"})
+    r3 = client.get("/internal/export", headers={"Authorization": "Bearer something-else"})
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r3.status_code == 401
