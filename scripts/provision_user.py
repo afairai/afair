@@ -13,16 +13,18 @@ What it does (per invocation)
      - AFAIR_AUTH_TOKEN  (server bearer)
      - AFAIR_JWT_SECRET  (JWT signing key)
      - AFAIR_SIGNUP_TOKEN (scoped landing-page bearer, optional)
-2. Creates a new Fly app named ``afair-u-<short>`` where <short> is
-   a 6-char hash of the user's GitHub username (avoids leaking the
+2. Creates a new Fly app named ``afair-<name>-<suffix>`` where ``<name>``
+   is a cosmic word (vega, polaris, lyra, …) and ``<suffix>`` is 3 hex
+   chars, both derived deterministically from the user's GitHub
+   username (avoids leaking the
    username in DNS while staying deterministic).
 3. Creates a 1 GB volume named ``vault`` in the configured region.
 4. Sets all required Fly secrets on the new app (per-user values
    above plus the shared GitHub OAuth client credentials). OAUTH_ISSUER
-   is set to the BRANDED ``u-<hash>.mcp.afair.ai`` URL so JWTs carry
+   is set to the BRANDED ``<name>-<suffix>.mcp.afair.ai`` URL so JWTs carry
    the right iss claim from day one.
 5. Deploys the SAME afair image to the new app (no rebuild).
-6. **Vanity domain**: creates ``u-<hash>.mcp.afair.ai`` as a CNAME to
+6. **Vanity domain**: creates ``<name>-<suffix>.mcp.afair.ai`` as a CNAME to
    ``<app>.fly.dev`` via the Cloudflare API, then registers it as a
    Fly cert host (Fly handles Let's-Encrypt issuance + renewal).
 7. Appends the per-user secrets to .env.secrets.backup with the
@@ -94,27 +96,113 @@ domain can find them via API). Hardcoded here so the script doesn't
 need to round-trip a zone-lookup on every run."""
 
 VANITY_PARENT = "mcp.afair.ai"
-"""Per-user vanity subdomains live under this parent. ``u-<hash>.mcp.afair.ai``
-→ CNAME → ``<app>.fly.dev``, then a Fly cert handles TLS termination."""
+"""Per-user vanity subdomains live under this parent. A user named
+``gowry`` lands on ``vega-7a3.mcp.afair.ai``, CNAMEd to the matching
+Fly app. Fly handles TLS termination."""
+
+
+# Curated star + cosmic-object names. ~60 entries means together with
+# the 3-hex suffix below we get 60 * 16^3 ≈ 245k unique vanity hosts
+# before any second-order collision check is needed. Names chosen to
+# read well, none over 8 chars, all unambiguous lowercase ASCII so DNS
+# is friendly.
+COSMIC_NAMES: tuple[str, ...] = (
+    "altair",
+    "andromeda",
+    "antares",
+    "arcturus",
+    "aurora",
+    "bellatrix",
+    "betelgeuse",
+    "canopus",
+    "capella",
+    "carina",
+    "cassiopeia",
+    "castor",
+    "centauri",
+    "cosmos",
+    "crux",
+    "cygnus",
+    "deneb",
+    "draco",
+    "elara",
+    "eridani",
+    "europa",
+    "fornax",
+    "ganymede",
+    "halley",
+    "helios",
+    "hydra",
+    "io",
+    "kepler",
+    "lyra",
+    "mira",
+    "nebula",
+    "nova",
+    "oort",
+    "orbit",
+    "orion",
+    "pavo",
+    "pegasus",
+    "perseus",
+    "phoenix",
+    "pluto",
+    "polaris",
+    "procyon",
+    "pulsar",
+    "quasar",
+    "regulus",
+    "rigel",
+    "saturn",
+    "sirius",
+    "solis",
+    "stardust",
+    "supernova",
+    "taurus",
+    "titan",
+    "vega",
+    "vela",
+    "virgo",
+    "vortex",
+    "voyager",
+    "zenith",
+    "zodiac",
+)
 
 
 def vanity_host_for(github_username: str) -> str:
-    """Per-user vanity hostname. Uses the same 6-char hash as the app
-    name so the two are visually linked."""
-    h = hashlib.sha256(github_username.lower().encode()).hexdigest()[:6]
-    return f"u-{h}.{VANITY_PARENT}"
+    """Per-user vanity hostname. Pick a cosmic word + 3-hex suffix
+    deterministically from the GitHub username so reruns are stable
+    and the username itself never leaks into DNS.
+
+    ``gowry`` → ``vega-7a3.mcp.afair.ai`` (example shape; actual hash
+    decides which name + suffix lands).
+
+    The deterministic mapping means re-provisioning the same user
+    yields the same hostname, which is critical because the JWT
+    issuer + the certificate + the DNS record all reference it.
+    """
+    digest = hashlib.sha256(github_username.lower().encode()).hexdigest()
+    # First 4 hex chars (16 bits) pick a name out of COSMIC_NAMES.
+    # Modular index space is plenty: 65k → 60 names, well distributed.
+    name = COSMIC_NAMES[int(digest[:4], 16) % len(COSMIC_NAMES)]
+    # Next 3 hex chars (12 bits) give 4096 variants per name.
+    suffix = digest[4:7]
+    return f"{name}-{suffix}.{VANITY_PARENT}"
 
 
 # ── per-user identity ──────────────────────────────────────────────────────
 
 
 def app_name_for(github_username: str) -> str:
-    """Deterministic per-user app name. Hash so the username doesn't
-    leak in DNS lookups; 6 hex chars = 16M collision space which is
-    fine for the multi-tenant scale (1k users gives ~ no collision
-    probability)."""
-    h = hashlib.sha256(github_username.lower().encode()).hexdigest()[:6]
-    return f"afair-u-{h}"
+    """Deterministic per-user Fly app name. Uses the same name + suffix
+    pair as the vanity host so the two are visually linked when reading
+    a ``fly apps list``. The ``afair-`` prefix scopes the apps to this
+    product inside the org."""
+    digest = hashlib.sha256(github_username.lower().encode()).hexdigest()
+    name = COSMIC_NAMES[int(digest[:4], 16) % len(COSMIC_NAMES)]
+    suffix = digest[4:7]
+    return f"afair-{name}-{suffix}"
 
 
 # ── token generation ───────────────────────────────────────────────────────
@@ -241,7 +329,7 @@ def cloudflare_create_cname(
     import urllib.request
 
     short_name = hostname.removesuffix(f".{VANITY_PARENT.split('.', 1)[1]}")
-    # ^ "u-abc123.mcp.afair.ai" → "u-abc123.mcp"
+    # ^ "vega-7a3.mcp.afair.ai" → "vega-7a3.mcp"
     # Cloudflare wants the leaf relative-to-zone-root (afair.ai), so we
     # strip the apex "afair.ai" off the end.
     print(f"  $ cloudflare DNS: {short_name} CNAME {target}")
@@ -412,7 +500,7 @@ def provision(
     fly_set_secrets(app, secrets_map, dry=dry)
     fly_deploy_image(app, image=DOCKER_IMAGE, dry=dry)
 
-    # 2. DNS — CNAME u-<hash>.mcp.afair.ai → <app>.fly.dev.
+    # 2. DNS — CNAME <name>-<suffix>.mcp.afair.ai → <app>.fly.dev.
     cloudflare_create_cname(
         hostname=vanity,
         target=f"{app}.fly.dev",
