@@ -44,4 +44,8 @@ See `VISION.md §6`. Briefly:
 
 ## License
 
-License decision is deferred. The operational rule is binding until then: see `VISION.md §12 Licensing Posture` — build everything as if the repo goes public tomorrow.
+Licensed under the GNU Affero General Public License v3.0. See `LICENSE` for the full text.
+
+AGPLv3 is the deliberate choice. afair is built so users can take their memory anywhere; the same posture applies to the code. Anyone can self-host, fork, modify. Network-service forks must publish their modifications under the same license. The hosted offering at afair.ai is one possible deployment, not the only one.
+
+In one line: free to use, free to host yourself, must share back if you run it as a service for others.
