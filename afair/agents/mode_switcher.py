@@ -138,6 +138,35 @@ class ModeSwitcher(ColdPathWorker):
             cen_threshold=cen_threshold,
             dmn_threshold=dmn_threshold,
         )
+
+        # Belt-and-suspenders runtime guard. _decide_target_mode is
+        # built to only return MODE_CEN, MODE_DMN, or unchanged
+        # `current`. If the tuner ever promotes a tunable change that
+        # somehow breaks the hysteresis logic, this catches the bad
+        # mode value and emits a tuner.invariant_violation
+        # pipeline_event. RollbackMonitor's R1 reads those events
+        # to auto-revert recent mode_switcher.{cen,dmn}_threshold
+        # promotes.
+        from .guards import check_mode_switcher_outputs
+
+        guard = check_mode_switcher_outputs([target])
+        if not guard.passed:
+            detail = (
+                f"mode_switcher.{'cen_threshold' if cumulative >= cen_threshold else 'dmn_threshold'} "
+                f"produced invalid mode {target!r}: {guard.failures[0]}"
+            )
+            pe.record(
+                conn,
+                event_id="mode_switcher.cycle",
+                stage="tuner.invariant_violation",
+                status=pe.STATUS_FAILED,
+                producer="mode_switcher:v0",
+                detail=detail[:480],
+            )
+            log.warning("mode_switcher.invariant_violation", target=target)
+            stats["invariant_violation"] = True
+            return stats
+
         if target == current:
             log.info(
                 "mode_switcher.no_change",

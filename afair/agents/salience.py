@@ -50,6 +50,7 @@ import structlog
 from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_id
 from .cold_path import ColdPathWorker
+from .guards import check_salience_outputs
 from .interpretation import write_interpretation
 from .tunable_registry import TunableRegistry
 
@@ -160,6 +161,7 @@ class SalienceWorker(ColdPathWorker):
         ).fetchall()
         stats["candidates"] = len(rows)
 
+        stats["invariant_violations"] = 0
         for row in rows:
             event_id = row["id"]
             event = read_event_by_id(conn, event_id)
@@ -172,6 +174,40 @@ class SalienceWorker(ColdPathWorker):
                 "salience_components": components,
                 "status": "success",
             }
+
+            # Belt-and-suspenders runtime guard. score_event already
+            # clamps to [0, 1] and builds the full component dict by
+            # construction, so this check passes in practice. But if a
+            # future refactor breaks the clamp logic OR a tuned weight
+            # vector somehow produces a malformed output, this catches
+            # it and emits a tuner.invariant_violation pipeline_event.
+            # The RollbackMonitor's R1 path reads those events to
+            # auto-revert any recent salience.component_weights promote
+            # that turns out to be a degradation in disguise.
+            guard = check_salience_outputs([extraction])
+            if not guard.passed:
+                stats["invariant_violations"] += 1
+                detail = f"salience.component_weights output failed invariant: {guard.failures[0]}"
+                pe.record(
+                    conn,
+                    event_id=event_id,
+                    event_hash=event.content_hash,
+                    stage="tuner.invariant_violation",
+                    status=pe.STATUS_FAILED,
+                    producer=SALIENCE_PRODUCED_BY,
+                    detail=detail[:480],
+                )
+                log.warning(
+                    "salience.invariant_violation",
+                    event_id=event_id,
+                    failures=list(guard.failures),
+                )
+                # Don't write the interpretation row — the value can't
+                # be trusted. The next salience cycle will retry this
+                # event, ideally after a rollback restores the prior
+                # tuned weights.
+                continue
+
             try:
                 write_interpretation(
                     conn,
