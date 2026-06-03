@@ -109,17 +109,19 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityCanonicalizer(),
                 SalienceWorker(),
                 ModeSwitcher(),
-                # Self-improvement tuner — Phase B: promotion enabled.
-                # Safety gates active:
-                #   - LLM-judge majority threshold (0.70)
-                #   - Invariant guards (hard floor)
-                #   - Cooldown per tunable after rollback (7 days)
-                #   - Global halt if > 3 rollbacks/week
-                #   - Bounded delta per move (±20%)
-                # The RollbackMonitor below polls every 5 min to
-                # auto-revert promotes that degrade post-promote
-                # feedback signals.
-                Tuner(promote_enabled=True),
+                # Self-improvement tuner — observation mode (Phase B
+                # held at promote_enabled=False until a ground-truth
+                # eval-set lands, per the audit pass on 2026-06-03).
+                # Without an eval-set, the LLM judge is the only gate,
+                # and judge-judging-judge is research-grade dubious.
+                # The tuner still generates hypotheses + runs replay
+                # + asks the judge panel + writes verdicts to
+                # tuner_state, so we accumulate telemetry without
+                # mutating any tuned value in production. Flip back
+                # to True once the eval framework is wired in.
+                # RollbackMonitor stays registered but is effectively
+                # vestigial while no promotes happen.
+                Tuner(promote_enabled=False),
                 RollbackMonitor(),
             ],
         ).start()
