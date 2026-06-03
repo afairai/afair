@@ -32,6 +32,7 @@ from ..agents.embedding import embed_text
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
+from ..agents.rollback_monitor import RollbackMonitor
 from ..agents.salience import SalienceWorker
 from ..agents.tuner import Tuner
 from ..substrate import start_checkpoint_loop
@@ -108,12 +109,18 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityCanonicalizer(),
                 SalienceWorker(),
                 ModeSwitcher(),
-                # Self-improvement tuner — Phase A observe-only.
-                # promote_enabled=False per
-                # analysis/2026-06-03-recursive-self-improvement.md §7
-                # ("DOES NOT promote yet"). Flip to True only after a
-                # few observation cycles have been reviewed.
-                Tuner(promote_enabled=False),
+                # Self-improvement tuner — Phase B: promotion enabled.
+                # Safety gates active:
+                #   - LLM-judge majority threshold (0.70)
+                #   - Invariant guards (hard floor)
+                #   - Cooldown per tunable after rollback (7 days)
+                #   - Global halt if > 3 rollbacks/week
+                #   - Bounded delta per move (±20%)
+                # The RollbackMonitor below polls every 5 min to
+                # auto-revert promotes that degrade post-promote
+                # feedback signals.
+                Tuner(promote_enabled=True),
+                RollbackMonitor(),
             ],
         ).start()
 
