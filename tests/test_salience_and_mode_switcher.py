@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from afair.agents.mode_switcher import (
+    DEFAULT_CEN_THRESHOLD,
+    DEFAULT_DMN_THRESHOLD,
     MODE_CEN,
     MODE_DMN,
     MODE_SWITCHER_ORIGIN,
-    SWITCH_TO_CEN_THRESHOLD,
-    SWITCH_TO_DMN_THRESHOLD,
     ModeSwitcher,
     read_current_mode,
 )
@@ -208,7 +208,7 @@ def test_mode_switcher_does_nothing_when_no_salience(
 
 def _seed_high_salience(db: sqlite3.Connection, settings: Settings, *, n: int = 20) -> None:
     """Write n high-salience events so the cumulative score exceeds
-    SWITCH_TO_CEN_THRESHOLD. Each event uses a high-signal type_hint."""
+    DEFAULT_CEN_THRESHOLD. Each event uses a high-signal type_hint."""
     for i in range(n):
         write_event(
             db,
@@ -241,7 +241,7 @@ def test_mode_switcher_transitions_dmn_to_cen(db: sqlite3.Connection, settings: 
     SalienceWorker().run(db, settings)
 
     stats = ModeSwitcher().run(db, settings)
-    assert stats["cumulative_salience"] >= SWITCH_TO_CEN_THRESHOLD
+    assert stats["cumulative_salience"] >= DEFAULT_CEN_THRESHOLD
     assert stats["transitioned"] is True
     assert stats["to_mode"] == MODE_CEN
     # Verify the observe event landed.
@@ -304,9 +304,9 @@ def test_mode_switcher_returns_to_dmn_when_quiet(
     SalienceWorker().run(db, settings)
     stats = ModeSwitcher().run(db, settings)
     # Bare events ~0.20 each, 20 of them sum to ~4.0;
-    # ≤ SWITCH_TO_DMN_THRESHOLD (4.0)
+    # ≤ DEFAULT_DMN_THRESHOLD (4.0)
     # → transition back to DMN
-    assert stats["cumulative_salience"] <= SWITCH_TO_DMN_THRESHOLD + 0.5
+    assert stats["cumulative_salience"] <= DEFAULT_DMN_THRESHOLD + 0.5
     assert stats["to_mode"] == MODE_DMN
     assert read_current_mode(db) == MODE_DMN
     # Mode transition event carries the diagnostic cumulative_salience.

@@ -353,6 +353,56 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
     END
     """,
+    # ── tuner_state ────────────────────────────────────────────────────
+    # Append-only log of every self-modification the tuner makes
+    # (and observations / hypotheses it considers).
+    #
+    # Used as the source of truth for "what's the current value of
+    # tunable X?" — the latest 'promote' row for (worker, tunable) wins,
+    # falling back to the static default declared in
+    # afair/agents/tunable_registry.py when no row exists.
+    #
+    # Kinds:
+    #   'promote'      — variant has been adopted; new_value is live
+    #   'rollback'     — auto-rollback restored an older value
+    #   'hypothesis'   — tuner generated a candidate, may or may not be tested
+    #   'observation'  — tuner notes a signal (e.g., judge verdict, divergence)
+    #
+    # Designed for two query patterns:
+    #   (1) latest promote/rollback per (worker, tunable) — covered by
+    #       the (worker, tunable, recorded_at DESC) index
+    #   (2) timeline by recorded_at — covered by the recorded_at index
+    """
+    CREATE TABLE IF NOT EXISTS tuner_state (
+        id              TEXT PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        kind            TEXT NOT NULL CHECK (kind IN (
+                            'promote', 'rollback', 'hypothesis', 'observation'
+                        )),
+        worker          TEXT NOT NULL,
+        tunable         TEXT NOT NULL,
+        old_value_json  TEXT,
+        new_value_json  TEXT,
+        evidence_json   TEXT,
+        rationale       TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS tuner_state_lookup_idx ON tuner_state(worker, tunable, recorded_at DESC)",
+    "CREATE INDEX IF NOT EXISTS tuner_state_timeline_idx ON tuner_state(recorded_at DESC)",
+    """
+    CREATE TRIGGER IF NOT EXISTS tuner_state_no_update
+    BEFORE UPDATE ON tuner_state
+    BEGIN
+        SELECT RAISE(ABORT, 'tuner_state is append-only (Invariant I2 + I7)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS tuner_state_no_delete
+    BEFORE DELETE ON tuner_state
+    BEGIN
+        SELECT RAISE(ABORT, 'tuner_state is append-only (Invariant I2 + I7)');
+    END
+    """,
 )
 
 

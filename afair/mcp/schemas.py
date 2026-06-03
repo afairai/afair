@@ -320,6 +320,41 @@ class RecallResult(BaseModel):
     summary: ContextSummary | None = None
 
 
+# ── recall feedback ─────────────────────────────────────────────────────────
+
+
+MAX_FEEDBACK_IDS_PER_CALL = 50
+MAX_FEEDBACK_TOPIC_CHARS = 500
+
+
+class RecallFeedback(BaseModel):
+    """Optional caller-supplied signal on PRIOR recall hits.
+
+    The MCP-client AI calls ``recall(...)`` once to get hits, then on
+    its NEXT recall passes a ``feedback`` payload referring to those
+    earlier hits. The signal drives the self-improvement tuner — see
+    ``analysis/2026-06-03-recursive-self-improvement.md`` §2.1.
+
+    All fields optional. Empty payload is a no-op. IDs over the cap
+    are truncated silently to keep one inflated client from flooding
+    the substrate.
+
+    Why optional + on the existing tool: I1 forbids new tools.
+    Additive optional args on an existing tool are allowed (shipped
+    signatures keep working for clients that don't send feedback).
+    """
+
+    useful_event_ids: list[str] = []
+    """Event IDs from a prior recall that the caller found helpful."""
+
+    not_useful_event_ids: list[str] = []
+    """Event IDs from a prior recall that the caller found off-target."""
+
+    missing_topic: str | None = None
+    """Free-text note about what the prior recall did NOT surface
+    that the caller expected. Capped at MAX_FEEDBACK_TOPIC_CHARS."""
+
+
 # ── observe ─────────────────────────────────────────────────────────────────
 
 
