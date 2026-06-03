@@ -6,6 +6,7 @@ Tuner is observe-only in Phase A; tests verify:
   * Tuner does NOT promote (promote_enabled=False default).
   * Tuner respects the traffic + time triggers.
 """
+
 from __future__ import annotations
 
 import time
@@ -35,8 +36,12 @@ def test_salience_guard_passes_valid_outputs() -> None:
         {
             "salience": 0.5,
             "salience_components": {
-                "entity_density": 0.2, "link_density": 0.1, "has_conflict": 0.0,
-                "type_hint_bump": 0.1, "is_compound": 0.0, "recency": 0.1,
+                "entity_density": 0.2,
+                "link_density": 0.1,
+                "has_conflict": 0.0,
+                "type_hint_bump": 0.1,
+                "is_compound": 0.0,
+                "recency": 0.1,
             },
         }
     ]
@@ -44,10 +49,19 @@ def test_salience_guard_passes_valid_outputs() -> None:
 
 
 def test_salience_guard_rejects_score_out_of_range() -> None:
-    bad = [{"salience": 1.5, "salience_components": {
-        "entity_density": 0, "link_density": 0, "has_conflict": 0,
-        "type_hint_bump": 0, "is_compound": 0, "recency": 0,
-    }}]
+    bad = [
+        {
+            "salience": 1.5,
+            "salience_components": {
+                "entity_density": 0,
+                "link_density": 0,
+                "has_conflict": 0,
+                "type_hint_bump": 0,
+                "is_compound": 0,
+                "recency": 0,
+            },
+        }
+    ]
     r = check_salience_outputs(bad)
     assert not r.passed
     assert any("outside [0, 1]" in f for f in r.failures)
@@ -177,8 +191,11 @@ def test_tuner_runs_after_time_trigger(conn) -> None:
     # Diversity rotates through the whitelist; with no prior tuner
     # rows, the first spec in REGISTRY (salience) wins.
     assert stats["hypothesis"]["worker"] in {
-        "salience", "mode_switcher", "surprise",
-        "entity_canonicalizer", "consolidator",
+        "salience",
+        "mode_switcher",
+        "surprise",
+        "entity_canonicalizer",
+        "consolidator",
     }
 
 
@@ -218,9 +235,15 @@ def test_tuner_observation_includes_phase_marker(conn) -> None:
     # reflected in either the judge_panel marker or the rationale.
     assert obs_rows
     found = any(
-        (isinstance(r.evidence, dict) and r.evidence.get("judge_panel") == "skipped:promote_enabled_false")
+        (
+            isinstance(r.evidence, dict)
+            and r.evidence.get("judge_panel") == "skipped:promote_enabled_false"
+        )
         or (r.rationale and "promote_enabled=False" in r.rationale)
-        or (isinstance(r.evidence, dict) and r.evidence.get("judge_panel") == "skipped:no_replay_shape")
+        or (
+            isinstance(r.evidence, dict)
+            and r.evidence.get("judge_panel") == "skipped:no_replay_shape"
+        )
         for r in obs_rows
     )
     assert found, f"expected a phase marker observation; got {[r.evidence for r in obs_rows]}"

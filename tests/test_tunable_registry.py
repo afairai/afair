@@ -1,4 +1,5 @@
 """Tests for the tunable registry and its substrate-backed persistence."""
+
 from __future__ import annotations
 
 import pytest
@@ -41,8 +42,12 @@ def test_get_returns_static_default_when_no_promote_exists(conn) -> None:
     assert weights == _salience_spec().default
     # All six components present and sum to 1.0.
     assert set(weights.keys()) == {
-        "entity_density", "link_density", "has_conflict",
-        "type_hint_bump", "is_compound", "recency",
+        "entity_density",
+        "link_density",
+        "has_conflict",
+        "type_hint_bump",
+        "is_compound",
+        "recency",
     }
     assert abs(sum(weights.values()) - 1.0) < 0.01
 
@@ -78,10 +83,24 @@ def test_promote_then_get_returns_new_value(conn) -> None:
 
 def test_rollback_restores_prior_value(conn) -> None:
     r = TunableRegistry(conn)
-    record_change(r, kind="promote", worker="surprise", tunable="context_window",
-                  old_value=20, new_value=25, rationale="t=0")
-    record_change(r, kind="rollback", worker="surprise", tunable="context_window",
-                  old_value=25, new_value=20, rationale="degradation gate fired")
+    record_change(
+        r,
+        kind="promote",
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+        rationale="t=0",
+    )
+    record_change(
+        r,
+        kind="rollback",
+        worker="surprise",
+        tunable="context_window",
+        old_value=25,
+        new_value=20,
+        rationale="degradation gate fired",
+    )
     assert r.get("surprise", "context_window") == 20
 
 
@@ -92,15 +111,29 @@ def test_cache_invalidated_after_write(conn) -> None:
     # Write through record_change → cache is invalidated → next get
     # reads fresh from substrate. +25% from 20 = 25, within the 30%
     # bounded_delta on surprise.context_window.
-    record_change(r, kind="promote", worker="surprise", tunable="context_window",
-                  old_value=20, new_value=25, rationale="bigger window")
+    record_change(
+        r,
+        kind="promote",
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+        rationale="bigger window",
+    )
     assert r.get("surprise", "context_window") == 25
 
 
 def test_independent_registry_instances_see_writes(conn) -> None:
     r1 = TunableRegistry(conn)
-    record_change(r1, kind="promote", worker="surprise", tunable="context_window",
-                  old_value=20, new_value=15, rationale="smaller")
+    record_change(
+        r1,
+        kind="promote",
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=15,
+        rationale="smaller",
+    )
     # Fresh registry on same connection reads the substrate state.
     r2 = TunableRegistry(conn)
     assert r2.get("surprise", "context_window") == 15
@@ -178,14 +211,29 @@ def test_validate_weights_dict_missing_key_rejected() -> None:
 
 
 def test_tuner_state_history_filters(conn) -> None:
-    tuner_state.write(conn, kind="hypothesis", worker="surprise",
-                      tunable="context_window", new_value=25,
-                      rationale="judge says try larger")
-    tuner_state.write(conn, kind="promote", worker="surprise",
-                      tunable="context_window", old_value=20, new_value=25)
-    tuner_state.write(conn, kind="observation", worker="salience",
-                      tunable="component_weights",
-                      evidence={"judge_split": 0.6})
+    tuner_state.write(
+        conn,
+        kind="hypothesis",
+        worker="surprise",
+        tunable="context_window",
+        new_value=25,
+        rationale="judge says try larger",
+    )
+    tuner_state.write(
+        conn,
+        kind="promote",
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+    )
+    tuner_state.write(
+        conn,
+        kind="observation",
+        worker="salience",
+        tunable="component_weights",
+        evidence={"judge_split": 0.6},
+    )
 
     surprise_history = tuner_state.history(conn, worker="surprise")
     assert len(surprise_history) == 2
@@ -199,6 +247,7 @@ def test_tuner_state_history_filters(conn) -> None:
 def test_tuner_state_invalid_kind_blocked_at_db_level(conn) -> None:
     # CHECK constraint should reject anything outside the allow-list.
     import sqlite3 as _sqlite3
+
     with pytest.raises(_sqlite3.IntegrityError):
         tuner_state.write(
             conn,
@@ -210,6 +259,7 @@ def test_tuner_state_invalid_kind_blocked_at_db_level(conn) -> None:
 
 def test_tuner_state_no_update_no_delete(conn) -> None:
     import sqlite3 as _sqlite3
+
     e = tuner_state.write(conn, kind="hypothesis", worker="x", tunable="y", new_value=1)
     with pytest.raises(_sqlite3.IntegrityError, match="append-only"), conn:
         conn.execute("UPDATE tuner_state SET rationale = 'changed' WHERE id = ?", (e.id,))

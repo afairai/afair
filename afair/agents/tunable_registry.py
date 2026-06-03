@@ -26,6 +26,7 @@ Reading values is the hot path — workers call ``get`` on every event
 they score. The registry caches resolved values in-memory; the cache
 is invalidated when the tuner writes a new row to ``tuner_state``.
 """
+
 from __future__ import annotations
 
 import threading
@@ -109,14 +110,16 @@ REGISTRY: tuple[TunableSpec, ...] = (
         min_value=0.0,
         max_value=1.0,
         bounded_delta=0.20,
-        allowed_values=frozenset({
-            "entity_density",
-            "link_density",
-            "has_conflict",
-            "type_hint_bump",
-            "is_compound",
-            "recency",
-        }),
+        allowed_values=frozenset(
+            {
+                "entity_density",
+                "link_density",
+                "has_conflict",
+                "type_hint_bump",
+                "is_compound",
+                "recency",
+            }
+        ),
         rationale="Per-component weight for the salience score; sums to 1.0.",
     ),
     # ── mode-switcher hysteresis thresholds ───────────────────────────
@@ -161,8 +164,7 @@ REGISTRY: tuple[TunableSpec, ...] = (
         max_value=0.95,
         bounded_delta=0.15,
         rationale=(
-            "Confidence threshold below which entity matching escalates "
-            "from Haiku to Sonnet."
+            "Confidence threshold below which entity matching escalates from Haiku to Sonnet."
         ),
     ),
     # ── consolidator ──────────────────────────────────────────────────
@@ -333,8 +335,7 @@ def _validate_string(spec: TunableSpec, proposed: Any) -> None:
         raise ChangeRejected(f"expected str, got {type(proposed).__name__}")
     if spec.allowed_values and proposed not in spec.allowed_values:
         raise ChangeRejected(
-            f"proposed value not in allowed_values "
-            f"(allowed={sorted(spec.allowed_values)})",
+            f"proposed value not in allowed_values (allowed={sorted(spec.allowed_values)})",
         )
 
 

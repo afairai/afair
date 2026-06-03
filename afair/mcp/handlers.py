@@ -162,7 +162,8 @@ def _record_recall_feedback(db: Any, feedback: RecallFeedback) -> None:
         import structlog as _structlog
 
         _structlog.get_logger(__name__).warning(
-            "recall.feedback_persist_failed", error=str(e),
+            "recall.feedback_persist_failed",
+            error=str(e),
         )
 
 
@@ -537,9 +538,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
         _registry = _TunableRegistry(db)
         _spec = _registry.get_spec("surprise", "context_window")
         _reg_value = _registry.get("surprise", "context_window")
-        surprise_window = (
-            _reg_value if _reg_value != _spec.default else ctx.surprise_context_window
-        )
+        surprise_window = _reg_value if _reg_value != _spec.default else ctx.surprise_context_window
     except Exception:
         surprise_window = ctx.surprise_context_window
     recent_context = _recent_canonical_context(db, surprise_window)

@@ -23,6 +23,7 @@ Design notes:
   * Guards are SPECIFIC. Generic "output is non-empty" goes here.
     "Output makes sense semantically" goes to the LLM judge instead.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -52,10 +53,16 @@ def check_salience_outputs(outputs: list[dict[str, Any]]) -> GuardResult:
     coverage upstream.
     """
     failures: list[str] = []
-    expected_components = frozenset({
-        "entity_density", "link_density", "has_conflict",
-        "type_hint_bump", "is_compound", "recency",
-    })
+    expected_components = frozenset(
+        {
+            "entity_density",
+            "link_density",
+            "has_conflict",
+            "type_hint_bump",
+            "is_compound",
+            "recency",
+        }
+    )
     for i, out in enumerate(outputs):
         if not isinstance(out, dict):
             failures.append(f"#{i}: not a dict")

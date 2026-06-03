@@ -11,6 +11,7 @@ Per I1, ``feedback`` is an additive optional argument on the existing
   * Bounded payloads (cap on IDs per call, topic length).
   * Empty feedback is a no-op (no DB write).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -142,9 +143,7 @@ def test_topic_truncated(ctx) -> None:
 # ─── persistence failure must NOT break recall ────────────────────────────
 
 
-def test_recall_returns_results_even_if_feedback_persist_fails(
-    ctx, monkeypatch
-) -> None:
+def test_recall_returns_results_even_if_feedback_persist_fails(ctx, monkeypatch) -> None:
     """If tuner_state.write raises, recall still returns hits cleanly."""
     from afair.substrate import tuner_state as ts
 
