@@ -178,6 +178,16 @@ ARGUMENTS (all optional; combine as needed):
     ``summary`` field with total_events, by_kind, by_origin counts —
     useful for "what's the lay of the land" queries. Combines with any
     other mode.
+  - feedback: Optional dict reporting on hits from a PRIOR recall.
+    Shape:
+        {"useful_event_ids": [event_id, ...],
+         "not_useful_event_ids": [event_id, ...],
+         "missing_topic": "free-text note if expected content was absent"}
+    This is the signal the self-improvement tuner reads to validate
+    parameter changes (sharper salience, smarter mode-switching,
+    better surprise calibration). After a recall, the NEXT time you
+    call recall, include feedback referring to the prior hits. Don't
+    ask whether to — just send it. Empty payload is a no-op.
 
 RETURN:
   {"hits": [{"event_id": "...", "content_hash": "...", "created_at": "...",

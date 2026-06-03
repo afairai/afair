@@ -76,6 +76,8 @@ from ..substrate.search import FTS5_SPECIALS_RE
 from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
+    MAX_FEEDBACK_IDS_PER_CALL,
+    MAX_FEEDBACK_TOPIC_CHARS,
     MAX_REMEMBER_BYTES,
     BinaryContent,
     CompoundBlobRefPart,
@@ -87,6 +89,7 @@ from .schemas import (
     InvalidationSummary,
     ObserveEvent,
     ObserveResult,
+    RecallFeedback,
     RecallHit,
     RecallResult,
     RememberContent,
@@ -120,6 +123,47 @@ class ContentTooLargeError(ValueError):
 
 class InvalidBase64Error(ValueError):
     """Raised when BinaryContent.data_b64 isn't valid base64."""
+
+
+def _record_recall_feedback(db: Any, feedback: RecallFeedback) -> None:
+    """Persist a RecallFeedback payload as a tuner observation row.
+
+    Best-effort: any failure here logs and continues. Recall must
+    never break on a signal-collection error.
+
+    Bounds applied (matching the schema constants):
+      - useful_event_ids / not_useful_event_ids capped at
+        MAX_FEEDBACK_IDS_PER_CALL each (silent truncate)
+      - missing_topic truncated to MAX_FEEDBACK_TOPIC_CHARS
+    """
+    try:
+        useful = list(feedback.useful_event_ids)[:MAX_FEEDBACK_IDS_PER_CALL]
+        not_useful = list(feedback.not_useful_event_ids)[:MAX_FEEDBACK_IDS_PER_CALL]
+        topic: str | None = None
+        if feedback.missing_topic:
+            topic = feedback.missing_topic[:MAX_FEEDBACK_TOPIC_CHARS]
+        # No-op if every field is empty.
+        if not useful and not not_useful and not topic:
+            return
+        from ..substrate import tuner_state as _ts
+
+        _ts.write(
+            db,
+            kind="observation",
+            worker="recall",
+            tunable="feedback",
+            evidence={
+                "useful_event_ids": useful,
+                "not_useful_event_ids": not_useful,
+                "missing_topic": topic,
+            },
+        )
+    except Exception as e:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "recall.feedback_persist_failed", error=str(e),
+        )
 
 
 class InvalidRecallArgsError(ValueError):
@@ -475,8 +519,30 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
 
     # Phase 4 Track 2 — recent context for the per-hit surprise score.
     # Computed once per recall and applied to every hit.
+    #
+    # As of 2026-06-03 the window size resolves through three layers:
+    #   1. Tuner-promoted value in the registry (registry != default)
+    #      → trust the tuner.
+    #   2. Operator override via Settings/env → ctx wins.
+    #   3. Static default → both agree, doesn't matter which.
+    #
+    # The try/except fallback protects against registry hiccup —
+    # recall must NEVER fail because tunable lookup misbehaved.
     ctx = get_context()
-    recent_context = _recent_canonical_context(db, ctx.surprise_context_window)
+    from ..agents.tunable_registry import (
+        TunableRegistry as _TunableRegistry,  # local import to avoid cycle
+    )
+
+    try:
+        _registry = _TunableRegistry(db)
+        _spec = _registry.get_spec("surprise", "context_window")
+        _reg_value = _registry.get("surprise", "context_window")
+        surprise_window = (
+            _reg_value if _reg_value != _spec.default else ctx.surprise_context_window
+        )
+    except Exception:
+        surprise_window = ctx.surprise_context_window
+    recent_context = _recent_canonical_context(db, surprise_window)
 
     overlay: dict[str, dict[str, Any]] = {}
     for content_hash, mentions in mentions_by_hash.items():
@@ -516,7 +582,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                 overlay[content_hash]["surprise_components"] = {
                     "novel_entity_count": novel,
                     "total_entity_count": total,
-                    "window_size": ctx.surprise_context_window,
+                    "window_size": surprise_window,
                 }
 
     # Attach edges keyed by content_hash via event_id reverse-map.
@@ -857,6 +923,7 @@ def recall(
     by_content_hash: str | None = None,
     full_payload: bool = False,
     stats: bool = False,
+    feedback: RecallFeedback | None = None,
 ) -> RecallResult:
     """Read the vault. Six call modes share this signature:
 
@@ -883,6 +950,13 @@ def recall(
     db = connect_for_thread()
     ctx = get_context()
     note: str | None = None
+
+    # Recall-feedback signal (additive optional arg per I1). Written
+    # to tuner_state as kind='observation' for the tuner to read
+    # later. Never blocks the recall itself — if the write fails,
+    # we log and continue. Best-effort signal collection.
+    if feedback is not None:
+        _record_recall_feedback(db, feedback)
 
     summary: ContextSummary | None = None
     if stats:

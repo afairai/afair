@@ -132,6 +132,36 @@
     `_wait_for_pending`, `cleanup_expired_codes` — all zero
     callers, superseded by batch / scheduled-GC variants.
   Full session 2026-05-30 19:00–22:00 UTC; commits f3e161f..362b2cd.
+- **Recursive self-improvement foundation (2026-06-03)** — Phase A
+  of `analysis/2026-06-03-recursive-self-improvement.md` shipped.
+  Concretely:
+  - `afair/agents/tunable_registry.py` — whitelist + spec + cache
+    + bounded-delta validation. 6 tunables initially (salience
+    weights, mode-switcher thresholds, surprise window, entity
+    canonicalizer escalation, consolidator cutoff).
+  - `afair/substrate/tuner_state.py` + new append-only DB table
+    (CHECK + no-update/no-delete triggers). Records every promote,
+    rollback, hypothesis, observation. Reads expose the active
+    value per (worker, tunable).
+  - `afair/agents/guards.py` — per-worker invariant suites (hard
+    floor on variant quality).
+  - `afair/agents/llm_judge.py` — multi-vendor judge panel via
+    litellm (Anthropic + OpenAI + Google majority). Frozen prompt
+    `JUDGE_PROMPT_VERSION=v0:2026-06-03`. Budget cap 200K tokens
+    per cycle.
+  - `afair/agents/replay.py` — re-run any worker on past events
+    with two parameter sets, return matched pairs.
+  - `afair/agents/tuner.py` — cold-path worker, registered in
+    server.py with **`promote_enabled=False`** (Phase A observe-only).
+    Traffic-triggered (≥ 50 new events or ≥ 24h).
+  - Optional `feedback` arg on `recall()` (additive — I1-compliant).
+    Empty payload no-op. Persists as tuner_state observation row.
+  - Worker refactors: `salience`, `mode_switcher`, `surprise` read
+    parameters from registry (with static defaults preserved).
+  - Snippet additions in onboarding-email + session-start resource
+    + `recall` tool description instruct AI clients to send feedback.
+  - Tests: 47 new (`test_tunable_registry`, `test_recall_feedback`,
+    `test_tuner_and_guards`). Full suite green.
 
 ### 0.2 What's in flight
 

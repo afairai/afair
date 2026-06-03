@@ -33,6 +33,7 @@ from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.salience import SalienceWorker
+from ..agents.tuner import Tuner
 from ..substrate import start_checkpoint_loop
 from ..substrate.db import set_vault_key
 from . import descriptions, handlers, landing, resources, schemas
@@ -107,6 +108,12 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityCanonicalizer(),
                 SalienceWorker(),
                 ModeSwitcher(),
+                # Self-improvement tuner — Phase A observe-only.
+                # promote_enabled=False per
+                # analysis/2026-06-03-recursive-self-improvement.md §7
+                # ("DOES NOT promote yet"). Flip to True only after a
+                # few observation cycles have been reviewed.
+                Tuner(promote_enabled=False),
             ],
         ).start()
 
@@ -154,6 +161,7 @@ def build_server(settings: Settings) -> FastMCP:
         by_content_hash: str | None = None,
         full_payload: bool = False,
         stats: bool = False,
+        feedback: schemas.RecallFeedback | None = None,
     ) -> schemas.RecallResult:
         return handlers.recall(
             query=query,
@@ -164,6 +172,7 @@ def build_server(settings: Settings) -> FastMCP:
             by_content_hash=by_content_hash,
             full_payload=full_payload,
             stats=stats,
+            feedback=feedback,
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")
