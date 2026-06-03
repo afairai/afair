@@ -35,6 +35,17 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
+# Hard cap on the serialized JSON size for evidence / values. Prevents
+# a buggy or malicious caller from writing megabyte-scale rows. 64 KB
+# is way past any legitimate evidence dict (judge verdict + replay
+# stats is ~2 KB tops); anything bigger is a bug or attack.
+MAX_TUNER_STATE_FIELD_BYTES = 64 * 1024
+
+
+class TunerStatePayloadTooLarge(ValueError):
+    """A field on a tuner_state row exceeds MAX_TUNER_STATE_FIELD_BYTES."""
+
+
 TunerKind = Literal["promote", "rollback", "hypothesis", "observation"]
 
 
@@ -58,7 +69,13 @@ def _now_iso() -> str:
 def _to_json(value: Any | None) -> str | None:
     if value is None:
         return None
-    return json.dumps(value, sort_keys=True, default=str)
+    s = json.dumps(value, sort_keys=True, default=str)
+    if len(s.encode("utf-8")) > MAX_TUNER_STATE_FIELD_BYTES:
+        raise TunerStatePayloadTooLarge(
+            f"serialized value exceeds {MAX_TUNER_STATE_FIELD_BYTES} bytes "
+            f"(got {len(s)} chars)",
+        )
+    return s
 
 
 def _from_json(s: str | None) -> Any | None:
