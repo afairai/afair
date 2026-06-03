@@ -15,10 +15,16 @@ Blob content is NOT inlined by default — the JSONL references blobs
 by hash. A separate ``?blobs=inline`` mode base64-encodes blob bytes
 for callers who need an air-gapped copy.
 
-Scoped bearer auth like ``/internal/signup``: a separate token
-(``AFAIR_EXPORT_TOKEN``) so compromise of the web app does not grant
-arbitrary substrate read access. Same audit-finding mitigation as
-the signup endpoint.
+Auth: the endpoint accepts EITHER the regular ``AFAIR_AUTH_TOKEN``
+(the same bearer used by every MCP request — what the user has from
+their onboarding email) OR the scoped ``AFAIR_EXPORT_TOKEN`` if set.
+
+Why both: the user needs to be able to export their own vault using
+the credential they already have. The scoped token exists for
+automation (a backup cron with no MCP write capability) and is
+optional. Single-tenant by design means there is no other tenant to
+protect from — anyone who can auth to this machine already sees the
+whole vault.
 
 Why HTTP and not an MCP-tool argument: streaming N MB of JSONL
 through the MCP JSON-RPC envelope is awkward and forces the entire
@@ -69,19 +75,33 @@ def _unauthorized() -> Response:
 
 
 def _check_auth(request: Request) -> bool:
-    """Constant-time check of the Bearer token against AFAIR_EXPORT_TOKEN."""
-    expected = request.app.state.settings.export_token
-    if expected is None:
-        return False
-    expected_value = (
-        expected.get_secret_value() if hasattr(expected, "get_secret_value") else str(expected)
-    )
+    """Accept the main MCP bearer (``AFAIR_AUTH_TOKEN``) or the optional
+    scoped ``AFAIR_EXPORT_TOKEN``. Constant-time compare on both.
+    """
+    settings = request.app.state.settings
     header = request.headers.get("authorization", "")
     match = _TOKEN_RE.match(header)
     if match is None:
         return False
     presented = match.group(1).strip()
-    return hmac.compare_digest(presented, expected_value)
+
+    candidates: list[str] = []
+    if settings.auth_token is not None:
+        candidates.append(settings.auth_token.get_secret_value())
+    if settings.export_token is not None:
+        candidates.append(settings.export_token.get_secret_value())
+    if not candidates:
+        # Neither credential configured — fail closed.
+        return False
+
+    # Compare against every candidate so a single accepted token unlocks
+    # the endpoint. hmac.compare_digest on each (constant-time) keeps
+    # the comparison side-channel safe.
+    ok = False
+    for c in candidates:
+        if hmac.compare_digest(presented, c):
+            ok = True
+    return ok
 
 
 def _iter_export(
