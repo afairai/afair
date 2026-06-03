@@ -11,6 +11,7 @@ memory for comparison.
 Per the plan §6.1 "Replay module" — pulls last N events of the
 relevant kind, runs through both variants, returns paired outputs.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ log = structlog.get_logger(__name__)
 @dataclass(frozen=True)
 class ReplayPair:
     """One event, scored under both parameter sets."""
+
     event_id: str
     content_hash: str
     input_summary: str  # short human-readable preview of the input
@@ -42,6 +44,7 @@ class ReplayPair:
 class ReplayReport:
     """Outcome of a replay run — pairs plus failure counter so a
     silent drop never goes unnoticed."""
+
     pairs: list[ReplayPair]
     sample_size_requested: int
     sample_size_kept: int

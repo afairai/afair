@@ -35,6 +35,7 @@ Each rollback writes a tuner_state.kind='rollback' row carrying the
 reason in evidence_json and restoring the old_value from the
 promote's old_value_json.
 """
+
 from __future__ import annotations
 
 import json
@@ -181,9 +182,7 @@ class RollbackMonitor(ColdPathWorker):
         events_since = self._count_events_since(conn, recorded_at)
         decision["events_since_promote"] = events_since
         if events_since < ROLLBACK_EVENT_WINDOW:
-            decision["reason"] = (
-                f"only {events_since}/{ROLLBACK_EVENT_WINDOW} events since promote"
-            )
+            decision["reason"] = f"only {events_since}/{ROLLBACK_EVENT_WINDOW} events since promote"
             return decision
 
         # Pre-promote baseline lives in the promote's evidence.

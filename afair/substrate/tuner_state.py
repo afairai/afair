@@ -18,6 +18,7 @@ Write pattern: the tuner module is the only writer. Each write
 captures enough evidence (judge scores, replay size, rationale) to
 explain the decision when the operator reads it back via recall.
 """
+
 from __future__ import annotations
 
 import json
@@ -72,8 +73,7 @@ def _to_json(value: Any | None) -> str | None:
     s = json.dumps(value, sort_keys=True, default=str)
     if len(s.encode("utf-8")) > MAX_TUNER_STATE_FIELD_BYTES:
         raise TunerStatePayloadTooLarge(
-            f"serialized value exceeds {MAX_TUNER_STATE_FIELD_BYTES} bytes "
-            f"(got {len(s)} chars)",
+            f"serialized value exceeds {MAX_TUNER_STATE_FIELD_BYTES} bytes (got {len(s)} chars)",
         )
     return s
 

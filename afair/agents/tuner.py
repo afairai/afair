@@ -31,6 +31,7 @@ What this writes to ``tuner_state``:
     baseline so the rollback monitor can detect degradation later.
   - ``kind='rollback'`` is written by ``RollbackMonitor``, not here.
 """
+
 from __future__ import annotations
 
 import time
@@ -207,6 +208,7 @@ def _stringify_output(out: Any) -> str:
     outputs produce identical prompts across panel members.
     """
     import json
+
     return json.dumps(out, sort_keys=True, indent=2, default=str)
 
 
@@ -546,7 +548,9 @@ class Tuner(ColdPathWorker):
                 continue
             spec = registry.get_spec(worker, tunable)
             current = registry.get(worker, tunable)
-            proposed, direction = self._propose_value(spec, current, last_hyp_by_key.get((worker, tunable)))
+            proposed, direction = self._propose_value(
+                spec, current, last_hyp_by_key.get((worker, tunable))
+            )
             if proposed is None:
                 continue
             rationale = (
@@ -587,9 +591,14 @@ class Tuner(ColdPathWorker):
         # Direction toggling: simple heuristic — if there's a prior
         # hypothesis on this tunable, pick the OPPOSITE direction this
         # time. We don't track outcomes yet — that's a Phase-C optimization.
-        direction_up = last_hypothesis_recorded_at is None or hash(
-            last_hypothesis_recorded_at,
-        ) % 2 == 0
+        direction_up = (
+            last_hypothesis_recorded_at is None
+            or hash(
+                last_hypothesis_recorded_at,
+            )
+            % 2
+            == 0
+        )
 
         if spec.kind == "float":
             step = float(spec.bounded_delta) * 0.95  # stay safely inside the cap
@@ -795,6 +804,7 @@ def _read_feedback_baseline(
     not_useful_count = 0
     for r in rows:
         import json
+
         try:
             ev = json.loads(r["evidence_json"]) if r["evidence_json"] else {}
         except json.JSONDecodeError:
