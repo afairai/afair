@@ -51,6 +51,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_id
 from .cold_path import ColdPathWorker
 from .interpretation import write_interpretation
+from .tunable_registry import TunableRegistry
 
 if TYPE_CHECKING:
     import sqlite3
@@ -66,16 +67,20 @@ SALIENCE_KIND_FILTER = ("remember", "observe")
 — those are derived, not first-class observations."""
 
 
-# Component weights — sum to ~1.0 at maximum saturation. Tuned by
-# eyeballing realistic distributions; revisit when we have actual
-# usage data showing which signal correlates best with what users
-# actually re-recall.
-W_ENTITY_DENSITY = 0.25
-W_LINK_DENSITY = 0.20
-W_HAS_CONFLICT = 0.10
-W_TYPE_HINT_BUMP = 0.15
-W_IS_COMPOUND = 0.10
-W_RECENCY = 0.20
+# Component weights — sourced from the TunableRegistry so the
+# self-improvement tuner can adjust them. Static defaults still live
+# here as a fallback (and are mirrored as the registry default), so
+# the worker stays runnable even if the registry layer fails. The
+# canonical values come from
+# ``TunableRegistry.get("salience", "component_weights")``.
+_DEFAULT_WEIGHTS: dict[str, float] = {
+    "entity_density": 0.25,
+    "link_density": 0.20,
+    "has_conflict": 0.10,
+    "type_hint_bump": 0.15,
+    "is_compound": 0.10,
+    "recency": 0.20,
+}
 
 # Per-event budget per cycle — caps the worst-case work the scheduler
 # triggers in one tick. With 200 unscored events per cycle and one
@@ -122,11 +127,18 @@ class SalienceWorker(ColdPathWorker):
 
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         _ = settings  # not used yet — kept for the Worker contract
+        # Construct the registry per-cycle. Reads are connection-scoped
+        # and cached for the lifetime of this run() call; the next cycle
+        # gets a fresh read so any tuner promote that happened in the
+        # meantime takes effect.
+        registry = TunableRegistry(conn)
+        weights = registry.get("salience", "component_weights")
         stats: dict[str, Any] = {
             "candidates": 0,
             "scored": 0,
             "skipped_already_scored": 0,
             "skipped_event_missing": 0,
+            "weights_snapshot": weights,
         }
 
         # Find events without a salience interpretation. Bounded by
@@ -154,7 +166,7 @@ class SalienceWorker(ColdPathWorker):
             if event is None:
                 stats["skipped_event_missing"] += 1
                 continue
-            score, components = score_event(conn, event)
+            score, components = score_event(conn, event, weights=weights)
             extraction: dict[str, Any] = {
                 "salience": score,
                 "salience_components": components,
@@ -189,14 +201,25 @@ class SalienceWorker(ColdPathWorker):
         return stats
 
 
-def score_event(conn: sqlite3.Connection, event: Any) -> tuple[float, dict[str, float]]:
+def score_event(
+    conn: sqlite3.Connection,
+    event: Any,
+    *,
+    weights: dict[str, float] | None = None,
+) -> tuple[float, dict[str, float]]:
     """Compute salience + component breakdown for one event.
 
     Pure function over substrate state — safe to call from anywhere
     that has a read connection. Returns ``(score, components)`` where
     ``score`` is the clamped final salience and ``components`` is the
     per-signal contribution dict (for audit / future tuning).
+
+    Weights default to the static dict in this module. Production
+    code paths (the SalienceWorker) read them from the TunableRegistry
+    and pass them in; the default keeps direct callers (tests,
+    backfill scripts) working without registry plumbing.
     """
+    w = weights if weights is not None else _DEFAULT_WEIGHTS
     payload = event.payload or {}
 
     entity_density = _entity_density_score(conn, event.content_hash)
@@ -217,12 +240,12 @@ def score_event(conn: sqlite3.Connection, event: Any) -> tuple[float, dict[str, 
         "recency": recency,
     }
     score = (
-        W_ENTITY_DENSITY * entity_density
-        + W_LINK_DENSITY * link_density
-        + W_HAS_CONFLICT * has_conflict
-        + W_TYPE_HINT_BUMP * type_hint_bump
-        + W_IS_COMPOUND * is_compound
-        + W_RECENCY * recency
+        w["entity_density"] * entity_density
+        + w["link_density"] * link_density
+        + w["has_conflict"] * has_conflict
+        + w["type_hint_bump"] * type_hint_bump
+        + w["is_compound"] * is_compound
+        + w["recency"] * recency
     )
     score = max(0.0, min(1.0, score))
     return score, components

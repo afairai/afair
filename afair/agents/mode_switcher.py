@@ -77,13 +77,17 @@ MODE_SWITCHER_ORIGIN = "agent:mode_switcher"
 # out single-event spikes.
 SALIENCE_WINDOW_SIZE = 20
 
-# Hysteresis thresholds. Cumulative salience ranges 0..N (where N is
-# the window size, assuming max salience=1.0 per event). With N=20:
-#   ≥ 8.0 → switch to CEN (avg salience ≥ 0.4 → consistent signal)
-#   ≤ 4.0 → switch to DMN (avg salience ≤ 0.2 → quiet)
-# The gap (4.0..8.0) is the hysteresis dead-zone.
-SWITCH_TO_CEN_THRESHOLD = 8.0
-SWITCH_TO_DMN_THRESHOLD = 4.0
+# Hysteresis thresholds. Sourced from TunableRegistry so the
+# self-improvement tuner can adjust them. Static defaults mirrored
+# in the registry spec; constants kept here as a fallback for direct
+# callers (tests, debug helpers) that don't have a registry.
+#
+# With salience window N=20 and max salience=1.0 per event:
+#   ≥ DEFAULT_CEN_THRESHOLD (8.0) → switch to CEN
+#   ≤ DEFAULT_DMN_THRESHOLD (4.0) → switch to DMN
+# The gap between them is the hysteresis dead-zone.
+DEFAULT_CEN_THRESHOLD = 8.0
+DEFAULT_DMN_THRESHOLD = 4.0
 
 
 class ModeSwitcher(ColdPathWorker):
@@ -100,11 +104,21 @@ class ModeSwitcher(ColdPathWorker):
 
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         _ = settings
+        # Read tuned thresholds from the registry. Defaults match the
+        # historical constants so behavior is unchanged at boot.
+        from .tunable_registry import TunableRegistry  # local import to avoid cycle
+
+        registry = TunableRegistry(conn)
+        cen_threshold = registry.get("mode_switcher", "cen_threshold")
+        dmn_threshold = registry.get("mode_switcher", "dmn_threshold")
+
         stats: dict[str, Any] = {
             "current_mode": None,
             "cumulative_salience": 0.0,
             "transitioned": False,
             "to_mode": None,
+            "cen_threshold": cen_threshold,
+            "dmn_threshold": dmn_threshold,
         }
 
         recent = read_recent_salience(conn, limit=SALIENCE_WINDOW_SIZE)
@@ -118,7 +132,12 @@ class ModeSwitcher(ColdPathWorker):
         current = read_current_mode(conn)
         stats["current_mode"] = current
 
-        target = _decide_target_mode(current, cumulative)
+        target = _decide_target_mode(
+            current,
+            cumulative,
+            cen_threshold=cen_threshold,
+            dmn_threshold=dmn_threshold,
+        )
         if target == current:
             log.info(
                 "mode_switcher.no_change",
@@ -177,16 +196,25 @@ def read_current_mode(conn: sqlite3.Connection) -> str:
     return MODE_DMN
 
 
-def _decide_target_mode(current: str, cumulative: float) -> str:
+def _decide_target_mode(
+    current: str,
+    cumulative: float,
+    *,
+    cen_threshold: float = DEFAULT_CEN_THRESHOLD,
+    dmn_threshold: float = DEFAULT_DMN_THRESHOLD,
+) -> str:
     """Two-threshold transition decision (hysteresis).
 
     Returns the mode we SHOULD be in given the current mode + the
     cumulative-salience reading. Same as ``current`` when no
     transition should fire.
+
+    Thresholds default to the static module-level constants. Worker
+    code paths pass in tuned values from the TunableRegistry.
     """
-    if current != MODE_CEN and cumulative >= SWITCH_TO_CEN_THRESHOLD:
+    if current != MODE_CEN and cumulative >= cen_threshold:
         return MODE_CEN
-    if current != MODE_DMN and cumulative <= SWITCH_TO_DMN_THRESHOLD:
+    if current != MODE_DMN and cumulative <= dmn_threshold:
         return MODE_DMN
     return current
 
