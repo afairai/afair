@@ -43,6 +43,7 @@ from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .correlation import CorrelationIdMiddleware
+from .export_route import export_endpoint
 from .oauth import routes as oauth_routes
 from .rate_limit import RateLimitMiddleware, TokenBucketRateLimiter
 from .security_headers import SecurityHeadersMiddleware
@@ -346,6 +347,11 @@ def build_app(settings: Settings) -> Starlette:
         # Exempted from BodySizeLimitMiddleware so files past 12 MB go
         # through (cap enforced per-chunk inside the handler).
         Route("/internal/blob/upload", blob_upload_endpoint, methods=["POST"]),
+        # Vault export. Stream JSONL of every event + interpretation +
+        # entity-graph row. Scoped bearer (AFAIR_EXPORT_TOKEN) — narrow
+        # surface independent of the main MCP auth. See
+        # afair/mcp/export_route.py.
+        Route("/internal/export", export_endpoint, methods=["GET"]),
         Mount("/", app=mcp_app),
     ]
 

@@ -120,6 +120,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    # — Scoped token for the vault-export endpoint.
+    # Bearer used only on /internal/export. Lets the user (or the
+    # admin web app on behalf of the user) stream the whole vault as
+    # JSONL without granting full MCP-tool access. Same audit-finding
+    # mitigation pattern as ``signup_token``.
+    export_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "export_token",
+            "AFAIR_EXPORT_TOKEN",
+            "afair_export_token",
+        ),
+    )
+
     # — OAuth server signing
     # We issue JWTs signed with this secret (HS256 for Phase 1; RS256
     # upgrade lives in a later phase if/when we need cross-instance

@@ -1,0 +1,210 @@
+"""Tests for the /internal/export endpoint."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+from pydantic import SecretStr
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from afair.mcp.export_route import export_endpoint
+from afair.settings import Settings
+from afair.substrate import open_db
+from afair.substrate.events import write_event_with_status
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.fixture()
+def vault_dir(tmp_path):
+    p = tmp_path / "vault"
+    p.mkdir()
+    return p
+
+
+def _build_app(vault_dir: Path, export_token: str = "test-token") -> Starlette:
+    settings = Settings(
+        vault_dir=vault_dir,
+        export_token=SecretStr(export_token),
+        # required by Settings.__init__ — minimal viable
+        afair_auth_token=SecretStr("auth-not-used-here"),
+    )
+    app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
+    app.state.settings = settings
+    return app
+
+
+def _seed_events(vault_dir: Path, n: int = 3) -> None:
+    """Drop N varied events into the substrate fixture."""
+    conn = open_db(vault_dir)
+    try:
+        for i in range(n):
+            write_event_with_status(
+                conn,
+                kind="remember",
+                origin="agent",
+                payload={"content_type": "text", "text": f"event-{i}"},
+            )
+    finally:
+        conn.close()
+
+
+# ─── auth ────────────────────────────────────────────────────────────────
+
+
+def test_export_rejects_missing_bearer(vault_dir) -> None:
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export")
+    assert r.status_code == 401
+    assert "Bearer" in r.headers.get("WWW-Authenticate", "")
+
+
+def test_export_rejects_wrong_bearer(vault_dir) -> None:
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_export_rejects_when_token_unset(vault_dir) -> None:
+    """If AFAIR_EXPORT_TOKEN is unset on the server, every call is 401."""
+    settings = Settings(
+        vault_dir=vault_dir,
+        afair_auth_token=SecretStr("auth-not-used-here"),
+        # export_token deliberately not set
+    )
+    app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
+    app.state.settings = settings
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer anything"})
+    assert r.status_code == 401
+
+
+# ─── shape ───────────────────────────────────────────────────────────────
+
+
+def test_export_empty_vault_returns_manifest_only(vault_dir) -> None:
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/x-ndjson")
+    assert "attachment" in r.headers["content-disposition"]
+    lines = [line for line in r.text.split("\n") if line]
+    # Empty substrate → only the manifest terminator.
+    assert len(lines) == 1
+    manifest = json.loads(lines[0])
+    assert manifest["kind"] == "manifest"
+    assert manifest["format_version"] == 1
+
+
+def test_export_streams_events_and_manifest(vault_dir) -> None:
+    _seed_events(vault_dir, n=3)
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200
+
+    lines = [json.loads(line) for line in r.text.split("\n") if line]
+    event_lines = [line for line in lines if line["kind"] == "event"]
+    manifest_lines = [line for line in lines if line["kind"] == "manifest"]
+
+    assert len(event_lines) == 3
+    assert len(manifest_lines) == 1
+    # Events ordered chronologically.
+    timestamps = [e["created_at"] for e in event_lines]
+    assert timestamps == sorted(timestamps)
+    # Payloads parsed.
+    for e in event_lines:
+        assert isinstance(e["payload"], dict)
+        assert e["payload"]["content_type"] == "text"
+    # Manifest is the LAST record.
+    assert lines[-1]["kind"] == "manifest"
+
+
+def test_export_includes_blob_references_without_inline(vault_dir) -> None:
+    """Blob references appear in events but content_b64 is omitted by default."""
+    from afair.substrate.objects import write_object
+
+    conn = open_db(vault_dir)
+    try:
+        # Store a blob and reference it via an event payload.
+        blob_hash = write_object(vault_dir, b"hello world")
+        write_event_with_status(
+            conn,
+            kind="remember",
+            origin="agent",
+            payload={
+                "content_type": "binary",
+                "blob_hash": blob_hash,
+                "size_bytes": 11,
+                "mime": "text/plain",
+            },
+        )
+    finally:
+        conn.close()
+
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
+    lines = [json.loads(line) for line in r.text.split("\n") if line]
+    blob_lines = [line for line in lines if line["kind"] == "blob"]
+    assert len(blob_lines) == 1
+    assert blob_lines[0]["blob_hash"] == blob_hash
+    assert "content_b64" not in blob_lines[0]
+
+
+def test_export_inlines_blobs_when_requested(vault_dir) -> None:
+    """?blobs=inline base64-encodes blob bytes into the stream."""
+    from base64 import b64decode
+
+    from afair.substrate.objects import write_object
+
+    conn = open_db(vault_dir)
+    try:
+        blob_hash = write_object(vault_dir, b"hello world")
+        write_event_with_status(
+            conn,
+            kind="remember",
+            origin="agent",
+            payload={
+                "content_type": "binary",
+                "blob_hash": blob_hash,
+                "size_bytes": 11,
+                "mime": "text/plain",
+            },
+        )
+    finally:
+        conn.close()
+
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get(
+        "/internal/export?blobs=inline",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    lines = [json.loads(line) for line in r.text.split("\n") if line]
+    blob_lines = [line for line in lines if line["kind"] == "blob"]
+    assert len(blob_lines) == 1
+    assert "content_b64" in blob_lines[0]
+    assert b64decode(blob_lines[0]["content_b64"]) == b"hello world"
+
+
+def test_export_has_streaming_response_headers(vault_dir) -> None:
+    _seed_events(vault_dir, n=1)
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200
+    cd = r.headers.get("content-disposition", "")
+    assert "attachment" in cd
+    assert "afair-export-" in cd
+    assert cd.endswith('.jsonl"')
+    assert r.headers.get("x-format-version") == "1"
+    assert "no-store" in r.headers.get("cache-control", "")
