@@ -72,18 +72,64 @@ def test_export_rejects_wrong_bearer(vault_dir) -> None:
     assert r.status_code == 401
 
 
-def test_export_rejects_when_token_unset(vault_dir) -> None:
-    """If AFAIR_EXPORT_TOKEN is unset on the server, every call is 401."""
-    settings = Settings(
-        vault_dir=vault_dir,
-        afair_auth_token=SecretStr("auth-not-used-here"),
-        # export_token deliberately not set
-    )
+def test_export_rejects_when_both_tokens_unset(vault_dir) -> None:
+    """If neither AFAIR_AUTH_TOKEN nor AFAIR_EXPORT_TOKEN is set, every
+    call is 401 — fail-closed semantics.
+    """
+    settings = Settings(vault_dir=vault_dir)
     app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
     app.state.settings = settings
     client = TestClient(app)
     r = client.get("/internal/export", headers={"Authorization": "Bearer anything"})
     assert r.status_code == 401
+
+
+def test_export_accepts_main_mcp_auth_token(vault_dir) -> None:
+    """The user's regular MCP bearer should unlock /internal/export.
+
+    This is the path users hit with the credential from their
+    onboarding email. Without this, the bus-factor export promise
+    on /datenschutz can't be fulfilled.
+    """
+    settings = Settings(
+        vault_dir=vault_dir,
+        afair_auth_token=SecretStr("main-mcp-token"),
+        # export_token deliberately NOT set
+    )
+    app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
+    app.state.settings = settings
+    client = TestClient(app)
+    r = client.get(
+        "/internal/export",
+        headers={"Authorization": "Bearer main-mcp-token"},
+    )
+    assert r.status_code == 200
+
+
+def test_export_accepts_either_token_when_both_set(vault_dir) -> None:
+    """Both the scoped export token and the main MCP token unlock the
+    endpoint when both are configured. Either credential is enough.
+    """
+    settings = Settings(
+        vault_dir=vault_dir,
+        afair_auth_token=SecretStr("main-mcp-token"),
+        export_token=SecretStr("scoped-export-token"),
+    )
+    app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
+    app.state.settings = settings
+    client = TestClient(app)
+    r1 = client.get(
+        "/internal/export", headers={"Authorization": "Bearer main-mcp-token"}
+    )
+    r2 = client.get(
+        "/internal/export", headers={"Authorization": "Bearer scoped-export-token"}
+    )
+    r3 = client.get(
+        "/internal/export", headers={"Authorization": "Bearer something-else"}
+    )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r3.status_code == 401
 
 
 # ─── shape ───────────────────────────────────────────────────────────────
