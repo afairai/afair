@@ -162,6 +162,34 @@
     + `recall` tool description instruct AI clients to send feedback.
   - Tests: 47 new (`test_tunable_registry`, `test_recall_feedback`,
     `test_tuner_and_guards`). Full suite green.
+- **Phase A hardening pass (2026-06-03)** — 8 audit findings closed
+  before going live. Critical: evidence size cap (64 KB), defense-
+  in-depth validation in `record_change`, untrusted-content wrapping
+  in LLM-judge prompts, replay returns full structured output. High:
+  public connection accessor, judge call timeout (30s), actual token
+  tracking from litellm response, cross-tunable hysteresis invariant
+  for mode_switcher. 14 new tests cover all 8 findings.
+- **Phase B (2026-06-03 evening)** — promotion goes live with full
+  safety stack:
+  - LLM-judge integration: multi-vendor majority (Anthropic Sonnet +
+    OpenAI GPT-5 + Gemini 2.5 Pro) via litellm, frozen prompt
+    `v0:2026-06-03`, 70% threshold for promote, 200K tokens/cycle.
+  - `Tuner(promote_enabled=True)` writes `kind='promote'` rows when
+    judge majority + guards both pass. Pre-promote feedback baseline
+    stashed in evidence for the rollback monitor.
+  - `RollbackMonitor` new cold-path worker (5-min cadence) watches
+    each promote until ≥ 50 events arrive, then compares useful-rate
+    to baseline. Drop ≥ 10% → auto-rollback writing
+    `kind='rollback'` with the restored old_value.
+  - Cooldown per tunable after rollback (7 days lock).
+  - Global halt: > 3 rollbacks in any 7-day window pauses ALL
+    promotion (tuner still observes; humans clear the halt).
+  - Hypothesis diversity: tuner rotates through the whitelist,
+    alternating direction per tunable based on the most-recent
+    hypothesis row.
+  - Tests: 10 new in `test_phase_b.py` (mock judge → promote path,
+    cooldown skip, halt condition, rollback fire on degradation,
+    idempotent monitor). Full suite 490 green.
 
 ### 0.2 What's in flight
 
