@@ -38,6 +38,21 @@ class ReplayPair:
     output_variant: Any
 
 
+@dataclass(frozen=True)
+class ReplayReport:
+    """Outcome of a replay run — pairs plus failure counter so a
+    silent drop never goes unnoticed."""
+    pairs: list[ReplayPair]
+    sample_size_requested: int
+    sample_size_kept: int
+    failed_current_count: int
+    failed_variant_count: int
+
+    @property
+    def failed_any_count(self) -> int:
+        return self.failed_current_count + self.failed_variant_count
+
+
 def replay_with_variants(
     conn: sqlite3.Connection,
     *,
@@ -46,32 +61,37 @@ def replay_with_variants(
     variant_params: dict[str, Any],
     kind_filter: tuple[str, ...] = ("remember", "observe"),
     sample_size: int = 30,
-) -> list[ReplayPair]:
+) -> ReplayReport:
     """Pull the most recent ``sample_size`` events of the given kinds
     and score each with both parameter sets.
 
     ``scoring_fn`` is a worker-specific function with signature
-    ``(conn, event, params) -> output``. Examples:
+    ``(conn, event, params) -> output``. The ``output`` should be
+    the FULL worker output (e.g., the salience extraction dict with
+    score + components), not just a scalar — invariant guards in the
+    tuner need the structured shape to validate against.
 
-      * salience: ``lambda c, e, p: score_event(c, e, weights=p["weights"])``
-      * surprise: ``lambda c, e, p: _compute_surprise(...)`` with the
-        candidate window size
-
-    Returns one ReplayPair per event. Empty list if no events match
-    the filter.
+    Returns a :class:`ReplayReport`. The ``pairs`` list contains
+    every event where BOTH the current and variant scoring succeeded.
+    Failure counters are also returned so a silently-shrunken replay
+    set cannot pass unnoticed.
     """
     events = [e for e in iter_events(conn, limit=sample_size) if e.kind in kind_filter]
     pairs: list[ReplayPair] = []
+    failed_current = 0
+    failed_variant = 0
     for event in events:
         try:
             out_current = scoring_fn(conn, event, current_params)
         except Exception as e:
             log.warning("replay.scoring_failed", which="current", event_id=event.id, error=str(e))
+            failed_current += 1
             continue
         try:
             out_variant = scoring_fn(conn, event, variant_params)
         except Exception as e:
             log.warning("replay.scoring_failed", which="variant", event_id=event.id, error=str(e))
+            failed_variant += 1
             continue
         pairs.append(
             ReplayPair(
@@ -86,9 +106,17 @@ def replay_with_variants(
         "replay.completed",
         sample_size=sample_size,
         kept=len(pairs),
+        failed_current=failed_current,
+        failed_variant=failed_variant,
         kind_filter=kind_filter,
     )
-    return pairs
+    return ReplayReport(
+        pairs=pairs,
+        sample_size_requested=sample_size,
+        sample_size_kept=len(pairs),
+        failed_current_count=failed_current,
+        failed_variant_count=failed_variant,
+    )
 
 
 def _summarize_event(event: Any) -> str:

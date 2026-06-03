@@ -38,7 +38,7 @@ from ..substrate import tuner_state
 from .cold_path import ColdPathWorker
 from .guards import check_salience_outputs
 from .llm_judge import DEFAULT_PANEL, JudgePair, JudgeReport
-from .replay import replay_with_variants
+from .replay import ReplayReport, replay_with_variants
 from .salience import score_event
 from .tunable_registry import (
     ChangeRejected,
@@ -53,6 +53,23 @@ if TYPE_CHECKING:
 
 
 log = structlog.get_logger(__name__)
+
+
+def _salience_full_output(
+    conn: sqlite3.Connection,
+    event: Any,
+    weights: dict[str, float],
+) -> dict[str, Any]:
+    """Adapter: wrap salience.score_event into the dict shape the
+    invariant guards expect. Pulling this into a module-level helper
+    keeps the lambda inside _do_replay readable.
+    """
+    score, components = score_event(conn, event, weights=weights)
+    return {
+        "salience": score,
+        "salience_components": components,
+        "status": "success",
+    }
 
 
 # Traffic trigger — run when ≥ this many new events have arrived
@@ -152,11 +169,12 @@ class Tuner(ColdPathWorker):
         # Run replay + (in Phase A: skip judge to save tokens; just
         # log the candidate). Once Phase B is ready, this is where
         # _run_judge_panel(...) goes.
-        replay_pairs = self._do_replay(conn, worker, tunable, current, proposed)
-        guards_passed = self._check_guards(worker, replay_pairs)
+        replay = self._do_replay(conn, worker, tunable, current, proposed)
+        guards_passed = self._check_guards(worker, replay)
 
         verdict_record = {
-            "replay_pair_count": len(replay_pairs),
+            "replay_pair_count": replay.sample_size_kept if replay else 0,
+            "replay_failed_count": replay.failed_any_count if replay else 0,
             "guards_passed": guards_passed,
             "judge_panel": "skipped:phase-A",
             "promote_attempted": self.promote_enabled and guards_passed,
@@ -268,9 +286,10 @@ class Tuner(ColdPathWorker):
         tunable: str,
         current: Any,
         proposed: Any,
-    ) -> list[Any]:
-        """Run the worker-appropriate replay. Returns the list of
-        (current_output, variant_output) pairs.
+    ) -> ReplayReport | None:
+        """Run the worker-appropriate replay. Returns the ReplayReport
+        with full structured outputs (NOT scalar scores) so the
+        invariant guards can validate real component shape.
 
         Phase A only handles salience replay — that's a closed-form
         function over substrate state, no LLM call. surprise.context_window
@@ -281,35 +300,32 @@ class Tuner(ColdPathWorker):
         if worker == "salience" and tunable == "component_weights":
             return replay_with_variants(
                 conn,
-                scoring_fn=lambda c, e, p: score_event(c, e, weights=p["weights"])[0],
+                scoring_fn=lambda c, e, p: _salience_full_output(c, e, p["weights"]),
                 current_params={"weights": current},
                 variant_params={"weights": proposed},
                 sample_size=REPLAY_SAMPLE_SIZE,
             )
-        # No replay shape for other workers in Phase A; observation
-        # is logged but the replay set is empty.
-        return []
+        # No replay shape for other workers in Phase A.
+        return None
 
-    def _check_guards(self, worker: str, replay_pairs: list[Any]) -> bool:
+    def _check_guards(
+        self,
+        worker: str,
+        replay: ReplayReport | None,
+    ) -> bool:
         """Run the invariant guard suite for this worker. Both
-        current and variant outputs must pass. Empty replay → vacuously OK."""
-        if not replay_pairs:
+        current and variant outputs must pass. No replay → vacuously OK.
+
+        Guards now see the REAL component dict from the replay
+        (not a synthesized empty one), so check_salience_outputs
+        actually validates the contract instead of trivially
+        passing on scalar inputs.
+        """
+        if replay is None or not replay.pairs:
             return True
         if worker == "salience":
-            current_outputs = [
-                {"salience": p.output_current, "salience_components": {
-                    "entity_density": 0, "link_density": 0, "has_conflict": 0,
-                    "type_hint_bump": 0, "is_compound": 0, "recency": 0,
-                }}
-                for p in replay_pairs
-            ]
-            variant_outputs = [
-                {"salience": p.output_variant, "salience_components": {
-                    "entity_density": 0, "link_density": 0, "has_conflict": 0,
-                    "type_hint_bump": 0, "is_compound": 0, "recency": 0,
-                }}
-                for p in replay_pairs
-            ]
+            current_outputs = [p.output_current for p in replay.pairs]
+            variant_outputs = [p.output_variant for p in replay.pairs]
             return bool(check_salience_outputs(current_outputs)) and bool(
                 check_salience_outputs(variant_outputs),
             )

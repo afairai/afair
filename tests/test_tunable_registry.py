@@ -90,10 +90,11 @@ def test_cache_invalidated_after_write(conn) -> None:
     # First read populates the cache with the default.
     assert r.get("surprise", "context_window") == 20
     # Write through record_change → cache is invalidated → next get
-    # reads fresh from substrate.
+    # reads fresh from substrate. +25% from 20 = 25, within the 30%
+    # bounded_delta on surprise.context_window.
     record_change(r, kind="promote", worker="surprise", tunable="context_window",
-                  old_value=20, new_value=30, rationale="bigger window")
-    assert r.get("surprise", "context_window") == 30
+                  old_value=20, new_value=25, rationale="bigger window")
+    assert r.get("surprise", "context_window") == 25
 
 
 def test_independent_registry_instances_see_writes(conn) -> None:

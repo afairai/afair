@@ -237,6 +237,16 @@ class TunableRegistry:
         with self._lock:
             self._cache.clear()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Public access to the underlying substrate connection.
+
+        Exposed so helpers like :func:`record_change` don't need to
+        reach into a private attribute. The connection is borrowed,
+        not owned — callers MUST NOT close it.
+        """
+        return self._conn
+
     def get_spec(self, worker: str, tunable: str) -> TunableSpec:
         """Return the spec row for (worker, tunable). Raises KeyError if not whitelisted."""
         spec = _SPECS.get((worker, tunable))
@@ -382,13 +392,36 @@ def record_change(
 ) -> None:
     """Persist a promote or rollback, then invalidate the registry cache.
 
-    The tuner module calls this after successful validation. The
-    actual cache invalidation happens AFTER the substrate write so
-    that a failed write (rare, but possible in adversarial test
-    conditions) doesn't leave the cache wrongly cleared.
+    Defense-in-depth: validates the proposed change against the
+    spec one more time. The tuner is supposed to call
+    :func:`validate_change` before reaching here, but if a future
+    bug skips that step, this catches it. Rollbacks are also
+    validated (must respect bounds + delta) so a future "rollback
+    to an unsafe historical value" can't smuggle a bad value
+    through.
+
+    Also enforces cross-tunable invariants (e.g. CEN > DMN for the
+    mode_switcher) that single-spec validation can't catch.
+
+    Cache invalidation happens AFTER the substrate write so that a
+    failed write (rare, but possible in adversarial test conditions)
+    doesn't leave the cache wrongly cleared.
     """
+    spec = registry.get_spec(worker, tunable)
+    # Validate the proposed value. Skip the bounded-delta check for
+    # rollbacks because rollbacks intentionally make larger moves
+    # (returning to a known-good prior value). They still respect
+    # min/max + type rules.
+    if kind == "rollback":
+        _validate_bounds_only(spec=spec, proposed=new_value)
+    else:
+        validate_change(spec=spec, current=old_value, proposed=new_value)
+
+    # Cross-tunable invariants the per-spec validator can't see.
+    _validate_cross_tunable(registry, worker=worker, tunable=tunable, new_value=new_value)
+
     tuner_state.write(
-        registry._conn,
+        registry.connection,
         kind=kind,
         worker=worker,
         tunable=tunable,
@@ -398,3 +431,66 @@ def record_change(
         rationale=rationale,
     )
     registry.invalidate(worker, tunable)
+
+
+def _validate_bounds_only(*, spec: TunableSpec, proposed: Any) -> None:
+    """Type + min/max check without bounded_delta. Used for rollbacks."""
+    if spec.kind == "float":
+        if not isinstance(proposed, (int, float)):
+            raise ChangeRejected(f"expected float, got {type(proposed).__name__}")
+        p = float(proposed)
+        if spec.min_value is not None and p < spec.min_value:
+            raise ChangeRejected(f"proposed {p} below min {spec.min_value}")
+        if spec.max_value is not None and p > spec.max_value:
+            raise ChangeRejected(f"proposed {p} above max {spec.max_value}")
+    elif spec.kind == "int":
+        if not isinstance(proposed, int) or isinstance(proposed, bool):
+            raise ChangeRejected(f"expected int, got {type(proposed).__name__}")
+        if spec.min_value is not None and proposed < spec.min_value:
+            raise ChangeRejected(f"proposed {proposed} below min {spec.min_value}")
+        if spec.max_value is not None and proposed > spec.max_value:
+            raise ChangeRejected(f"proposed {proposed} above max {spec.max_value}")
+    elif spec.kind == "string":
+        _validate_string(spec, proposed)
+    elif spec.kind == "weights_dict":
+        # For dict rollback we still verify keys + sum-to-1.0; per-component
+        # bounded_delta is the only thing we skip.
+        if not isinstance(proposed, dict):
+            raise ChangeRejected(f"expected dict, got {type(proposed).__name__}")
+        if spec.allowed_values and frozenset(proposed.keys()) != spec.allowed_values:
+            raise ChangeRejected("weights_dict has wrong keys")
+        total = sum(float(v) for v in proposed.values())
+        if abs(total - 1.0) > 0.01:
+            raise ChangeRejected(f"weights sum {total:.4f} not within 0.01 of 1.0")
+
+
+def _validate_cross_tunable(
+    registry: TunableRegistry,
+    *,
+    worker: str,
+    tunable: str,
+    new_value: Any,
+) -> None:
+    """Invariants that span more than one tunable.
+
+    Currently only the mode_switcher's hysteresis rule (CEN must
+    stay strictly greater than DMN). Without this check, a tuner
+    could push dmn_threshold up beyond cen_threshold and the mode
+    would flap on every event.
+    """
+    if worker != "mode_switcher":
+        return
+    if tunable == "cen_threshold":
+        dmn = float(registry.get("mode_switcher", "dmn_threshold"))
+        if float(new_value) <= dmn:
+            raise ChangeRejected(
+                f"cen_threshold {new_value} must remain strictly greater than "
+                f"current dmn_threshold {dmn} (hysteresis invariant)",
+            )
+    elif tunable == "dmn_threshold":
+        cen = float(registry.get("mode_switcher", "cen_threshold"))
+        if float(new_value) >= cen:
+            raise ChangeRejected(
+                f"dmn_threshold {new_value} must remain strictly less than "
+                f"current cen_threshold {cen} (hysteresis invariant)",
+            )
