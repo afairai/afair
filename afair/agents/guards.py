@@ -95,11 +95,13 @@ def check_salience_outputs(outputs: list[dict[str, Any]]) -> GuardResult:
 
 
 def check_mode_switcher_outputs(outputs: list[str]) -> GuardResult:
-    """Mode-switcher must emit only ``"CEN"`` or ``"DMN"``. No invalid
-    or empty strings. Empty input set ⇒ pass."""
+    """Mode-switcher must emit only ``"cen"`` or ``"dmn"`` (lowercase,
+    matching afair/agents/mode_switcher.py MODE_CEN / MODE_DMN
+    constants). No invalid or empty strings. Empty input set ⇒ pass.
+    """
     failures: list[str] = []
     for i, mode in enumerate(outputs):
-        if mode not in ("CEN", "DMN"):
+        if mode not in ("cen", "dmn"):
             failures.append(f"#{i}: invalid mode {mode!r}")
     return GuardResult(
         passed=not failures,
