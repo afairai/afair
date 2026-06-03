@@ -257,6 +257,11 @@ def build_app(settings: Settings) -> Starlette:
         # terms; the route handler enforces its own narrower credential
         # so the general bearer doesn't gate it.
         "/internal/signup",
+        # Scoped export endpoint — same pattern. Route handler enforces
+        # its own AFAIR_EXPORT_TOKEN bearer; this exempt entry just
+        # lets the request reach the handler without the main MCP
+        # bearer-or-JWT check rejecting it first.
+        "/internal/export",
     }
     exempt_prefixes = ("/oauth/",)
 
