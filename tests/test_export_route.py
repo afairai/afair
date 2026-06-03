@@ -196,6 +196,57 @@ def test_export_inlines_blobs_when_requested(vault_dir) -> None:
     assert b64decode(blob_lines[0]["content_b64"]) == b"hello world"
 
 
+def test_export_streams_entity_graph_rows_without_iteration_bug(vault_dir) -> None:
+    """Regression: the entity-graph branch iterates sqlite3.Row by KEYS,
+    not by indices. The naïve ``for k in row`` raises IndexError once
+    real rows exist. Insert an entity row and assert the stream completes
+    with the manifest as the final record.
+    """
+    import json
+    from datetime import UTC, datetime
+
+    # First insert an event so the FK in entities (source_event_id) resolves.
+    conn = open_db(vault_dir)
+    try:
+        event, _written = write_event_with_status(
+            conn,
+            kind="remember",
+            origin="agent",
+            payload={"content_type": "text", "text": "entity host"},
+        )
+        # Insert one minimal entity row matching the substrate schema.
+        # Column list mirrors afair/substrate/schema.py — keep in sync if
+        # the schema changes.
+        conn.execute(
+            """INSERT INTO entities
+                 (id, canonical_name, kind, created_at, created_by,
+                  confidence, source_event_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "entity:test-id",
+                "afair",
+                "project",
+                datetime.now(UTC).isoformat(),
+                "test",
+                0.95,
+                event.id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200
+    lines = [json.loads(line) for line in r.text.split("\n") if line]
+    entity_lines = [line for line in lines if line["kind"] == "entity"]
+    assert len(entity_lines) == 1, "entity row should have streamed"
+    assert entity_lines[0]["canonical_name"] == "afair"
+    assert lines[-1]["kind"] == "manifest", "manifest must remain the final record"
+
+
 def test_export_has_streaming_response_headers(vault_dir) -> None:
     _seed_events(vault_dir, n=1)
     app = _build_app(vault_dir)
