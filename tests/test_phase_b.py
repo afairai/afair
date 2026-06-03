@@ -4,6 +4,7 @@ Mocks the LLM judge panel (no real network calls). Verifies the
 full promote → monitor → rollback feedback loop end-to-end on a
 substrate fixture.
 """
+
 from __future__ import annotations
 
 import json
@@ -59,6 +60,7 @@ def _seed_old_observation(conn) -> None:
 def _seed_event(conn) -> None:
     """Insert one tiny remember event so salience replay has data."""
     from afair.substrate.events import write_event_with_status
+
     write_event_with_status(
         conn,
         kind="remember",
@@ -75,9 +77,12 @@ def _make_judge_report(*, b_share: float, pair_count: int = 30) -> JudgeReport:
         pair_count=pair_count,
         panel=("test/judge-a", "test/judge-b", "test/judge-c"),
         pair_verdicts=tuple(
-            PanelVerdict(pair_index=i, winner="B" if i < b_wins else "A",
-                         votes={"A": 0 if i < b_wins else 3, "B": 3 if i < b_wins else 0, "TIE": 0},
-                         reasons=["test"])
+            PanelVerdict(
+                pair_index=i,
+                winner="B" if i < b_wins else "A",
+                votes={"A": 0 if i < b_wins else 3, "B": 3 if i < b_wins else 0, "TIE": 0},
+                reasons=["test"],
+            )
             for i in range(pair_count)
         ),
         a_wins=a_wins,
@@ -142,8 +147,11 @@ def test_phase_b_judge_abort_blocks_promote(conn) -> None:
         pair_count=5,
         panel=("test/judge",),
         pair_verdicts=(),
-        a_wins=0, b_wins=0, ties=0,
-        a_share=0.0, b_share=0.0,
+        a_wins=0,
+        b_wins=0,
+        ties=0,
+        a_share=0.0,
+        b_share=0.0,
         tokens_spent_estimate=200_000,
         aborted=True,
         abort_reason="token budget exhausted",
@@ -166,10 +174,16 @@ def test_cooldown_skips_recently_rolled_back_tunable(conn) -> None:
     # Plant a recent rollback on salience so the tuner has to pick
     # another worker. Use a real weights dict so the registry doesn't
     # see corrupted state when the cooldown check happens.
-    valid_weights = json.dumps({
-        "entity_density": 0.25, "link_density": 0.20, "has_conflict": 0.10,
-        "type_hint_bump": 0.15, "is_compound": 0.10, "recency": 0.20,
-    })
+    valid_weights = json.dumps(
+        {
+            "entity_density": 0.25,
+            "link_density": 0.20,
+            "has_conflict": 0.10,
+            "type_hint_bump": 0.15,
+            "is_compound": 0.10,
+            "recency": 0.20,
+        }
+    )
     recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with conn:
         conn.execute(
@@ -196,10 +210,16 @@ def test_cooldown_expires_after_window(conn) -> None:
     """A rollback older than ROLLBACK_COOLDOWN_DAYS no longer blocks."""
     from afair.settings import Settings
 
-    valid_weights = json.dumps({
-        "entity_density": 0.25, "link_density": 0.20, "has_conflict": 0.10,
-        "type_hint_bump": 0.15, "is_compound": 0.10, "recency": 0.20,
-    })
+    valid_weights = json.dumps(
+        {
+            "entity_density": 0.25,
+            "link_density": 0.20,
+            "has_conflict": 0.10,
+            "type_hint_bump": 0.15,
+            "is_compound": 0.10,
+            "recency": 0.20,
+        }
+    )
     old_rb = (datetime.now(UTC) - timedelta(days=ROLLBACK_COOLDOWN_DAYS + 1)).isoformat()
     with conn:
         conn.execute(
@@ -259,12 +279,16 @@ def test_global_halt_after_too_many_rollbacks(conn) -> None:
 # ─── rollback monitor ─────────────────────────────────────────────────────
 
 
-def _insert_promote(conn, *, worker, tunable, old_value, new_value,
-                    recorded_at, baseline=None):
+def _insert_promote(conn, *, worker, tunable, old_value, new_value, recorded_at, baseline=None):
     """Direct INSERT helper for setting up promote rows in test fixtures."""
-    evidence = {"pre_promote_baseline": baseline or {
-        "useful_count": 0, "not_useful_count": 0, "sample_rows": 0,
-    }}
+    evidence = {
+        "pre_promote_baseline": baseline
+        or {
+            "useful_count": 0,
+            "not_useful_count": 0,
+            "sample_rows": 0,
+        }
+    }
     with conn:
         conn.execute(
             """
@@ -300,11 +324,13 @@ def _insert_feedback_observation(conn, *, useful_ids, not_useful_ids, recorded_a
             (
                 f"fb_{time.time_ns()}",
                 recorded_at,
-                json.dumps({
-                    "useful_event_ids": useful_ids,
-                    "not_useful_event_ids": not_useful_ids,
-                    "missing_topic": None,
-                }),
+                json.dumps(
+                    {
+                        "useful_event_ids": useful_ids,
+                        "not_useful_event_ids": not_useful_ids,
+                        "missing_topic": None,
+                    }
+                ),
             ),
         )
 
@@ -314,9 +340,12 @@ def _insert_n_events(conn, n: int) -> None:
     threshold passes. The payload must vary per row — identical
     payloads dedupe via content_hash (ON CONFLICT DO NOTHING)."""
     from afair.substrate.events import write_event_with_status
+
     for i in range(n):
         write_event_with_status(
-            conn, kind="observe", origin="agent",
+            conn,
+            kind="observe",
+            origin="agent",
             payload={"content_type": "event", "action": f"x{i}", "subject": f"y{i}"},
         )
 
@@ -327,8 +356,12 @@ def test_monitor_skips_promote_under_event_window(conn) -> None:
 
     recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     _insert_promote(
-        conn, worker="surprise", tunable="context_window",
-        old_value=20, new_value=25, recorded_at=recent,
+        conn,
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+        recorded_at=recent,
     )
     # Only insert a handful of events — well below ROLLBACK_EVENT_WINDOW.
     _insert_n_events(conn, n=ROLLBACK_EVENT_WINDOW - 10)
@@ -349,8 +382,13 @@ def test_monitor_fires_rollback_on_degradation(conn) -> None:
     # Pre-promote baseline: 8 useful, 2 not_useful (high rate).
     baseline = {"useful_count": 8, "not_useful_count": 2, "sample_rows": 5}
     _insert_promote(
-        conn, worker="surprise", tunable="context_window",
-        old_value=20, new_value=25, recorded_at=promote_ts, baseline=baseline,
+        conn,
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+        recorded_at=promote_ts,
+        baseline=baseline,
     )
 
     # Post-promote signal: 1 useful, 9 not_useful (much worse rate).
@@ -384,8 +422,12 @@ def test_monitor_idempotent_on_already_rolled_back_promote(conn) -> None:
 
     promote_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
     _insert_promote(
-        conn, worker="surprise", tunable="context_window",
-        old_value=20, new_value=25, recorded_at=promote_ts,
+        conn,
+        worker="surprise",
+        tunable="context_window",
+        old_value=20,
+        new_value=25,
+        recorded_at=promote_ts,
     )
     # A rollback later supersedes this promote.
     rollback_ts = (datetime.now(UTC) - timedelta(hours=1)).isoformat()

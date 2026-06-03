@@ -31,6 +31,7 @@ is "judge becomes ground truth" — defended via:
 This module exposes :func:`judge_pairs` as the entry point. The
 tuner imports it; nobody else should.
 """
+
 from __future__ import annotations
 
 from collections import Counter
@@ -105,6 +106,7 @@ Respond with valid JSON:
 @dataclass(frozen=True)
 class JudgePair:
     """One input that fed both variants — judge picks which output is better."""
+
     input_summary: str
     output_a: str
     output_b: str
@@ -125,6 +127,7 @@ class JudgeVerdict:
 @dataclass(frozen=True)
 class PanelVerdict:
     """Aggregated panel decision for one pair."""
+
     pair_index: int
     winner: str  # "A" | "B" | "TIE"
     votes: dict[str, int]  # {"A": 2, "B": 1, "TIE": 0}
@@ -134,6 +137,7 @@ class PanelVerdict:
 @dataclass(frozen=True)
 class JudgeReport:
     """Full result of a panel run over all pairs."""
+
     pair_count: int
     panel: tuple[str, ...]
     pair_verdicts: tuple[PanelVerdict, ...]
@@ -211,6 +215,7 @@ def _ask_one_judge(
 
     try:
         import json
+
         parsed = json.loads(body) if isinstance(body, str) else body
         verdict = str(parsed.get("verdict", "")).upper()
         reason = str(parsed.get("reason", ""))[:300]
@@ -315,8 +320,7 @@ def judge_pairs(
         if tokens_spent >= token_budget:
             aborted = True
             abort_reason = (
-                f"token budget {token_budget} exhausted "
-                f"({tokens_spent} spent over {i} pairs)"
+                f"token budget {token_budget} exhausted ({tokens_spent} spent over {i} pairs)"
             )
             log.warning(
                 "judge.budget_abort",
