@@ -24,7 +24,6 @@ from ..substrate import open_db
 from . import api_tokens as _toks
 
 if TYPE_CHECKING:
-
     from starlette.requests import Request
     from starlette.responses import Response
 
@@ -33,12 +32,50 @@ log = structlog.get_logger(__name__)
 _BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 _MAX_LABEL = 80
 
+# CORS allow-list for the /account dashboard, which loads from afair.ai
+# but calls the per-user vault at <vanity>.mcp.afair.ai. Anything else
+# is rejected — the master token is too sensitive to expose to arbitrary
+# origins.
+_ALLOWED_ORIGINS = frozenset(
+    {
+        "https://afair.ai",
+        "http://localhost:3000",  # local dev for afair-web
+    }
+)
 
-def _unauthorized() -> Response:
+
+def _cors_headers(request: Request) -> dict[str, str]:
+    """If the request comes from an allow-listed origin, return the
+    matching CORS headers. Otherwise return an empty dict so the
+    response includes nothing CORS-related (same-origin clients are
+    unaffected).
+    """
+    origin = request.headers.get("origin", "")
+    if origin in _ALLOWED_ORIGINS:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+            "Access-Control-Max-Age": "300",
+            "Vary": "Origin",
+        }
+    return {}
+
+
+async def preflight_endpoint(request: Request) -> Response:
+    """OPTIONS handler so browsers stop pre-failing the fetch."""
+    return JSONResponse({}, headers=_cors_headers(request))
+
+
+def _unauthorized(request: Request) -> Response:
     return JSONResponse(
         {"error": "unauthorized"},
         status_code=401,
-        headers={"WWW-Authenticate": 'Bearer realm="tokens"'},
+        headers={
+            "WWW-Authenticate": 'Bearer realm="tokens"',
+            **_cors_headers(request),
+        },
     )
 
 
@@ -77,7 +114,7 @@ def _conn(request: Request):  # type: ignore[no-untyped-def]
 
 async def list_endpoint(request: Request) -> Response:
     if not _check_master(request):
-        return _unauthorized()
+        return _unauthorized(request)
     tokens = _toks.list_all(_conn(request))
     return JSONResponse(
         {
@@ -93,12 +130,13 @@ async def list_endpoint(request: Request) -> Response:
                 for t in tokens
             ],
         },
+        headers=_cors_headers(request),
     )
 
 
 async def mint_endpoint(request: Request) -> Response:
     if not _check_master(request):
-        return _unauthorized()
+        return _unauthorized(request)
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -141,15 +179,19 @@ async def mint_endpoint(request: Request) -> Response:
             "note": "Save this token now. It is shown only this once.",
         },
         status_code=201,
+        headers=_cors_headers(request),
     )
 
 
 async def revoke_endpoint(request: Request) -> Response:
     if not _check_master(request):
-        return _unauthorized()
+        return _unauthorized(request)
     token_id = request.path_params.get("token_id", "")
     if not token_id or not token_id.startswith("tok_"):
         return JSONResponse({"error": "invalid token id"}, status_code=400)
     flipped = _toks.revoke(_conn(request), token_id)
     log.info("api_tokens.revoke_requested", token_id=token_id, flipped=flipped)
-    return JSONResponse({"id": token_id, "revoked": True, "was_active": flipped})
+    return JSONResponse(
+        {"id": token_id, "revoked": True, "was_active": flipped},
+        headers=_cors_headers(request),
+    )
