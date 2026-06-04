@@ -319,7 +319,13 @@ class Settings(BaseSettings):
 
     @property
     def allowlist(self) -> tuple[str, ...]:
-        """Normalized lowercase allowlist (set of allowed GitHub usernames)."""
+        """Normalized lowercase allowlist of accepted JWT subjects.
+
+        Phase 0 stores Clerk userIds (e.g. `user_2abc123xyz`). Legacy
+        deployments may still hold GitHub usernames. Lowercase on
+        both sides of the comparison so the match is symmetric
+        regardless of source.
+        """
         return _normalize_allowlist(self.identity_allowlist)
 
     @property

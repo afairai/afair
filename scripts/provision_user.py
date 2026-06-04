@@ -50,13 +50,13 @@ Required environment
 Usage
 =====
 
-    uv run python scripts/provision_user.py <github_username>
-    uv run python scripts/provision_user.py <github_username> --region fra
-    uv run python scripts/provision_user.py <github_username> --dry-run
+    uv run python scripts/provision_user.py <clerk_user_id>
+    uv run python scripts/provision_user.py <clerk_user_id> --region fra
+    uv run python scripts/provision_user.py <clerk_user_id> --dry-run
 
 Idempotency
 ===========
-Re-running with the same github_username detects the existing app
+Re-running with the same identity detects the existing app
 and refuses to clobber it (dry-run prints the expected app name so
 you can verify). To rotate a user's secrets, run a separate rotation
 script (TODO — kept out of this commit to keep scope tight).
@@ -170,19 +170,20 @@ COSMIC_NAMES: tuple[str, ...] = (
 )
 
 
-def vanity_host_for(github_username: str) -> str:
+def vanity_host_for(identity: str) -> str:
     """Per-user vanity hostname. Pick a cosmic word + 3-hex suffix
-    deterministically from the GitHub username so reruns are stable
-    and the username itself never leaks into DNS.
+    deterministically from the user's identity (Clerk userId by
+    default; legacy GitHub usernames also work since the hashing only
+    cares about stable input bytes).
 
-    ``gowry`` → ``vega-7a3.mcp.afair.ai`` (example shape; actual hash
-    decides which name + suffix lands).
+    ``user_abc123`` → ``vega-7a3.mcp.afair.ai`` (example shape; actual
+    hash decides which name + suffix lands).
 
     The deterministic mapping means re-provisioning the same user
     yields the same hostname, which is critical because the JWT
     issuer + the certificate + the DNS record all reference it.
     """
-    digest = hashlib.sha256(github_username.lower().encode()).hexdigest()
+    digest = hashlib.sha256(identity.lower().encode()).hexdigest()
     # First 4 hex chars (16 bits) pick a name out of COSMIC_NAMES.
     # Modular index space is plenty: 65k → 60 names, well distributed.
     name = COSMIC_NAMES[int(digest[:4], 16) % len(COSMIC_NAMES)]
@@ -194,12 +195,12 @@ def vanity_host_for(github_username: str) -> str:
 # ── per-user identity ──────────────────────────────────────────────────────
 
 
-def app_name_for(github_username: str) -> str:
+def app_name_for(identity: str) -> str:
     """Deterministic per-user Fly app name. Uses the same name + suffix
     pair as the vanity host so the two are visually linked when reading
     a ``fly apps list``. The ``afair-`` prefix scopes the apps to this
     product inside the org."""
-    digest = hashlib.sha256(github_username.lower().encode()).hexdigest()
+    digest = hashlib.sha256(identity.lower().encode()).hexdigest()
     name = COSMIC_NAMES[int(digest[:4], 16) % len(COSMIC_NAMES)]
     suffix = digest[4:7]
     return f"afair-{name}-{suffix}"
@@ -391,7 +392,7 @@ def cloudflare_create_cname(
 # ── secrets backup write ──────────────────────────────────────────────────
 
 
-def append_secrets_backup(*, app: str, github_username: str, s: UserSecrets) -> None:
+def append_secrets_backup(*, app: str, identity: str, s: UserSecrets) -> None:
     """Append the per-user secrets block to .env.secrets.backup.
 
     Format follows the global CLAUDE.md secrets-backup convention:
@@ -403,7 +404,7 @@ def append_secrets_backup(*, app: str, github_username: str, s: UserSecrets) -> 
     today = datetime.now(UTC).date().isoformat()
     block = f"""
 
-# ───── PER-USER PROVISIONING — {app} ({github_username}) ─────
+# ───── PER-USER PROVISIONING — {app} ({identity}) ─────
 # Created by scripts/provision_user.py on {today}.
 # These secrets gate ONLY the user's own app — never reuse across users.
 
@@ -433,17 +434,24 @@ AFAIR_SIGNUP_TOKEN_{app.upper().replace("-", "_")}={s.signup_token}
 
 def provision(
     *,
-    github_username: str,
+    identity: str,
     region: str,
     dry: bool,
     enable_signup_token: bool,
 ) -> tuple[str, str, UserSecrets]:
-    """Provision the user's app + DNS + cert. Returns (app, vanity_host, secrets)."""
+    """Provision the user's app + DNS + cert. Returns (app, vanity_host, secrets).
+
+    `identity` is the stable identifier the per-user MCP server will
+    treat as the JWT subject — typically the Clerk userId. Legacy
+    GitHub usernames also work since the hashing only cares about
+    stable input bytes; bring-your-own works as long as the same
+    string is fed in every time.
+    """
     import os
 
-    app = app_name_for(github_username)
-    vanity = vanity_host_for(github_username)
-    print(f"== Provisioning user '{github_username}' ==")
+    app = app_name_for(identity)
+    vanity = vanity_host_for(identity)
+    print(f"== Provisioning user '{identity}' ==")
     print(f"   Fly app:      {app}")
     print(f"   Vanity host:  {vanity}")
     print(f"   Fallback URL: {app}.fly.dev")
@@ -475,16 +483,24 @@ def provision(
         # branded URL. The fly.dev fallback still resolves to the
         # same app for clients that bypass DNS.
         "OAUTH_ISSUER": f"https://{vanity}",
-        "IDENTITY_ALLOWLIST": github_username.lower(),
+        # IDENTITY_ALLOWLIST is the set of JWT subjects the MCP server
+        # will accept. Single entry per box (single-tenant by Invariant
+        # I8). The identity here is the Clerk userId; the per-user
+        # server's JWT verifier compares the token's `sub` claim against
+        # this string.
+        "IDENTITY_ALLOWLIST": identity,
         "ENVIRONMENT": "fly",
     }
     if enable_signup_token:
         secrets_map["AFAIR_SIGNUP_TOKEN"] = s.signup_token
 
-    # The shared GitHub OAuth app credentials — same client_id/secret
-    # for every user; the per-user IDENTITY_ALLOWLIST handles isolation.
-    # Operator must export these in the shell before running this script.
-    for shared_key in ("GITHUB_OAUTH_CLIENT_ID", "GITHUB_OAUTH_CLIENT_SECRET"):
+    # Identity-hub secret is shared across all per-user MCP servers —
+    # they verify identity-tokens minted by afair-web's hub against
+    # this secret, and the hub uses the same value to sign. The
+    # operator must export this in the shell before running this
+    # script. GitHub OAuth client_id/secret are not used any more —
+    # Clerk owns the actual authentication step.
+    for shared_key in ("IDENTITY_HUB_SECRET",):
         v = os.environ.get(shared_key)
         if not v:
             print(
@@ -515,14 +531,21 @@ def provision(
     fly_add_cert(app, vanity, dry=dry)
 
     if not dry:
-        append_secrets_backup(app=app, github_username=github_username, s=s)
+        append_secrets_backup(app=app, identity=identity, s=s)
 
     return app, vanity, s
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("github_username", help="GitHub login of the user being provisioned")
+    ap.add_argument(
+        "identity",
+        help=(
+            "Stable user identifier — the Clerk userId in production. "
+            "Anything stable works (legacy GitHub usernames included) "
+            "as long as the same string is used on every re-run."
+        ),
+    )
     ap.add_argument("--region", default=DEFAULT_REGION)
     ap.add_argument(
         "--dry-run",
@@ -538,7 +561,7 @@ def main() -> None:
     args = ap.parse_args()
 
     app, vanity, s = provision(
-        github_username=args.github_username,
+        identity=args.identity,
         region=args.region,
         dry=args.dry_run,
         enable_signup_token=not args.no_signup_token,
@@ -546,7 +569,7 @@ def main() -> None:
 
     print()
     print("=" * 64)
-    print(f"  Provisioned for {args.github_username}")
+    print(f"  Provisioned for {args.identity}")
     print("=" * 64)
     print(f"  Primary URL:    https://{vanity}                  (becomes")
     print("                  available ~5 min after DNS propagates +")
@@ -564,7 +587,7 @@ def main() -> None:
     print()
     print("  Next steps:")
     print(f"    1. Smoke (fallback URL works now): curl https://{app}.fly.dev/health")
-    print(f"    2. Send onboarding email to {args.github_username}")
+    print(f"    2. Send onboarding email to user '{args.identity}'")
     print(f"    3. Confirm vanity URL is up: curl https://{vanity}/health (~5 min)")
 
 
