@@ -27,6 +27,7 @@ dependencies = [
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pypdf" },
     { name = "python-ulid" },
+    { name = "sentry-sdk", extra = ["fastapi", "starlette"] },
     { name = "sqlcipher3-binary", marker = "sys_platform == 'linux'" },
     { name = "sqlite-vec" },
     { name = "structlog" },
@@ -59,6 +60,7 @@ requires-dist = [
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.0" },
     { name = "pypdf", specifier = ">=4.0.0" },
     { name = "python-ulid", specifier = ">=3.0.0" },
+    { name = "sentry-sdk", extras = ["fastapi", "starlette"], specifier = ">=2.61.1" },
     { name = "sqlcipher3-binary", marker = "sys_platform == 'linux'", specifier = ">=0.5.4" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
     { name = "structlog", specifier = ">=24.4.0" },
@@ -2757,6 +2759,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl", hash = "sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137", size = 15554, upload-time = "2025-11-23T19:02:51.545Z" },
+]
+
+[[package]]
+name = "sentry-sdk"
+version = "2.61.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/3b/4bc6b348bbd331daa14d4babe9f2b99bc854f4da41560eefb9488d78481d/sentry_sdk-2.61.1.tar.gz", hash = "sha256:9c6adccb3feefa9ba032c8d295ca477575c2f11896046a2b0ad686c47c4af555", size = 459429, upload-time = "2026-06-01T07:24:18.875Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/54/c9218db183846e08efaf68534889ef42e499dde432778881104a42f7071b/sentry_sdk-2.61.1-py3-none-any.whl", hash = "sha256:fa36eaf4b8ad708f718500d4bdcc1532637526a22beb874d88cbc0a46458b5ae", size = 483735, upload-time = "2026-06-01T07:24:17.027Z" },
+]
+
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+starlette = [
+    { name = "starlette" },
 ]
 
 [[package]]
