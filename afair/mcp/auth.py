@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from ..settings import Settings
+    from .api_tokens import ApiToken
 
 
 _BEARER_PREFIX = "Bearer "
@@ -123,7 +124,7 @@ class BearerOrJwtMiddleware:
         self._exempt_prefixes: tuple[str, ...] = tuple(exempt_prefixes)
         self._allowlist = settings.allowlist
 
-    async def _verify_api_token(self, provided: str):  # type: ignore[no-untyped-def]
+    async def _verify_api_token(self, provided: str) -> ApiToken | None:
         """Look up a user-minted API token in substrate.
 
         Wrapped in an inline import + thread-pool hop so the
