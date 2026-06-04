@@ -19,3 +19,13 @@
 - Tests + types must stay green: `uv run pytest`, `uv run mypy afair`, `uv run ruff check`. The deploy gate runs all three.
 
 Everything else — code conventions, deploy recipes, asset pipeline, current phase status, captured-for-later designs — is in `CLAUDE.md` and the documents it links.
+
+## Design (binding) — impeccable mandatory
+
+Any UI / frontend work goes through **impeccable**. No freehand UI generation. This is a binding global rule across every AI harness (Claude Code, Codex, Cursor, Copilot, Aider).
+
+- Invoke a precise sub-command for every UI task: `/impeccable craft|shape|audit|critique|polish|colorize|typeset|animate|bolder|quieter|layout|clarify|distill|harden|delight|overdrive|adapt|onboard|optimize|extract|document|live|init <target>`.
+- Pre-merge gate: `npx impeccable detect src/` (41 deterministic anti-pattern rules, CI-friendly).
+- Bootstrap once per project: `yes | npx -y impeccable skills install`, then `/impeccable init`.
+- Exceptions: non-UI work, one-line typo/aria fixes, or explicit user "skip impeccable for this".
+- Full rules: `~/.claude/rules/design.md`.
