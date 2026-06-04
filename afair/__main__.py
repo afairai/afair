@@ -9,10 +9,14 @@ from __future__ import annotations
 import sys
 
 from .mcp import run as run_server
+from .observability import init_sentry
 from .settings import load_settings
 
 
 def main() -> int:
+    # Init Sentry before anything else so even bootstrap errors land.
+    # No-op when SENTRY_DSN is unset (local dev, self-hosted opt-out).
+    init_sentry()
     settings = load_settings()
     print(
         f"[afair] {settings.environment} | "
