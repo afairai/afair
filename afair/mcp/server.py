@@ -50,6 +50,7 @@ from .security_headers import SecurityHeadersMiddleware
 from .signup_route import signup_endpoint
 from .tokens_route import list_endpoint as tokens_list_endpoint
 from .tokens_route import mint_endpoint as tokens_mint_endpoint
+from .tokens_route import preflight_endpoint as tokens_preflight_endpoint
 from .tokens_route import revoke_endpoint as tokens_revoke_endpoint
 
 log = structlog.get_logger(__name__)
@@ -372,9 +373,19 @@ def build_app(settings: Settings) -> Starlette:
         Route("/internal/tokens", tokens_list_endpoint, methods=["GET"]),
         Route("/internal/tokens", tokens_mint_endpoint, methods=["POST"]),
         Route(
+            "/internal/tokens",
+            tokens_preflight_endpoint,
+            methods=["OPTIONS"],
+        ),
+        Route(
             "/internal/tokens/{token_id}",
             tokens_revoke_endpoint,
             methods=["DELETE"],
+        ),
+        Route(
+            "/internal/tokens/{token_id}",
+            tokens_preflight_endpoint,
+            methods=["OPTIONS"],
         ),
         Mount("/", app=mcp_app),
     ]
