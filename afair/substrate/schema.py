@@ -403,6 +403,29 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'tuner_state is append-only (Invariant I2 + I7)');
     END
     """,
+    # ── api_tokens: per-user revocable bearer tokens for agents ────────────
+    # MUTABLE table (revoke flips revoked_at, every successful auth bumps
+    # last_used_at). The static AFAIR_AUTH_TOKEN env stays the master and
+    # is NOT in this table — its compromise still grants full access; this
+    # table lets the user mint additional tokens for bots / CI / each
+    # individual agent and revoke them independently.
+    #
+    # token_hash is sha256(plaintext) hex. Plaintext lives ONLY in the
+    # response of POST /internal/tokens; the DB stores the hash forever.
+    # No way to recover a lost token — only re-mint.
+    """
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        id            TEXT PRIMARY KEY,
+        label         TEXT NOT NULL,
+        token_hash    TEXT NOT NULL UNIQUE,
+        scope         TEXT NOT NULL DEFAULT 'full',
+        created_at    TEXT NOT NULL,
+        last_used_at  TEXT,
+        revoked_at    TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS api_tokens_hash_idx ON api_tokens(token_hash)",
+    "CREATE INDEX IF NOT EXISTS api_tokens_active_idx ON api_tokens(revoked_at) WHERE revoked_at IS NULL",
 )
 
 

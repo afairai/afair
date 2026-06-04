@@ -48,6 +48,9 @@ from .oauth import routes as oauth_routes
 from .rate_limit import RateLimitMiddleware, TokenBucketRateLimiter
 from .security_headers import SecurityHeadersMiddleware
 from .signup_route import signup_endpoint
+from .tokens_route import list_endpoint as tokens_list_endpoint
+from .tokens_route import mint_endpoint as tokens_mint_endpoint
+from .tokens_route import revoke_endpoint as tokens_revoke_endpoint
 
 log = structlog.get_logger(__name__)
 
@@ -262,7 +265,13 @@ def build_app(settings: Settings) -> Starlette:
         # lets the request reach the handler without the main MCP
         # bearer-or-JWT check rejecting it first.
         "/internal/export",
+        # Token-management endpoints — gated by their own master-bearer
+        # check (so sub-tokens cannot mint more sub-tokens). Exempting
+        # them from the main middleware avoids a chicken-and-egg with
+        # the JWT/auth-rate-limit stack.
+        "/internal/tokens",
     }
+    exempt_prefixes_set = ("/internal/tokens/",)
     exempt_prefixes = ("/oauth/",)
 
     # Per-identity rate limiter. Instance lives for process lifetime so
@@ -296,7 +305,7 @@ def build_app(settings: Settings) -> Starlette:
             settings=settings,
             static_token=static_token,
             exempt_paths=exempt_paths,
-            exempt_prefixes=exempt_prefixes,
+            exempt_prefixes=(*exempt_prefixes, *exempt_prefixes_set),
         ),
         # Rate limiter — per-token bucket, deny-with-429 above the cap.
         # Authenticated traffic only (auth already rejected unauthed).
@@ -304,7 +313,7 @@ def build_app(settings: Settings) -> Starlette:
             RateLimitMiddleware,
             limiter=rate_limiter,
             exempt_paths=exempt_paths,
-            exempt_prefixes=exempt_prefixes,
+            exempt_prefixes=(*exempt_prefixes, *exempt_prefixes_set),
         ),
     ]
 
@@ -357,6 +366,16 @@ def build_app(settings: Settings) -> Starlette:
         # surface independent of the main MCP auth. See
         # afair/mcp/export_route.py.
         Route("/internal/export", export_endpoint, methods=["GET"]),
+        # API token management. GET=list, POST=mint, DELETE one by id.
+        # Handler enforces master-bearer auth (AFAIR_AUTH_TOKEN only —
+        # minted sub-tokens cannot self-escalate). See tokens_route.py.
+        Route("/internal/tokens", tokens_list_endpoint, methods=["GET"]),
+        Route("/internal/tokens", tokens_mint_endpoint, methods=["POST"]),
+        Route(
+            "/internal/tokens/{token_id}",
+            tokens_revoke_endpoint,
+            methods=["DELETE"],
+        ),
         Mount("/", app=mcp_app),
     ]
 

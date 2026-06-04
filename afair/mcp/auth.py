@@ -123,6 +123,27 @@ class BearerOrJwtMiddleware:
         self._exempt_prefixes: tuple[str, ...] = tuple(exempt_prefixes)
         self._allowlist = settings.allowlist
 
+    async def _verify_api_token(self, provided: str):  # type: ignore[no-untyped-def]
+        """Look up a user-minted API token in substrate.
+
+        Wrapped in an inline import + thread-pool hop so the
+        synchronous SQLite read does not block the event loop. Returns
+        None on miss / revoked / DB error so auth falls through.
+        """
+        from . import api_tokens as _toks
+        from .context import connect_for_thread
+
+        try:
+            import anyio
+
+            def _lookup():
+                conn = connect_for_thread()
+                return _toks.verify(conn, provided)
+
+            return await anyio.to_thread.run_sync(_lookup)
+        except Exception:
+            return None
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -156,6 +177,17 @@ class BearerOrJwtMiddleware:
         if self._token is not None and hmac.compare_digest(provided, self._token):
             # All static-bearer traffic shares a single rate-limit bucket.
             scope[SCOPE_IDENTITY_KEY] = "static-bearer"
+            await self.app(scope, receive, send)
+            return
+
+        # Try minted API tokens (user-revocable, stored in api_tokens
+        # table). Hash-keyed DB lookup, falls through if no hit so JWT
+        # gets its turn next.
+        api_token = await self._verify_api_token(provided)
+        if api_token is not None:
+            # Each minted token is its own rate-limit identity so one
+            # abusive bot does not starve the user's own session.
+            scope[SCOPE_IDENTITY_KEY] = f"api-token:{api_token.id}"
             await self.app(scope, receive, send)
             return
 
