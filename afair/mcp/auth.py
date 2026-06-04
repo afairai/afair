@@ -137,7 +137,7 @@ class BearerOrJwtMiddleware:
         try:
             import anyio
 
-            def _lookup():
+            def _lookup() -> ApiToken | None:
                 conn = connect_for_thread()
                 return _toks.verify(conn, provided)
 
