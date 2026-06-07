@@ -39,6 +39,7 @@ no-op, no LLM call.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -81,6 +82,10 @@ individually queryable but don't bloat the prompt."""
 
 MAX_EDGES_PER_ARTICLE = 20
 """Cap on relationship triples included in the prompt."""
+
+_TAG_RE = re.compile(r"</?[^>]+>")
+"""Strips XML-ish list markup small models sometimes emit into array
+fields (``<item>...</item>``, stray ``</key_facts>``)."""
 
 
 _TOOL_NAME = "write_entity_article"
@@ -437,17 +442,39 @@ def _gather_edges(conn: sqlite3.Connection, group: _EntityGroup) -> list[dict[st
 
 
 def _coerce_to_string_list(value: Any) -> list[str]:
-    """Normalize an LLM field into a list of strings.
+    """Normalize an LLM field into a clean list of strings.
 
-    Mirrors the consolidator's defense: small models sometimes return a
-    single string where a JSON array was requested; wrapping it as a
-    one-element list beats iterating its characters.
+    Defends against the ways small models (Haiku) mangle a requested JSON
+    array, observed in the first production cycle:
+      - a single string instead of an array → one-element list;
+      - each element a stringified JSON array (``'["fact"]'``) → flattened;
+      - XML-ish list markup (``'<item>fact</item>'``, ``'</key_facts>'``) →
+        tags stripped, pure-tag artifacts dropped.
     """
     if isinstance(value, (list, tuple)):
-        return [str(item) for item in value]
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    return []
+        raw = list(value)
+    elif isinstance(value, str):
+        raw = [value]
+    else:
+        return []
+
+    out: list[str] = []
+    for item in raw:
+        s = (item if isinstance(item, str) else str(item)).strip()
+        # Stringified JSON array → flatten its elements in.
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, list):
+                out.extend(str(x).strip() for x in parsed if str(x).strip())
+                continue
+        # Strip XML-ish list markup the model sometimes emits.
+        s = _TAG_RE.sub("", s).strip()
+        if s:
+            out.append(s)
+    return out
 
 
 def _write_article(
