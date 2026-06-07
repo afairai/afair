@@ -1,0 +1,173 @@
+"""Tests for the entity-article worker (living per-topic synthesis).
+
+The LLM is mocked via monkeypatch on agents.entity_articles.call_tool, so
+no network is touched. Substrate fixtures seed events + entities + mentions
+the way the canonicalizer would have produced them.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from afair.agents import entity_articles as ea
+from afair.agents.invalidation import INVALIDATE_KIND
+from afair.agents.llm import LLMResult
+from afair.settings import Settings
+from afair.substrate import open_db, write_event
+from afair.substrate.entities import write_entity, write_entity_mention
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    c = open_db(vault)
+    yield c
+    c.close()
+
+
+def _seed_mention(conn, *, name: str, kind: str, text: str, surface: str | None = None) -> None:
+    """One source event + one entity + one mention linking them."""
+    event = write_event(
+        conn,
+        origin="agent",
+        kind="remember",
+        payload={"content_type": "text", "text": text},
+    )
+    entity = write_entity(
+        conn,
+        canonical_name=name,
+        kind=kind,
+        created_by="test",
+        source_event_id=event.id,
+        confidence=0.9,
+    )
+    write_entity_mention(
+        conn,
+        entity_id=entity.id,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        surface_form=surface or name,
+        canonicalized_by="test",
+        match_method="exact",
+        confidence=0.9,
+    )
+
+
+def _stub_llm(monkeypatch, *, counter: dict | None = None):
+    def _call(**kwargs):
+        if counter is not None:
+            counter["n"] = counter.get("n", 0) + 1
+        return LLMResult(
+            data={
+                "summary": "A synthesized article about the entity.",
+                "aliases": ["alt name"],
+                "key_facts": ["fact one", "fact two"],
+            },
+            model="stub",
+            raw="{}",
+        )
+
+    monkeypatch.setattr(ea, "call_tool", _call)
+
+
+def _articles(conn) -> list:
+    return conn.execute(
+        "SELECT * FROM events WHERE kind = ? ORDER BY created_at",
+        (ea.ENTITY_ARTICLE_KIND,),
+    ).fetchall()
+
+
+def test_writes_article_for_entity_above_threshold(conn, monkeypatch) -> None:
+    for i in range(3):
+        _seed_mention(conn, name="MCP", kind="concept", text=f"MCP note {i}")
+    _stub_llm(monkeypatch)
+
+    stats = ea.EntityArticleWorker().run(conn, Settings())
+
+    assert stats["written"] == 1
+    rows = _articles(conn)
+    assert len(rows) == 1
+    import json
+
+    payload = json.loads(rows[0]["payload"])
+    assert payload["entity_key"] == "mcp"
+    assert payload["canonical_name"] == "MCP"
+    assert payload["mention_count"] == 3
+    assert payload["text"] == "A synthesized article about the entity."
+    assert payload["produced_by"] == ea.ENTITY_ARTICLE_PRODUCER
+
+
+def test_skips_entity_below_threshold(conn, monkeypatch) -> None:
+    counter: dict = {}
+    for i in range(2):  # below MIN_MENTIONS_FOR_ARTICLE (3)
+        _seed_mention(conn, name="Mem0", kind="product", text=f"Mem0 note {i}")
+    _stub_llm(monkeypatch, counter=counter)
+
+    stats = ea.EntityArticleWorker().run(conn, Settings())
+
+    assert stats["written"] == 0
+    assert counter.get("n", 0) == 0  # no LLM call for a sub-threshold entity
+    assert _articles(conn) == []
+
+
+def test_second_run_skips_unchanged_entity(conn, monkeypatch) -> None:
+    counter: dict = {}
+    for i in range(3):
+        _seed_mention(conn, name="Graphiti", kind="product", text=f"Graphiti note {i}")
+    _stub_llm(monkeypatch, counter=counter)
+
+    ea.EntityArticleWorker().run(conn, Settings())
+    stats2 = ea.EntityArticleWorker().run(conn, Settings())
+
+    assert counter["n"] == 1  # LLM fired once, not on the unchanged second run
+    assert stats2["skipped_unchanged"] == 1
+    assert len(_articles(conn)) == 1
+
+
+def test_resynthesizes_and_supersedes_after_new_mention(conn, monkeypatch) -> None:
+    for i in range(3):
+        _seed_mention(conn, name="Letta", kind="product", text=f"Letta note {i}")
+    _stub_llm(monkeypatch)
+    ea.EntityArticleWorker().run(conn, Settings())
+    v1 = _articles(conn)
+    assert len(v1) == 1
+
+    time.sleep(0.01)  # ensure the new mention's timestamp is strictly later
+    _seed_mention(conn, name="Letta", kind="product", text="Letta got a new fact")
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    v2 = _articles(conn)
+    assert len(v2) == 2  # a new article version was written
+
+    invalidations = conn.execute(
+        """
+        SELECT * FROM events
+        WHERE kind = ?
+          AND json_extract(payload, '$.target_hash') = ?
+        """,
+        (INVALIDATE_KIND, v1[0]["content_hash"]),
+    ).fetchall()
+    assert len(invalidations) == 1  # the prior article was superseded
+
+
+def test_groups_same_name_across_kinds_into_one_article(conn, monkeypatch) -> None:
+    # Same canonical_name under two kinds — the canonicalizer does not merge
+    # across kinds, but the article worker groups by name.
+    _seed_mention(conn, name="smoke.py", kind="product", text="smoke product a")
+    _seed_mention(conn, name="smoke.py", kind="product", text="smoke product b")
+    _seed_mention(conn, name="smoke.py", kind="project", text="smoke project c")
+    _stub_llm(monkeypatch)
+
+    stats = ea.EntityArticleWorker().run(conn, Settings())
+
+    assert stats["written"] == 1  # ONE article, not two
+    import json
+
+    payload = json.loads(_articles(conn)[0]["payload"])
+    assert payload["entity_key"] == "smoke.py"
+    assert payload["entity_kind"] == "mixed"
+    assert payload["mention_count"] == 3
+    assert len(payload["entity_ids"]) == 2  # both kind-variants aggregated
