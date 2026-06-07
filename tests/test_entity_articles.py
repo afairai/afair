@@ -153,6 +153,23 @@ def test_resynthesizes_and_supersedes_after_new_mention(conn, monkeypatch) -> No
     assert len(invalidations) == 1  # the prior article was superseded
 
 
+def test_coerce_cleans_model_mangled_list_fields() -> None:
+    # Clean list passes through.
+    assert ea._coerce_to_string_list(["a", "b"]) == ["a", "b"]
+    # Single string → one element.
+    assert ea._coerce_to_string_list("solo") == ["solo"]
+    # Each element a stringified JSON array (observed from Haiku) → flattened.
+    assert ea._coerce_to_string_list(['["fact a"]', '["fact b"]']) == ["fact a", "fact b"]
+    # XML-ish list markup → tags stripped, pure-tag artifact dropped.
+    assert ea._coerce_to_string_list(["<item>foo</item>", "</key_facts>", "<item>bar</item>"]) == [
+        "foo",
+        "bar",
+    ]
+    # Non-string / empty inputs.
+    assert ea._coerce_to_string_list(None) == []
+    assert ea._coerce_to_string_list(["", "   "]) == []
+
+
 def test_groups_same_name_across_kinds_into_one_article(conn, monkeypatch) -> None:
     # Same canonical_name under two kinds — the canonicalizer does not merge
     # across kinds, but the article worker groups by name.
