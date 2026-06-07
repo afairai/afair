@@ -487,10 +487,16 @@ class Tuner(ColdPathWorker):
     # ─── triggers ─────────────────────────────────────────────────────
 
     def _should_run(self, conn: sqlite3.Connection) -> bool:
-        """Run if traffic OR time threshold met."""
+        """Run if this is the first-ever cycle, or the time / traffic
+        threshold is met."""
         last = self._last_cycle_at(conn)
         if last is None:
-            return False
+            # Bootstrap: the tuner has never completed a cycle, so there is
+            # no prior marker to measure elapsed time against. Fire the
+            # first cycle now. Returning False here was a cold-start
+            # deadlock — the tuner only writes its first marker by running,
+            # but only ran if a marker already existed.
+            return True
         if time.time() - last >= TIME_TRIGGER_SECONDS:
             return True
         row = conn.execute(
@@ -501,15 +507,23 @@ class Tuner(ColdPathWorker):
         return events_since >= TRAFFIC_TRIGGER_EVENT_COUNT
 
     def _last_cycle_at(self, conn: sqlite3.Connection) -> float | None:
+        """Timestamp of the tuner's last completed cycle, or None if it has
+        never cycled.
+
+        Excludes ``worker = 'recall'`` rows: the recall.feedback signal is
+        written by the recall handler, not by a tuner cycle, and counting it
+        would make the tuner think it had already run.
+        """
         row = conn.execute(
             """
             SELECT recorded_at FROM tuner_state
-            WHERE kind IN ('observation', 'promote', 'rollback')
+            WHERE kind IN ('hypothesis', 'observation', 'promote', 'rollback')
+              AND worker != 'recall'
             ORDER BY recorded_at DESC LIMIT 1
             """,
         ).fetchone()
         if row is None:
-            return time.time()
+            return None
         return datetime.fromisoformat(row["recorded_at"]).timestamp()
 
     @staticmethod

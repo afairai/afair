@@ -146,13 +146,15 @@ def conn(tmp_path):
     c.close()
 
 
-def test_tuner_first_boot_does_not_run(conn) -> None:
-    """No prior cycle, no triggers → tuner skips."""
-    from afair.settings import Settings
+def test_tuner_first_boot_triggers(conn) -> None:
+    """No prior cycle → the tuner must bootstrap and fire its first cycle.
 
-    t = Tuner()
-    stats = t.run(conn, Settings())
-    assert stats["triggered"] is False
+    This previously asserted the opposite (``triggered is False``), which
+    codified a cold-start deadlock: the tuner only recorded its first cycle
+    marker by running, but only ran if a marker already existed, so it never
+    ran at all in production. See tests/test_tuner_trigger.py.
+    """
+    assert Tuner()._should_run(conn) is True
 
 
 def _seed_old_observation(conn) -> None:
