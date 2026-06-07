@@ -1,0 +1,41 @@
+"""Recall article-first ordering — entity_article hits surface before the
+raw events they summarize (Karpathy LLM-Wiki / RAG-bypass)."""
+
+from __future__ import annotations
+
+from afair.agents.entity_articles import ENTITY_ARTICLE_KIND
+from afair.mcp.handlers import _article_first_order
+from afair.substrate.events import Event
+
+
+def _ev(kind: str, n: int) -> Event:
+    return Event(
+        id=f"e{n}",
+        content_hash=f"sha256:{n:064d}",
+        created_at=f"2026-06-07T00:00:0{n}+00:00",
+        origin="agent",
+        kind=kind,
+        payload={},
+        schema_version=1,
+    )
+
+
+def test_articles_move_to_front_preserving_order() -> None:
+    events = [
+        _ev("remember", 1),
+        _ev(ENTITY_ARTICLE_KIND, 2),
+        _ev("observe", 3),
+        _ev(ENTITY_ARTICLE_KIND, 4),
+    ]
+    out = _article_first_order(events)
+    assert [e.id for e in out] == ["e2", "e4", "e1", "e3"]
+
+
+def test_no_articles_is_identity() -> None:
+    events = [_ev("remember", 1), _ev("observe", 2)]
+    assert _article_first_order(events) == events
+
+
+def test_all_articles_keep_relative_order() -> None:
+    events = [_ev(ENTITY_ARTICLE_KIND, 1), _ev(ENTITY_ARTICLE_KIND, 2)]
+    assert [e.id for e in _article_first_order(events)] == ["e1", "e2"]

@@ -43,6 +43,7 @@ from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
 from ..agents.conflict_resolver import read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
+from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.interpretation import read_latest_interpretations_batch
 from ..agents.invalidation import (
     INVALIDATE_KIND,
@@ -913,6 +914,23 @@ def _auto_route_depth(query: str) -> Depth:
     return "normal"
 
 
+def _article_first_order(events: list[Event]) -> list[Event]:
+    """Stable-partition entity_article hits to the front of a query result.
+
+    An article only appears in a query's results when it matched (FTS / vec
+    / entity-name), and an article is a dense synthesis of exactly that
+    entity — so when one is relevant the caller should read it before the
+    raw events it summarizes. This is the recall side of the Karpathy
+    LLM-Wiki / RAG-bypass: prefer the synthesis. Order within each partition
+    (and thus the underlying fused ranking) is preserved.
+    """
+    articles = [e for e in events if e.kind == ENTITY_ARTICLE_KIND]
+    if not articles:
+        return events
+    rest = [e for e in events if e.kind != ENTITY_ARTICLE_KIND]
+    return articles + rest
+
+
 def recall(
     query: str | None = None,
     scope: str | None = None,
@@ -1054,6 +1072,11 @@ def recall(
                         "deep depth is not yet richer than normal "
                         "(Phase 3+ reasoning agent pending); returned hybrid results"
                     )
+
+        # Article-first: when an entity article matched, surface the dense
+        # synthesis before the raw events it summarizes (query path only —
+        # browse mode stays chronological).
+        events = _article_first_order(events)
 
     invalidations = _attach_invalidations(events, db)
     conflicts = _attach_conflicts(events, db)
