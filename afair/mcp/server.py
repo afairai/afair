@@ -31,6 +31,7 @@ from ..agents.consolidator import Consolidator
 from ..agents.embedding import embed_text
 from ..agents.entity_articles import EntityArticleWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
+from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.rollback_monitor import RollbackMonitor
@@ -113,6 +114,7 @@ def build_server(settings: Settings) -> FastMCP:
                 ConflictResolver(),
                 Consolidator(),
                 EntityCanonicalizer(),
+                EntityDeduplicator(),
                 EntityArticleWorker(),
                 SalienceWorker(),
                 ModeSwitcher(),
