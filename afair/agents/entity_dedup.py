@@ -26,12 +26,14 @@ clusters are judged per run.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
+from ..substrate import write_event
 from ..substrate.entities import (
     Entity,
     resolve_canonical,
@@ -51,6 +53,13 @@ log = structlog.get_logger(__name__)
 
 
 DEDUP_PRODUCED_BY = "entity_deduplicator:v0"
+
+DEDUP_DECISION_KIND = "entity_dedup_decision"
+"""Kind for the worker's 'kept separate' markers. Carries NO text/context/
+reason key, so derive_searchable_text yields nothing and recall/FTS never
+surface these — they are private convergence markers, not content. Gated on
+the cluster's mention count: the decision holds until the cluster grows, at
+which point the new context warrants a fresh judgment."""
 
 MAX_CLUSTERS_PER_CYCLE = 3
 """LLM calls per run = at most this. Same-name clusters are few and slow to
@@ -134,6 +143,7 @@ class EntityDeduplicator(ColdPathWorker):
             "clusters_merged": 0,
             "entities_merged": 0,
             "skipped_already_merged": 0,
+            "skipped_recent_decision": 0,
             "skipped_not_same": 0,
             "llm_errors": 0,
         }
@@ -151,6 +161,14 @@ class EntityDeduplicator(ColdPathWorker):
                 stats["skipped_already_merged"] += 1
                 continue
 
+            # Already judged "keep separate" and the cluster hasn't grown
+            # since → don't re-burn an LLM call. Re-judge only when new
+            # mentions arrive (the added context may flip the decision).
+            mention_total = sum(m.mention_count for m in members)
+            if _recent_keep_separate(conn, entity_key=key, mention_total=mention_total):
+                stats["skipped_recent_decision"] += 1
+                continue
+
             stats["clusters_examined"] += 1
             try:
                 verdict = _judge(members=members, model=model, api_key=api_key)
@@ -161,6 +179,9 @@ class EntityDeduplicator(ColdPathWorker):
 
             if not (verdict.same_entity and verdict.confidence >= MERGE_CONFIDENCE_THRESHOLD):
                 stats["skipped_not_same"] += 1
+                _record_keep_separate(
+                    conn, entity_key=key, mention_total=mention_total, verdict=verdict
+                )
                 log.info(
                     "entity_dedup.kept_separate",
                     entity=key,
@@ -189,10 +210,67 @@ class EntityDeduplicator(ColdPathWorker):
                 f"merged={stats['clusters_merged']} "
                 f"entities_merged={stats['entities_merged']} "
                 f"kept_separate={stats['skipped_not_same']} "
+                f"skipped_recent={stats['skipped_recent_decision']} "
                 f"errors={stats['llm_errors']}"
             ),
         )
         return stats
+
+
+def _recent_keep_separate(conn: sqlite3.Connection, *, entity_key: str, mention_total: int) -> bool:
+    """True if the latest keep-separate marker for this cluster is current.
+
+    "Current" = produced by this worker version AND recorded at the same
+    mention total. A grown cluster (different total) returns False so it is
+    re-judged. A prompt/version change (DEDUP_PRODUCED_BY bump) likewise
+    invalidates old markers, re-judging everything (I7).
+    """
+    row = conn.execute(
+        """
+        SELECT payload FROM events
+        WHERE kind = ?
+          AND json_extract(payload, '$.entity_key') = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (DEDUP_DECISION_KIND, entity_key),
+    ).fetchone()
+    if row is None:
+        return False
+    payload = json.loads(row["payload"])
+    return bool(
+        payload.get("produced_by") == DEDUP_PRODUCED_BY
+        and payload.get("decision") == "keep_separate"
+        and payload.get("mention_total") == mention_total
+    )
+
+
+def _record_keep_separate(
+    conn: sqlite3.Connection,
+    *,
+    entity_key: str,
+    mention_total: int,
+    verdict: _Verdict,
+) -> None:
+    """Persist a 'kept separate' marker as a substrate event.
+
+    Deliberately carries no ``text``/``context``/``reason`` key — those are
+    FTS-indexed by derive_searchable_text — so the marker is invisible to
+    recall. The audit detail lives under ``rationale`` (not an indexed key).
+    """
+    write_event(
+        conn,
+        origin="agent",
+        kind=DEDUP_DECISION_KIND,
+        payload={
+            "entity_key": entity_key,
+            "decision": "keep_separate",
+            "mention_total": mention_total,
+            "confidence": verdict.confidence,
+            "rationale": verdict.reason[:500],
+            "produced_by": DEDUP_PRODUCED_BY,
+        },
+    )
 
 
 def _api_key_for_model(model: str, settings: Settings) -> str | None:

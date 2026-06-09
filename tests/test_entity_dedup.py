@@ -12,6 +12,7 @@ from afair.agents.llm import LLMResult
 from afair.settings import Settings
 from afair.substrate import open_db, write_event
 from afair.substrate.entities import resolve_canonical, write_entity, write_entity_mention
+from afair.substrate.payload import derive_searchable_text
 
 
 @pytest.fixture()
@@ -111,6 +112,61 @@ def test_does_not_merge_below_confidence_threshold(conn, monkeypatch) -> None:
     assert stats["clusters_merged"] == 0
     assert resolve_canonical(conn, product) == product
     assert resolve_canonical(conn, project) == project
+
+
+def test_keep_separate_decision_skips_rejudge_until_cluster_grows(conn, monkeypatch) -> None:
+    counter: dict = {}
+    org_id = _seed_entity(conn, name="Apple", kind="organization", n_mentions=2)
+    _seed_entity(conn, name="Apple", kind="concept", n_mentions=2)
+    _stub_judge(monkeypatch, same=False, confidence=0.95, counter=counter)
+
+    ed.EntityDeduplicator().run(conn, Settings())  # judges once → kept separate + marker
+    stats2 = ed.EntityDeduplicator().run(conn, Settings())  # unchanged → skip, no LLM
+
+    assert counter["n"] == 1
+    assert stats2["skipped_recent_decision"] >= 1
+    assert stats2["clusters_examined"] == 0
+
+    # Grow the cluster with a genuinely new mention — warrants a fresh judgment.
+    event = write_event(
+        conn,
+        origin="agent",
+        kind="remember",
+        payload={"content_type": "text", "text": "Apple unique growth note"},
+    )
+    write_entity_mention(
+        conn,
+        entity_id=org_id,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        surface_form="Apple",
+        canonicalized_by="test",
+        match_method="exact",
+        confidence=0.9,
+    )
+    stats3 = ed.EntityDeduplicator().run(conn, Settings())
+    assert counter["n"] == 2  # re-judged
+    assert stats3["clusters_examined"] == 1
+
+
+def test_keep_separate_marker_is_invisible_to_recall(conn) -> None:
+    # The marker carries no FTS-indexed key, so recall never surfaces it.
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE kind = ?", (ed.DEDUP_DECISION_KIND,)
+    ).fetchall()
+    # (none yet in this fresh conn — assert the payload shape directly)
+    import json
+
+    sample = {
+        "entity_key": "apple",
+        "decision": "keep_separate",
+        "mention_total": 4,
+        "confidence": 0.9,
+        "rationale": "company vs concept, different things",
+        "produced_by": ed.DEDUP_PRODUCED_BY,
+    }
+    assert derive_searchable_text(sample) == ""
+    assert rows == [] or all(derive_searchable_text(json.loads(r["payload"])) == "" for r in rows)
 
 
 def test_idempotent_skips_already_merged_cluster(conn, monkeypatch) -> None:
