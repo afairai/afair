@@ -229,6 +229,15 @@ def test_write_is_idempotent_under_concurrency(tmp_path: Path) -> None:
         "language": None,
     }
 
+    # Create the schema ONCE up front. Without this, all N worker threads
+    # race to run init_db (the full schema DDL) on a fresh database at the
+    # same instant — a DDL storm that, under a loaded CI runner, can outlast
+    # the 5s busy_timeout and raise "database is locked" inside open_db.
+    # That is a test artifact (in production the schema exists long before
+    # any concurrent write); the unit under test is write_event idempotency,
+    # so let the workers contend only on the write, not on schema creation.
+    open_db(tmp_path).close()
+
     results: list[Event] = []
     errors: list[BaseException] = []
     lock = threading.Lock()
@@ -236,16 +245,20 @@ def test_write_is_idempotent_under_concurrency(tmp_path: Path) -> None:
 
     def worker() -> None:
         start.wait()
-        conn = open_db(tmp_path)
+        # open_db inside the try so a failure is recorded as an error rather
+        # than silently killing the thread (which would drop a result and
+        # surface as a confusing len(results) mismatch instead).
         try:
-            event = write_event(conn, origin="user", kind="remember", payload=payload)
-            with lock:
-                results.append(event)
+            conn = open_db(tmp_path)
+            try:
+                event = write_event(conn, origin="user", kind="remember", payload=payload)
+                with lock:
+                    results.append(event)
+            finally:
+                conn.close()
         except BaseException as e:
             with lock:
                 errors.append(e)
-        finally:
-            conn.close()
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
     for t in threads:
