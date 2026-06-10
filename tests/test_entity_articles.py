@@ -7,6 +7,7 @@ the way the canonicalizer would have produced them.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -151,6 +152,59 @@ def test_resynthesizes_and_supersedes_after_new_mention(conn, monkeypatch) -> No
         (INVALIDATE_KIND, v1[0]["content_hash"]),
     ).fetchall()
     assert len(invalidations) == 1  # the prior article was superseded
+
+
+def _live_articles(conn) -> list:
+    """Articles with no invalidation pointing at them."""
+    return conn.execute(
+        """
+        SELECT e.* FROM events e
+        WHERE e.kind = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events inv
+            WHERE inv.kind = ?
+              AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+          )
+        ORDER BY e.created_at
+        """,
+        (ea.ENTITY_ARTICLE_KIND, INVALIDATE_KIND),
+    ).fetchall()
+
+
+def test_supersession_heals_a_crash_orphaned_article(conn, monkeypatch) -> None:
+    """Race M1 — if a past cycle crashed between writing a new article and
+    invalidating the prior, the orphan would otherwise live forever. The next
+    re-synthesis must invalidate ALL prior-live articles, not just the newest,
+    so the state self-heals to exactly one live article.
+    """
+    for i in range(3):
+        _seed_mention(conn, name="Letta", kind="product", text=f"Letta note {i}")
+    _stub_llm(monkeypatch)
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    # Simulate the crash aftermath: a SECOND article exists for the same
+    # entity_key with NO invalidation pointing at it (the invalidate write
+    # never landed). Two live articles — the bug state.
+    orphan_v1 = _articles(conn)[0]
+    payload = dict(json.loads(orphan_v1["payload"]))
+    payload["text"] = "an orphaned second article version"
+    write_event(
+        conn,
+        origin="agent",
+        kind=ea.ENTITY_ARTICLE_KIND,
+        payload=payload,
+        parent_hashes=payload.get("entity_ids"),
+    )
+    assert len(_live_articles(conn)) == 2  # two live articles — the orphan bug
+
+    # New mention triggers re-synthesis → supersede ALL prior-live.
+    time.sleep(0.01)
+    _seed_mention(conn, name="Letta", kind="product", text="Letta got a new fact")
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    # Self-healed: exactly one live article (the freshly synthesized one).
+    live = _live_articles(conn)
+    assert len(live) == 1
 
 
 def test_coerce_cleans_model_mangled_list_fields() -> None:

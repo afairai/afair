@@ -131,10 +131,14 @@ def open_db(
     # pages are actually paged in).
     conn.execute("PRAGMA mmap_size = 268435456")  # 256MB
     # Page cache — negative value means kilobytes (positive = pages).
-    # -65536 ≈ 64MB of recent pages kept hot in this connection's cache.
-    # Per-connection, so per-thread connections each get their own 64MB
-    # working set (acceptable for our 1GB VM).
-    conn.execute("PRAGMA cache_size = -65536")
+    # -16384 ≈ 16MB of recent pages kept hot in this connection's cache.
+    # This is PER-CONNECTION, and public-launch concurrency opens many
+    # connections at once (the 8-thread recall pool + extractor + cold-path
+    # + checkpoint + per-internal-route). At the old 64MB the worst-case
+    # resident cache across ~10 connections approached the 1GB VM ceiling —
+    # an OOM under a traffic spike. 16MB is ample for the small per-recall
+    # working set and keeps the aggregate well within budget. (Perf NEW-6.)
+    conn.execute("PRAGMA cache_size = -16384")
     # Run the planner's auto-tune. Cheap to call repeatedly; SQLite skips
     # the work when nothing has changed since the last optimize.
     conn.execute("PRAGMA optimize")

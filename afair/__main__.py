@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 
 from .mcp import run as run_server
-from .observability import init_sentry
+from .observability import configure_logging, init_sentry
 from .settings import load_settings
 
 
@@ -18,6 +18,9 @@ def main() -> int:
     # No-op when SENTRY_DSN is unset (local dev, self-hosted opt-out).
     init_sentry()
     settings = load_settings()
+    # Install the redacting structlog chain before any worker logs. Every
+    # log line from here on is masked for credentials/PII and length-capped.
+    configure_logging(environment=settings.environment)
     print(
         f"[afair] {settings.environment} | "
         f"vault={settings.vault_dir} | "
