@@ -39,3 +39,32 @@ def test_no_articles_is_identity() -> None:
 def test_all_articles_keep_relative_order() -> None:
     events = [_ev(ENTITY_ARTICLE_KIND, 1), _ev(ENTITY_ARTICLE_KIND, 2)]
     assert [e.id for e in _article_first_order(events)] == ["e1", "e2"]
+
+
+def test_invalidated_article_is_dropped_not_hoisted() -> None:
+    # The stale article (e2) is superseded; it must not lead — or even
+    # appear in — the result. The current article (e4) leads; raw events
+    # follow.
+    events = [
+        _ev("remember", 1),
+        _ev(ENTITY_ARTICLE_KIND, 2),  # superseded
+        _ev("observe", 3),
+        _ev(ENTITY_ARTICLE_KIND, 4),  # current
+    ]
+    invalidated = {events[1].content_hash}
+    out = _article_first_order(events, invalidated=invalidated)
+    assert [e.id for e in out] == ["e4", "e1", "e3"]
+    assert events[1].content_hash not in {e.content_hash for e in out}
+
+
+def test_only_stale_articles_falls_through_to_raw_events() -> None:
+    # Every matching article is stale → recall must still return the raw
+    # events, never an empty result nor the dead articles.
+    events = [
+        _ev(ENTITY_ARTICLE_KIND, 1),
+        _ev("remember", 2),
+        _ev(ENTITY_ARTICLE_KIND, 3),
+    ]
+    invalidated = {events[0].content_hash, events[2].content_hash}
+    out = _article_first_order(events, invalidated=invalidated)
+    assert [e.id for e in out] == ["e2"]

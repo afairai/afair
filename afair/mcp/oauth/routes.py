@@ -83,21 +83,16 @@ def _client_ip(request: Request) -> str:
     """Best-effort caller IP for DCR per-IP rate limiting.
 
     On Fly the platform sets ``Fly-Client-IP`` after stripping spoofed
-    upstream values. We trust that first. ``X-Forwarded-For`` is the
-    fallback for other deployments; we take the first hop. Last resort
-    is the direct socket address (only meaningful on localhost dev).
+    upstream values, so we trust ONLY that header in the fly environment and
+    ignore client-supplied ``X-Forwarded-For`` — otherwise an attacker could
+    rotate a forged XFF to evade the per-IP bucket. Off Fly, XFF (first hop)
+    then the socket address are the fallbacks. Delegates to the shared
+    environment-aware helper.
     """
-    fly = request.headers.get("fly-client-ip")
-    if fly:
-        return fly.strip()
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        first = xff.split(",", 1)[0].strip()
-        if first:
-            return first
-    if request.client is not None and request.client.host:
-        return request.client.host
-    return "unknown"
+    from ..rate_limit import client_ip_from_scope
+
+    settings = request.app.state.settings
+    return client_ip_from_scope(request.scope, environment=settings.environment)
 
 
 def _validate_redirect_uri(uri: str) -> str | None:
