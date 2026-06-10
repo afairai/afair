@@ -213,6 +213,17 @@ class EntityArticleWorker(ColdPathWorker):
                     reason="superseded by updated entity article",
                     origin="agent",
                 )
+                # Drop the superseded article from the FTS index. The event
+                # row stays (append-only substrate, I2), but its derived
+                # search row is regenerable (I3) and must go — otherwise
+                # every re-synthesis leaves a stale article matchable, and
+                # article-first ordering would hoist dead versions to the
+                # front of recall. Mirrors the extractor's FTS re-index.
+                with conn:
+                    conn.execute(
+                        "DELETE FROM events_fts WHERE content_hash = ?",
+                        (prior["content_hash"],),
+                    )
             stats["written"] += 1
             log.info(
                 "entity_articles.written",

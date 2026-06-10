@@ -914,7 +914,7 @@ def _auto_route_depth(query: str) -> Depth:
     return "normal"
 
 
-def _article_first_order(events: list[Event]) -> list[Event]:
+def _article_first_order(events: list[Event], invalidated: set[str] | None = None) -> list[Event]:
     """Stable-partition entity_article hits to the front of a query result.
 
     An article only appears in a query's results when it matched (FTS / vec
@@ -923,11 +923,24 @@ def _article_first_order(events: list[Event]) -> list[Event]:
     raw events it summarizes. This is the recall side of the Karpathy
     LLM-Wiki / RAG-bypass: prefer the synthesis. Order within each partition
     (and thus the underlying fused ranking) is preserved.
+
+    Superseded articles are dropped entirely. The article worker now
+    deletes the old FTS row on re-synthesis, but pre-fix stale rows and the
+    re-synthesis race window can still surface a dead version. A stale
+    article must never lead — let alone fill — recall, so any article whose
+    content_hash is invalidated is removed here. The current version also
+    matched and stays. Non-article invalidated events are not the concern
+    of this function; they remain (annotated) for history.
     """
-    articles = [e for e in events if e.kind == ENTITY_ARTICLE_KIND]
-    if not articles:
-        return events
+    invalidated = invalidated or set()
+    articles = [
+        e for e in events if e.kind == ENTITY_ARTICLE_KIND and e.content_hash not in invalidated
+    ]
     rest = [e for e in events if e.kind != ENTITY_ARTICLE_KIND]
+    # Drop invalidated articles from the result set as well (they are in
+    # neither partition above) — fall through to rest-only when none remain.
+    if not articles:
+        return rest if any(e.kind == ENTITY_ARTICLE_KIND for e in events) else events
     return articles + rest
 
 
@@ -1029,6 +1042,7 @@ def recall(
         # No query, no by_id — return most-recent N events (browse mode).
         events = list(iter_events(db, limit=limit))
         depth_used = "shallow"
+        invalidations = _attach_invalidations(events, db)
     else:
         # Real query — resolve depth, run FTS+vec if normal.
         if depth == "auto":
@@ -1075,10 +1089,13 @@ def recall(
 
         # Article-first: when an entity article matched, surface the dense
         # synthesis before the raw events it summarizes (query path only —
-        # browse mode stays chronological).
-        events = _article_first_order(events)
+        # browse mode stays chronological). Compute invalidations first so
+        # superseded articles are filtered out before they get hoisted.
+        invalidations = _attach_invalidations(events, db)
+        events = _article_first_order(events, invalidated=set(invalidations))
 
-    invalidations = _attach_invalidations(events, db)
+    # invalidations is computed per-branch above (browse + query) and reused
+    # here so the per-hit annotation does not re-query.
     conflicts = _attach_conflicts(events, db)
     overlay = _build_entity_overlay(events, db)
     # Batch the per-hit DB calls that previously ran N+1 (Perf audit C3).
