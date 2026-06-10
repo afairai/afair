@@ -426,6 +426,35 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS api_tokens_hash_idx ON api_tokens(token_hash)",
     "CREATE INDEX IF NOT EXISTS api_tokens_active_idx ON api_tokens(revoked_at) WHERE revoked_at IS NULL",
+    # ── Perf-scaling indexes (appended 2026-06-10, additive per I3) ─────────
+    # These close the launch-scale query cliffs the pre-announce audit found.
+    # All are expression / partial / composite indexes over EXISTING columns —
+    # no schema change, no data rewrite, idempotent.
+    #
+    # 1+2. Case-insensitive entity lookups. The recall entity-match and the
+    #      article/dedup candidate enumeration filter on LOWER(canonical_name)
+    #      / LOWER(surface_form); without an expression index on the lowered
+    #      value SQLite full-scans. Match the query expression exactly so the
+    #      planner uses these.
+    "CREATE INDEX IF NOT EXISTS entities_canonical_lower_idx ON entities(LOWER(canonical_name))",
+    "CREATE INDEX IF NOT EXISTS entity_mentions_surface_lower_idx "
+    "ON entity_mentions(LOWER(surface_form))",
+    # 3. Invalidation lookups run on every recall: WHERE kind='invalidate'
+    #    AND json_extract(payload,'$.target_hash') IN (...). A partial
+    #    expression index over the extracted hash turns a per-recall scan of
+    #    all invalidate rows into an index probe.
+    "CREATE INDEX IF NOT EXISTS events_invalidate_target_idx "
+    "ON events(json_extract(payload, '$.target_hash')) WHERE kind = 'invalidate'",
+    # 4. Entity-article entity_key lookups (the article + dedup workers, and
+    #    the new _supersede_prior_articles sweep) filter article rows by
+    #    json_extract(payload,'$.entity_key').
+    "CREATE INDEX IF NOT EXISTS events_entity_article_key_idx "
+    "ON events(json_extract(payload, '$.entity_key')) WHERE kind = 'entity_article'",
+    # 5. resolve_canonical_batch ranks merges by (from_entity_id, merged_at
+    #    DESC) per recall; this composite serves the latest-merge lookup
+    #    without re-windowing the whole table.
+    "CREATE INDEX IF NOT EXISTS entity_merges_from_merged_idx "
+    "ON entity_merges(from_entity_id, merged_at DESC)",
 )
 
 

@@ -40,14 +40,18 @@ from ..agents.tuner import Tuner
 from ..substrate import start_checkpoint_loop
 from ..substrate.db import set_vault_key
 from . import descriptions, handlers, landing, resources, schemas
-from .auth import BearerTokenMiddleware
+from .auth import BearerTokenMiddleware, enforce_write_scope
 from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .correlation import CorrelationIdMiddleware
 from .export_route import export_endpoint
 from .oauth import routes as oauth_routes
-from .rate_limit import RateLimitMiddleware, TokenBucketRateLimiter
+from .rate_limit import (
+    InternalPathRateLimitMiddleware,
+    RateLimitMiddleware,
+    TokenBucketRateLimiter,
+)
 from .security_headers import SecurityHeadersMiddleware
 from .signup_route import signup_endpoint
 from .tokens_route import list_endpoint as tokens_list_endpoint
@@ -161,6 +165,7 @@ def build_server(settings: Settings) -> FastMCP:
         parent_hashes: list[str] | None = None,
         invalidates: list[str] | None = None,
     ) -> schemas.RememberResult:
+        enforce_write_scope()
         return handlers.remember(
             content=content,
             context=context,
@@ -195,6 +200,7 @@ def build_server(settings: Settings) -> FastMCP:
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")
     def observe(event: schemas.ObserveEvent) -> schemas.ObserveResult:
+        enforce_write_scope()
         return handlers.observe(event=event)
 
     # ── resources — auto-fetched by clients at session-init ─────────────────
@@ -284,6 +290,18 @@ def build_app(settings: Settings) -> Starlette:
     # need per-deployment tuning later, add to Settings.
     rate_limiter = TokenBucketRateLimiter()
 
+    # Per-IP limiter for the /internal/* routes (signup, export, tokens),
+    # which carry their own scoped bearer and are exempt from both the auth
+    # middleware and the identity-bucketed rate limiter above. 30/min/IP is
+    # generous for the web app's legitimate calls and prohibitive for a
+    # leaked-scoped-bearer flood. (Security L5.)
+    internal_rate_limiter = TokenBucketRateLimiter(
+        requests_per_minute=30,
+        burst_multiplier=2.0,
+        max_identities=8192,
+    )
+    internal_rate_limited_prefixes = ("/internal/signup", "/internal/export", "/internal/tokens")
+
     middleware = [
         # Outermost — correlation id must bind BEFORE other middlewares so
         # their log lines also carry the request_id field.
@@ -319,6 +337,14 @@ def build_app(settings: Settings) -> Starlette:
             limiter=rate_limiter,
             exempt_paths=exempt_paths,
             exempt_prefixes=(*exempt_prefixes, *exempt_prefixes_set),
+        ),
+        # Per-IP limiter for /internal/* — these self-auth with a scoped
+        # bearer and are exempt above, so this is their only throttle (L5).
+        Middleware(
+            InternalPathRateLimitMiddleware,
+            limiter=internal_rate_limiter,
+            environment=settings.environment,
+            protected_prefixes=internal_rate_limited_prefixes,
         ),
     ]
 

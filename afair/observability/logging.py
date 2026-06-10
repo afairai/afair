@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from structlog.typing import EventDict, WrappedLogger
+
+if TYPE_CHECKING:
+    from structlog.typing import EventDict, WrappedLogger
 
 # Substring match (lowercased) against event-dict keys whose values must
 # be masked before the line is emitted.
@@ -63,9 +65,7 @@ def _redact(value: Any) -> Any:
     return value
 
 
-def redact_processor(
-    _logger: WrappedLogger, _method_name: str, event_dict: EventDict
-) -> EventDict:
+def redact_processor(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) -> EventDict:
     """structlog processor: mask credential-shaped keys, cap long strings."""
     for key, value in list(event_dict.items()):
         if _key_is_sensitive(str(key)):

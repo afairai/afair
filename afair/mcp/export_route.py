@@ -74,34 +74,35 @@ def _unauthorized() -> Response:
     )
 
 
-def _check_auth(request: Request) -> bool:
-    """Accept the main MCP bearer (``AFAIR_AUTH_TOKEN``) or the optional
-    scoped ``AFAIR_EXPORT_TOKEN``. Constant-time compare on both.
+def _check_auth(request: Request) -> str | None:
+    """Authenticate the export request.
+
+    Accepts the main MCP bearer (``AFAIR_AUTH_TOKEN``) or the optional
+    scoped ``AFAIR_EXPORT_TOKEN``. Constant-time compare on both. Returns a
+    label naming WHICH credential matched ("master" | "export") so the
+    caller can audit-log the full-vault dump, or None on failure.
+
+    Both credentials always run a compare even after a match, so the total
+    work is constant regardless of which (or neither) matched — no early-out
+    timing signal about credential validity.
     """
     settings = request.app.state.settings
     header = request.headers.get("authorization", "")
     match = _TOKEN_RE.match(header)
     if match is None:
-        return False
+        return None
     presented = match.group(1).strip()
 
-    candidates: list[str] = []
-    if settings.auth_token is not None:
-        candidates.append(settings.auth_token.get_secret_value())
-    if settings.export_token is not None:
-        candidates.append(settings.export_token.get_secret_value())
-    if not candidates:
-        # Neither credential configured — fail closed.
-        return False
-
-    # Compare against every candidate so a single accepted token unlocks
-    # the endpoint. hmac.compare_digest on each (constant-time) keeps
-    # the comparison side-channel safe.
-    ok = False
-    for c in candidates:
-        if hmac.compare_digest(presented, c):
-            ok = True
-    return ok
+    matched: str | None = None
+    if settings.auth_token is not None and hmac.compare_digest(
+        presented, settings.auth_token.get_secret_value()
+    ):
+        matched = "master"
+    if settings.export_token is not None and hmac.compare_digest(
+        presented, settings.export_token.get_secret_value()
+    ):
+        matched = matched or "export"
+    return matched
 
 
 def _iter_export(
@@ -265,7 +266,8 @@ def _extract_blob_hashes(payload: Any) -> Iterator[str]:
 
 
 async def export_endpoint(request: Request) -> Response:
-    if not _check_auth(request):
+    credential = _check_auth(request)
+    if credential is None:
         return _unauthorized()
 
     include_blobs = request.query_params.get("blobs", "") == "inline"
@@ -282,7 +284,20 @@ async def export_endpoint(request: Request) -> Response:
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     filename = f"afair-export-{stamp}.jsonl"
-    log.info("export.started", include_blobs=include_blobs, filename=filename)
+    # Audit the full-vault dump: a leaked master bearer streaming the whole
+    # encrypted-at-rest vault as plaintext is the worst-case blast radius, so
+    # every export is attributable — which credential, which IP, which
+    # request id. (Security: export blast-radius visibility.)
+    fly_ip = request.headers.get("fly-client-ip") or (
+        request.client.host if request.client else None
+    )
+    log.info(
+        "export.started",
+        include_blobs=include_blobs,
+        filename=filename,
+        credential=credential,
+        client_ip=fly_ip,
+    )
     return StreamingResponse(
         _stream(),
         media_type="application/x-ndjson; charset=utf-8",
