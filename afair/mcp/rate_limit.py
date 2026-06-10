@@ -39,7 +39,6 @@ from .auth import SCOPE_IDENTITY_KEY
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from starlette.requests import Request
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 
@@ -174,16 +173,6 @@ def _scope_identity(scope: Scope) -> str | None:
     if not token:
         return None
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
-
-
-def _identity_from_request(request: Request) -> str | None:
-    """BaseHTTPMiddleware-era helper kept for the old test surface.
-
-    Modern code paths go through ``_scope_identity`` directly. This
-    wrapper just adapts a Request back into a scope read so the legacy
-    helper keeps the same semantics.
-    """
-    return _scope_identity(request.scope)
 
 
 class RateLimitMiddleware:
