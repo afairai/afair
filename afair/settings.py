@@ -13,6 +13,10 @@ from typing import Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Minimum acceptable AFAIR_VAULT_KEY length. 32 bytes = 256 bits, matching
+# the AES-256 / SQLCipher key the salt-less HKDF derives from it.
+_MIN_VAULT_KEY_BYTES = 32
+
 
 def _normalize_allowlist(raw: str) -> tuple[str, ...]:
     """Comma-separated allowlist → lowercase tuple. Empty entries dropped."""
@@ -295,6 +299,19 @@ class Settings(BaseSettings):
                 "Losing it = losing the vault."
             )
             raise ValueError(msg)
+        # Reject a weak key wherever one is set (not just prod). The salt-less
+        # HKDF that derives the SQLCipher/AES-256 key relies on the input key
+        # carrying the full entropy — a 1-char AFAIR_VAULT_KEY would otherwise
+        # boot fine and produce a trivially-brute-forceable key. (Security L3.)
+        if self.vault_key is not None:
+            raw = self.vault_key.get_secret_value()
+            if len(raw.encode("utf-8")) < _MIN_VAULT_KEY_BYTES:
+                msg = (
+                    f"AFAIR_VAULT_KEY is too short (< {_MIN_VAULT_KEY_BYTES} bytes). "
+                    "Generate a strong one with: python -c "
+                    "'import secrets; print(secrets.token_urlsafe(32))'."
+                )
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

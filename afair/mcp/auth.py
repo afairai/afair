@@ -44,6 +44,35 @@ SCOPE_IDENTITY_KEY = "afair_rate_limit_identity"
 """Scope key the auth middleware sets after a successful auth so the
 rate-limit middleware can bucket on identity rather than token bytes."""
 
+SCOPE_TOKEN_SCOPE_KEY = "afair_token_scope"
+"""ASGI-scope key holding the authenticated credential's permission scope
+("full" | "read" | "write"). The tool layer reads this to enforce that a
+read-only minted token cannot perform write verbs (remember/observe).
+Full-access credentials (static bearer, JWT) always set "full"."""
+
+
+def enforce_write_scope() -> None:
+    """Reject write verbs (remember/observe) when the caller's token is read-only.
+
+    Reads the authenticated credential's scope from the current HTTP request's
+    ASGI scope (set by ``BearerOrJwtMiddleware``). Fails OPEN when there is no
+    HTTP request context — that path is direct/in-process invocation (unit
+    tests, the cold-path workers) which is implicitly full-access. (Security L2.)
+    """
+    from fastmcp.exceptions import ToolError
+    from fastmcp.server.dependencies import get_http_request
+
+    try:
+        request = get_http_request()
+    except Exception:
+        return  # no HTTP context — direct/in-process call, allow
+    token_scope = request.scope.get(SCOPE_TOKEN_SCOPE_KEY, "full")
+    if token_scope == "read":
+        raise ToolError(
+            "this token has read-only scope; write operations (remember, "
+            "observe) require a token with write or full scope"
+        )
+
 
 def _www_authenticate_header(settings: Settings) -> str:
     """Build the WWW-Authenticate header per RFC 6750.
@@ -178,6 +207,8 @@ class BearerOrJwtMiddleware:
         if self._token is not None and hmac.compare_digest(provided, self._token):
             # All static-bearer traffic shares a single rate-limit bucket.
             scope[SCOPE_IDENTITY_KEY] = "static-bearer"
+            # The master bearer is full-access by definition.
+            scope[SCOPE_TOKEN_SCOPE_KEY] = "full"
             await self.app(scope, receive, send)
             return
 
@@ -189,6 +220,8 @@ class BearerOrJwtMiddleware:
             # Each minted token is its own rate-limit identity so one
             # abusive bot does not starve the user's own session.
             scope[SCOPE_IDENTITY_KEY] = f"api-token:{api_token.id}"
+            # Enforce the token's stored scope at the tool boundary (L2).
+            scope[SCOPE_TOKEN_SCOPE_KEY] = api_token.scope
             await self.app(scope, receive, send)
             return
 
@@ -213,6 +246,8 @@ class BearerOrJwtMiddleware:
                 # for the same identity still lands in one bucket
                 # (Sec audit I2).
                 scope[SCOPE_IDENTITY_KEY] = f"jwt:{claims.sub.lower()}"
+                # OAuth-issued JWTs grant full access (the user's own session).
+                scope[SCOPE_TOKEN_SCOPE_KEY] = "full"
                 await self.app(scope, receive, send)
                 return
 

@@ -206,31 +206,24 @@ class EntityArticleWorker(ColdPathWorker):
                 continue
 
             written = _write_article(conn, group=group, article=article)
-            if prior is not None:
-                write_invalidation(
-                    conn,
-                    target_hash=prior["content_hash"],
-                    reason="superseded by updated entity article",
-                    origin="agent",
-                )
-                # Drop the superseded article from the FTS index. The event
-                # row stays (append-only substrate, I2), but its derived
-                # search row is regenerable (I3) and must go — otherwise
-                # every re-synthesis leaves a stale article matchable, and
-                # article-first ordering would hoist dead versions to the
-                # front of recall. Mirrors the extractor's FTS re-index.
-                with conn:
-                    conn.execute(
-                        "DELETE FROM events_fts WHERE content_hash = ?",
-                        (prior["content_hash"],),
-                    )
+            # Supersede every prior LIVE article for this entity_key, not just
+            # the single newest one. The write + invalidate are separate
+            # transactions (the substrate write path commits internally), so a
+            # crash between them could leave an un-invalidated orphan from a
+            # past cycle. Invalidating ALL prior-live articles here makes the
+            # state self-heal on the next re-synthesis instead of accumulating
+            # orphans. The just-written article (`written`) is excluded. (Race
+            # M1 — article supersession atomicity.)
+            superseded = _supersede_prior_articles(
+                conn, entity_key=group.entity_key, keep_hash=written.content_hash
+            )
             stats["written"] += 1
             log.info(
                 "entity_articles.written",
                 entity=group.canonical_name,
                 mentions=group.mention_count,
                 event_id=written.id,
-                superseded=prior["content_hash"] if prior else None,
+                superseded_count=len(superseded),
             )
 
         pe.record(
@@ -328,6 +321,52 @@ def _latest_article_for(conn: sqlite3.Connection, entity_key: str) -> dict[str, 
     if row is None:
         return None
     return {"content_hash": row["content_hash"], "created_at": row["created_at"]}
+
+
+def _supersede_prior_articles(
+    conn: sqlite3.Connection, *, entity_key: str, keep_hash: str
+) -> list[str]:
+    """Invalidate + de-index every LIVE article for ``entity_key`` except
+    ``keep_hash`` (the just-written current one). Returns the superseded
+    content_hashes.
+
+    "Live" = an entity_article event with no invalidation pointing at it.
+    Invalidating the whole live set (not just the single newest prior) makes
+    the worker self-heal after a crash that left an un-invalidated orphan,
+    rather than letting orphans accumulate across cycles. (Race M1.)
+    """
+    rows = conn.execute(
+        """
+        SELECT e.content_hash AS content_hash
+        FROM events e
+        WHERE e.kind = ?
+          AND json_extract(e.payload, '$.entity_key') = ?
+          AND e.content_hash != ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events inv
+            WHERE inv.kind = 'invalidate'
+              AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+          )
+        """,
+        (ENTITY_ARTICLE_KIND, entity_key, keep_hash),
+    ).fetchall()
+    superseded = [r["content_hash"] for r in rows]
+    for chash in superseded:
+        write_invalidation(
+            conn,
+            target_hash=chash,
+            reason="superseded by updated entity article",
+            origin="agent",
+        )
+        # The event row stays (append-only, I2) but its derived FTS row is
+        # regenerable (I3) and must go, else article-first ordering would
+        # hoist the dead version. Mirrors the extractor's FTS re-index.
+        with conn:
+            conn.execute(
+                "DELETE FROM events_fts WHERE content_hash = ?",
+                (chash,),
+            )
+    return superseded
 
 
 def _has_new_mentions_since(latest_mention_at: str, article_created_at: str) -> bool:

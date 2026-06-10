@@ -231,6 +231,13 @@ def consume_authorization_code(conn: sqlite3.Connection, code: str) -> Authoriza
         return None
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
+    # Enforce the 10-minute TTL at consume, not just via the periodic
+    # Pruner. The DELETE above already removed the row (single-use), so an
+    # expired code can't be retried — it simply fails as invalid_grant.
+    # Without this, a code leaked/snapshot-recovered before the Pruner
+    # swept it (up to ~6h later) stayed exchangeable. (Security M1.)
+    if expires_at_dt < datetime.now(UTC):
+        return None
     return AuthorizationCode(
         code=code,  # return the plaintext we were given (callers expect it)
         client_id=row["client_id"],
@@ -329,6 +336,10 @@ def consume_login_state(conn: sqlite3.Connection, state: str) -> LoginState | No
         return None
 
     expires_at_dt = datetime.fromisoformat(row["expires_at"])
+    # Enforce the TTL at consume — see consume_authorization_code. An
+    # expired login-state (CSRF anchor) must not be replayable. (Security M1.)
+    if expires_at_dt < datetime.now(UTC):
+        return None
     return LoginState(
         state=state,  # return the plaintext we were given
         client_id=row["client_id"],
