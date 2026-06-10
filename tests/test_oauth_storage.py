@@ -102,6 +102,39 @@ def test_consume_unknown_code_returns_none(db: sqlite3.Connection) -> None:
     assert storage.consume_authorization_code(db, "nfac_nope") is None
 
 
+def test_expired_authorization_code_is_rejected_at_consume(db: sqlite3.Connection) -> None:
+    # Security M1 — TTL enforced at consume, not only by the Pruner. A code
+    # past its expiry must fail invalid_grant even if it hasn't been swept.
+    saved = storage.save_authorization_code(
+        db,
+        client_id="nf_test",
+        redirect_uri="https://example.test/cb",
+        scope="mcp",
+        code_challenge="abc123",
+        code_challenge_method="S256",
+        user_sub="gowrynath",
+        user_email="gowrynath@example.com",
+        ttl_seconds=-1,  # already expired
+    )
+    assert storage.consume_authorization_code(db, saved.code) is None
+    # And it was still consumed (single-use) — a retry also fails.
+    assert storage.consume_authorization_code(db, saved.code) is None
+
+
+def test_expired_login_state_is_rejected_at_consume(db: sqlite3.Connection) -> None:
+    saved = storage.save_login_state(
+        db,
+        client_id="nf_test",
+        redirect_uri="https://example.test/cb",
+        scope="mcp",
+        code_challenge="abc123",
+        code_challenge_method="S256",
+        client_state="xyz",
+        ttl_seconds=-1,  # already expired
+    )
+    assert storage.consume_login_state(db, saved.state) is None
+
+
 def test_consume_authorization_code_is_atomic_under_concurrency(tmp_path: Path) -> None:
     """Two threads racing the same code: exactly one wins (audit concurrency #1).
 

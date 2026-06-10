@@ -480,21 +480,37 @@ def _canonicalize_one_event(
                     stats["sonnet_escalations"] += 1
 
                 if verdict.matched_entity_id is not None:
-                    matched = read_entity_by_id(conn, verdict.matched_entity_id)
-                    if matched is not None:
-                        resolved[surface_form] = matched
-                        stats["matched_llm"] += 1
-                        write_entity_mention(
-                            conn,
-                            entity_id=matched.id,
-                            event_id=event.id,
-                            event_hash=event.content_hash,
+                    # Bind the verdict to the candidate set we actually showed
+                    # the model. A hallucinated or prompt-injected response
+                    # could otherwise name ANY entity_id in the vault and we'd
+                    # attach the mention there. Only ids from `candidates` are
+                    # acceptable; anything else falls through to "create new".
+                    # (Security L1.)
+                    candidate_ids = {c.id for c in candidates}
+                    if verdict.matched_entity_id not in candidate_ids:
+                        log.warning(
+                            "entity_canonicalizer.match_outside_candidates",
                             surface_form=surface_form,
-                            canonicalized_by=CANONICALIZER_PRODUCED_BY,
-                            match_method="llm",
-                            confidence=verdict.confidence,
+                            matched_entity_id=verdict.matched_entity_id,
                         )
-                        continue
+                        stats["matched_out_of_set"] = stats.get("matched_out_of_set", 0) + 1
+                        # fall through to Stage 3 (create new)
+                    else:
+                        matched = read_entity_by_id(conn, verdict.matched_entity_id)
+                        if matched is not None:
+                            resolved[surface_form] = matched
+                            stats["matched_llm"] += 1
+                            write_entity_mention(
+                                conn,
+                                entity_id=matched.id,
+                                event_id=event.id,
+                                event_hash=event.content_hash,
+                                surface_form=surface_form,
+                                canonicalized_by=CANONICALIZER_PRODUCED_BY,
+                                match_method="llm",
+                                confidence=verdict.confidence,
+                            )
+                            continue
             except LLMError as e:
                 log.warning(
                     "entity_canonicalizer.llm_error",

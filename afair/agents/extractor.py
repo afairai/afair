@@ -603,15 +603,24 @@ def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None
     existing primary key still fires the UNIQUE constraint. We do an
     explicit DELETE+INSERT instead so reprocess (which writes over a
     previous, possibly-stale embedding) always succeeds.
+
+    The DELETE+INSERT is wrapped in its OWN transaction. Previously the two
+    statements ran bare under ``isolation_level=''``, leaving the write
+    uncommitted — its persistence then depended on a LATER, best-effort
+    ``pipeline_events`` commit happening to flush it. If that follow-up write
+    failed, the DELETE had already removed any prior vector and the new one
+    was rolled back, silently losing the event's embedding. Committing here
+    makes embedding persistence atomic and self-contained. (Race H1.)
     """
     serialized = serialize_vector(vector)
-    db.execute(  # type: ignore[attr-defined]
-        "DELETE FROM events_vec WHERE content_hash = ?", (content_hash,)
-    )
-    db.execute(  # type: ignore[attr-defined]
-        "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
-        (content_hash, serialized),
-    )
+    with db:  # type: ignore[attr-defined]
+        db.execute(  # type: ignore[attr-defined]
+            "DELETE FROM events_vec WHERE content_hash = ?", (content_hash,)
+        )
+        db.execute(  # type: ignore[attr-defined]
+            "INSERT INTO events_vec(content_hash, embedding) VALUES (?, ?)",
+            (content_hash, serialized),
+        )
 
 
 def _validate_extraction(data: dict[str, object]) -> dict[str, object] | str:
