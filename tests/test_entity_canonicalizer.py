@@ -319,6 +319,49 @@ def test_llm_hallucinated_entity_id_falls_back_to_new(
     assert stats["entities_created"] == 1
 
 
+def test_llm_match_to_real_but_out_of_pool_entity_is_rejected(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security L1 — the model must not be able to bind a mention to an
+    entity that exists in the vault but was NEVER shown to it as a candidate.
+
+    The org 'Athara' exists, but the candidate pool for a *person* surface
+    form excludes it (different kind). A coerced/hallucinated verdict naming
+    Athara's real id must fall through to new-entity creation, not silently
+    attach the person mention onto the org.
+    """
+    _no_sleep(monkeypatch)
+
+    # Seed an org (Athara) AND a person (Sajinth). The person ensures the
+    # candidate pool for a new person surface form is non-empty, so the LLM
+    # branch actually runs (otherwise the match would be skipped and the test
+    # would pass for the wrong reason).
+    h_org = _write_event_with_extraction(
+        db,
+        text="Athara shipped; Sajinth approved",
+        entities=[{"name": "Athara", "type": "org"}, {"name": "Sajinth", "type": "person"}],
+    )
+    EntityCanonicalizer().run(db, settings)
+    athara_id = next(
+        m.entity_id for m in iter_mentions_for_event(db, h_org) if m.surface_form == "Athara"
+    )
+
+    # LLM (somehow) returns the real org id while judging a person surface form.
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(athara_id, confidence=0.99))
+    h_person = _write_event_with_extraction(
+        db, text="Maya joined the team", entities=[{"name": "Maya", "type": "person"}]
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+
+    # The LLM WAS consulted, but its out-of-pool match was rejected → a NEW
+    # person entity, NOT linked to the org.
+    assert stats["llm_calls"] >= 1
+    assert stats["entities_matched_llm"] == 0
+    maya_mention = iter_mentions_for_event(db, h_person)[0]
+    assert maya_mention.entity_id != athara_id
+    assert maya_mention.match_method == "new"
+
+
 def test_llm_error_falls_back_to_new(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
