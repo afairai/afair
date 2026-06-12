@@ -46,12 +46,15 @@ jobs:
 
       - name: List recent snapshots (visibility)
         if: always()
+        # Purely informational — the snapshot was already created above. Never
+        # fail the whole workflow on this step.
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          # Capture first then truncate. `flyctl ... | head -10` under
-          # ``pipefail`` exits 141 (SIGPIPE) because ``head`` closes the
-          # pipe before flyctl finishes streaming, and pipefail propagates
-          # the upstream signal. Splitting the pipeline keeps flyctl's
-          # exit semantics clean.
-          output=$(flyctl volumes snapshots list "$VAULT_VOLUME_ID" -a "$VAULT_APP")
-          printf '%s\n' "$output" | head -n 10
+          set -uo pipefail
+          # Use awk, NOT `head`, to take the first lines. `head` closes the
+          # pipe as soon as it has its N lines; once the snapshot list grows
+          # past that limit the upstream write hits a broken pipe, which under
+          # pipefail surfaces as exit 1 — the cause of the intermittent
+          # failures (it passed only while the list was short). awk consumes
+          # the entire stream, so no early close and no SIGPIPE.
+          flyctl volumes snapshots list "$VAULT_VOLUME_ID" -a "$VAULT_APP" | awk 'NR<=12' || true
