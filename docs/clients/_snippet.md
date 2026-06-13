@@ -5,10 +5,12 @@ Paste the block below into the client's persistent-instructions file:
 - **Claude Code:** `~/.claude/CLAUDE.md` (global) or `<project>/CLAUDE.md`
 - **Codex CLI:** `~/.codex/AGENTS.md`
 - **Claude.ai:** Settings → Custom Instructions (or per-Project Instructions)
+- **ChatGPT:** Settings → Personalization → Custom Instructions (or a Project's instructions)
+- **Perplexity:** account or per-Space instructions
 - **Cursor:** `.cursor/rules/` directory or `.cursorrules` file
 - **Windsurf:** `.windsurfrules`
 
-The block is short on purpose — long instruction blocks get ignored.
+The block is short on purpose; long instruction blocks get ignored.
 
 ---
 
