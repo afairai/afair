@@ -978,12 +978,12 @@ def _compute_coverage(
     thin = len(events) <= THIN_EVIDENCE_MAX_HITS
     if not events:
         return RecallCoverage(
-            caveats=["No matching memory — the vault likely doesn't hold this yet."],
+            caveats=["No matching memory. The vault likely doesn't hold this yet."],
             thin_evidence=True,
         )
     if thin:
         caveats.append(
-            "Thin evidence — only a single matching record; the vault may not hold much on this yet."
+            "Thin evidence: only a single matching record; the vault may not hold much on this yet."
         )
 
     # Staleness — age of the MOST RECENT matching event.
@@ -999,7 +999,7 @@ def _compute_coverage(
         newest_days = min(ages)  # smallest age = most recent event
         if newest_days >= STALENESS_CAVEAT_DAYS:
             caveats.append(
-                f"Possibly out of date — even the most recent matching record is "
+                f"Possibly out of date: even the most recent matching record is "
                 f"{newest_days} days old."
             )
 
@@ -1030,7 +1030,7 @@ def _compute_coverage(
     invalidated = sum(1 for e in events if e.content_hash in invalidations)
     if invalidated:
         caveats.append(
-            f"{invalidated} returned record(s) were later superseded — check the invalidation note."
+            f"{invalidated} returned record(s) were later superseded; check the invalidation note."
         )
 
     return RecallCoverage(

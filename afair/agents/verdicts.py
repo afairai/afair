@@ -77,14 +77,14 @@ RELATION_VERDICTS: dict[str, VerdictMeta] = {
         unresolved_conflict=False,
         time_update=True,
         raises_confidence=False,
-        caveat="a newer record updates an older one — the older may be history, not current",
+        caveat="a newer record updates an older one; the older may be history, not current",
     ),
     "reverts": VerdictMeta(
         family="time",
         unresolved_conflict=True,  # a value moving backwards is worth flagging
         time_update=True,
         raises_confidence=False,
-        caveat="a tracked value moved backwards over time — could be a real decline or a mistake",
+        caveat="a tracked value moved backwards over time; could be a real decline or a mistake",
     ),
     "evolves": VerdictMeta(
         family="time",
@@ -129,7 +129,7 @@ RELATION_VERDICTS: dict[str, VerdictMeta] = {
         unresolved_conflict=False,
         time_update=False,
         raises_confidence=False,
-        caveat="these share a name but appear to be different things — a possible mis-merge",
+        caveat="these share a name but appear to be different things; a possible mis-merge",
     ),
     # Abstain.
     "unsure": VerdictMeta(
