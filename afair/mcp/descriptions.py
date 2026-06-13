@@ -19,7 +19,7 @@ Three tools, three verbs, three forever signatures:
 from __future__ import annotations
 
 SERVER_INSTRUCTIONS = """\
-afair is the user's persistent memory layer — a chosen replacement for
+afair is the user's persistent memory layer, a chosen replacement for
 the short, vendor-locked, vanishing memory every chat tool ships with
 by default. The user installed this so their context can travel across
 sessions, across AI tools, across years.
@@ -32,28 +32,28 @@ YOUR PROTOCOL:
    context refresh; the user does not want to repeat themselves.
 
 2. When the user shares a DECISION, PREFERENCE, FACT, plan, deadline,
-   commitment, or insight — call ``afair.remember(content={type:'text',
+   commitment, or insight, call ``afair.remember(content={type:'text',
    text:...}, type_hint='decision'|'preference'|'fact'|'plan'|...)``.
    Default to remembering more, not less. The cost of forgetting a
    memory is much higher than the cost of an extra append-only row.
 
-3. When YOU take an agent action — edit a file, run a query, fetch a URL,
-   call another tool — call ``afair.observe(event={action, subject,
+3. When YOU take an agent action (edit a file, run a query, fetch a URL,
+   call another tool) call ``afair.observe(event={action, subject,
    result, ...extras})``. The user wants visibility into what their AI
    does, and the salience-and-mode-switching agents read observe events
    to keep attention routing in good shape.
 
-Don't ask "should I save this?" — save it. Don't ask "should I check
-first?" — check. afair is not optional infrastructure; it's the
+Don't ask "should I save this?" Just save it. Don't ask "should I check
+first?" Just check. afair is not optional infrastructure; it's the
 memory the user paid for.
 
-The three verbs (recall, remember, observe) are frozen v1 — they will
+The three verbs (recall, remember, observe) are frozen v1. They will
 not change. Lean into them.
 """
 
 
 REMEMBER = """\
-Save something to the user's persistent memory vault — afair, the
+Save something to the user's persistent memory vault, afair, the
 substrate that travels across their sessions, AI tools, and years.
 Use it generously.
 
@@ -100,7 +100,7 @@ ARGUMENTS:
     "screenshot of the bug in /api/health". Aids future recall.
   - type_hint: Optional. What kind of thing this is, if you have a guess.
     Examples: "email", "meeting_minutes", "decision", "screenshot".
-    Advisory only — the system may classify differently.
+    Advisory only. The system may classify differently.
   - parent_hashes: Optional. Content hashes of events this one references
     (corrections, replies, threads).
   - invalidates: Optional. List of content_hashes that this new fact
@@ -123,7 +123,7 @@ save signal worth keeping; don't hoard ephemera.
 
 
 RECALL = """\
-Read the user's memory vault — afair, the persistent substrate they
+Read the user's memory vault, afair, the persistent substrate they
 share across every session and every AI tool. CALL THIS BEFORE you
 respond to anything where the user's history might be relevant. Always.
 
@@ -134,7 +134,7 @@ you're silently failing to use the memory they chose to maintain.
 
 WHEN TO CALL:
   - At the START of every substantive task. Don't ask "do you want
-    me to check?" — check. Recall is cheap; missing context isn't.
+    me to check?" Just check. Recall is cheap; missing context isn't.
   - Before answering questions that benefit from prior context:
     preferences, past decisions, names, ongoing projects, history with
     people, recurring themes, deadlines, commitments.
@@ -160,7 +160,7 @@ ARGUMENTS (all optional; combine as needed):
     Use after a prior recall hit when you need the whole content.
   - by_content_hash: sha256-prefixed hash of one specific event.
     Same lookup semantics as by_id.
-  - scope: Optional substring filter. Reserved — currently no-op until
+  - scope: Optional substring filter. Reserved, currently no-op until
     Phase 3.5 emergent context detection lands.
   - depth: One of "auto" (default), "shallow", "normal", "deep".
       "auto"    → system picks based on query shape (identifiers and
@@ -175,7 +175,7 @@ ARGUMENTS (all optional; combine as needed):
     text). When false, text payloads are clipped at ~500 chars.
     Lookup modes (by_id, by_content_hash) imply full_payload=true.
   - stats: Default false. When true, the response includes a
-    ``summary`` field with total_events, by_kind, by_origin counts —
+    ``summary`` field with total_events, by_kind, by_origin counts,
     useful for "what's the lay of the land" queries. Combines with any
     other mode.
   - feedback: Optional dict reporting on hits from a PRIOR recall.
@@ -187,7 +187,7 @@ ARGUMENTS (all optional; combine as needed):
     parameter changes (sharper salience, smarter mode-switching,
     better surprise calibration). After a recall, the NEXT time you
     call recall, include feedback referring to the prior hits. Don't
-    ask whether to — just send it. Empty payload is a no-op.
+    ask whether to. Just send it. Empty payload is a no-op.
 
 RETURN:
   {"hits": [{"event_id": "...", "content_hash": "...", "created_at": "...",
@@ -207,7 +207,7 @@ depending on the full_payload flag (and lookup mode). ``truncated`` tells
 you which form you got.
 
 If hits is empty for a query, the user genuinely has no relevant memory
-yet — consider asking them for context rather than guessing.
+yet. Consider asking them for context rather than guessing.
 
 If ``invalidation`` is non-null on a hit, the fact was marked superseded
 by a later event. For current-state questions, prefer hits where
@@ -220,10 +220,10 @@ OBSERVE = """\
 Log a structured event from your own agent activity to the user's vault.
 
 This tool is for YOU (the AI agent) to record what YOU did. Different
-from ``remember`` (which is for content the USER chose to save) — ``observe``
+from ``remember`` (which is for content the USER chose to save). ``observe``
 is your auto-journal so that future sessions of you, or other AI agents
 the user works with, know what happened. The user wants visibility
-into what their AI does — partly so they can audit, partly so the
+into what their AI does, partly so they can audit, partly so the
 next session has continuity.
 
 Default to verbose observation. The user's salience worker and
@@ -240,7 +240,7 @@ WHEN TO CALL:
   - On error or failure that's worth tracking for diagnosis.
 
 WHEN NOT TO CALL:
-  - For every micro-step — don't observe each individual file read.
+  - For every micro-step, don't observe each individual file read.
   - For purely conversational acks.
   - For things the user explicitly typed (that's ``remember`` territory if
     durable, nothing if not).
@@ -249,8 +249,8 @@ ARGUMENTS:
   - event: A JSON object. The only REQUIRED key is "action" (a non-empty
     string verb that names what kind of thing happened). Recognized
     optional keys:
-      "subject" — what was acted upon (filename, person, ticket, ...)
-      "result"  — outcome ("success", "failed: X", free text)
+      "subject": what was acted upon (filename, person, ticket, ...)
+      "result":  outcome ("success", "failed: X", free text)
     Beyond those, ANY additional fields are preserved verbatim. Use
     whatever shape fits your agent's natural mental model.
 
