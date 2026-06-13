@@ -300,6 +300,38 @@ class ContextSummary(BaseModel):
     by_origin: dict[str, int]
 
 
+class RecallCoverage(BaseModel):
+    """Honesty layer over a recall result — "what the vault does NOT (confidently)
+    tell you about this query."
+
+    The point is to make recall *honest about its own limits*, so an AI client
+    can hedge or ask a follow-up instead of treating thin/stale/contradicted
+    memory as settled fact. Computed entirely from signals the hits already
+    carry (created_at, conflicts, invalidation, interpretation confidence) — no
+    extra LLM call.
+
+    All fields default to the "nothing to flag" value, so an empty/None
+    coverage block means "no caveats". ``caveats`` holds the human-readable
+    lines an agent can surface verbatim; the structured fields let it branch.
+
+    Additive per Invariant I1 — a new optional field on RecallResult, the three
+    frozen verbs are unchanged.
+    """
+
+    caveats: list[str] = []
+    """Human-readable honesty notes, safe to show the user verbatim."""
+    stale_newest_event_days: int | None = None
+    """Age in days of the MOST RECENT matching event. Large = even the freshest
+    thing the vault knows about this topic is old; it may be out of date."""
+    unresolved_contradictions: int = 0
+    """Count of returned hits carrying an unresolved conflict verdict."""
+    invalidated_hits: int = 0
+    """Count of returned hits a later event superseded/contradicted."""
+    thin_evidence: bool = False
+    """True when the query matched very little — the vault likely doesn't hold
+    this yet."""
+
+
 class RecallResult(BaseModel):
     """Result of any `recall` call.
 
@@ -312,12 +344,15 @@ class RecallResult(BaseModel):
       - ``recall()``                               → most-recent N hits
 
     ``summary`` is only populated when ``stats=True`` was requested.
+    ``coverage`` is the honesty layer (see RecallCoverage) — populated on
+    query/browse results, null on single-event lookups.
     """
 
     hits: list[RecallHit]
     depth_used: Depth
     note: str | None = None
     summary: ContextSummary | None = None
+    coverage: RecallCoverage | None = None
 
 
 # ── recall feedback ─────────────────────────────────────────────────────────
