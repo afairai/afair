@@ -57,17 +57,15 @@ def test_stale_when_even_newest_is_old() -> None:
 def test_unresolved_contradiction_is_counted_temporal_update_is_not() -> None:
     events = [_ev(1), _ev(2), _ev(3)]
     conflicts = {
-        events[0].content_hash: [{"verdict": "contradiction", "reason": "x", "confidence": 0.9}],
+        events[0].content_hash: [{"verdict": "conflicts", "reason": "x", "confidence": 0.9}],
         # a temporal update must NOT count as an unresolved conflict
-        events[1].content_hash: [
-            {"verdict": "temporal_supersession", "reason": "y", "confidence": 0.9}
-        ],
+        events[1].content_hash: [{"verdict": "updates", "reason": "y", "confidence": 0.9}],
     }
     cov = _compute_coverage(events, {}, conflicts)
     assert cov.unresolved_contradictions == 1
     assert any("unresolved tension" in c for c in cov.caveats)
-    # the supersession caveat is surfaced even though it's not a "conflict"
-    assert any("supersedes an older" in c for c in cov.caveats)
+    # the 'updates' caveat is surfaced even though it's not a "conflict"
+    assert any("updates an older" in c for c in cov.caveats)
 
 
 def test_legacy_verdict_still_counts_as_unresolved() -> None:
@@ -77,9 +75,9 @@ def test_legacy_verdict_still_counts_as_unresolved() -> None:
     assert cov.unresolved_contradictions == 1
 
 
-def test_different_referent_surfaces_caveat_without_being_a_conflict() -> None:
+def test_name_clash_surfaces_caveat_without_being_a_conflict() -> None:
     events = [_ev(1), _ev(2)]
-    conflicts = {events[0].content_hash: [{"verdict": "different_referent", "confidence": 0.9}]}
+    conflicts = {events[0].content_hash: [{"verdict": "name_clash", "confidence": 0.9}]}
     cov = _compute_coverage(events, {}, conflicts)
     assert cov.unresolved_contradictions == 0
     assert any("different things" in c for c in cov.caveats)
