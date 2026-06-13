@@ -193,7 +193,18 @@
 
 ### 0.2 What's in flight
 
-- Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
+- Task #6 — cross-vendor MCP verification. **Server side verified live
+  + documented (2026-06-13):** OAuth 2.1 discovery, DCR, PKCE (S256),
+  RFC 9728 protected-resource metadata, and the `/mcp` 401 +
+  `WWW-Authenticate` challenge all confirmed on `mcp.afair.ai`; the
+  authenticated remember/recall/observe round-trip runs live every
+  session. Client reach broadened to web vendors — added
+  `docs/clients/{chatgpt,perplexity}.md`, rewrote `claude-ai.md` for the
+  now-shipped OAuth flow (was stale "OAuth later" warning), and added a
+  reproducible "Server capabilities (verified live)" section to the
+  clients README. Still pending: the per-vendor UI click-through
+  (Claude.ai / ChatGPT / Perplexity browser approval + tools showing
+  up), which only a human can drive — folds into the Task #7 journal.
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
 
 ### 0.2-resolved (was in flight, now done)
