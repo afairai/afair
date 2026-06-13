@@ -19,18 +19,26 @@ cognitive modes:
 
 Transition rule
 ===============
-A simple two-threshold scheme to prevent flapping:
+Two signals drive the decision, both summed over the last N events:
+cumulative **salience** (how much recent material mattered) and
+cumulative **surprise** (how much of it was novel, from
+:mod:`afair.agents.surprise`). Surprise is additive and one-directional,
+it can only push toward focus:
 
-  * If cumulative salience over the last N events ≥ ``SWITCH_TO_CEN_THRESHOLD``
-    AND we're not already in CEN → switch to CEN, emit
-    ``observe(action="mode_switched", subject="cen", ...)``.
+  * Switch to CEN (when not already there) if cumulative salience ≥ the
+    CEN threshold OR cumulative surprise ≥ the surprise-CEN threshold,
+    emit ``observe(action="mode_switched", subject="cen", ...)``. A
+    burst of genuinely new material shifts attention even before the
+    salience worker has scored it.
 
-  * If cumulative salience over the last N events ≤ ``SWITCH_TO_DMN_THRESHOLD``
-    AND we're not already in DMN → switch to DMN, emit
-    ``observe(action="mode_switched", subject="dmn", ...)``.
+  * Switch to DMN (when not already there) only if BOTH signals are
+    quiet (salience ≤ the DMN threshold AND surprise ≤ the surprise-DMN
+    threshold), emit ``observe(..., subject="dmn", ...)``. The system
+    does not wander off while novel things keep arriving.
 
 Hysteresis (the gap between thresholds) keeps the mode stable around
-the boundary.
+the boundary. With cumulative surprise at 0 the rule reduces exactly to
+the original salience-only scheme.
 
 The current mode is derived from substrate at any time — the most
 recent ``observe(action="mode_switched")`` event's ``subject`` is
@@ -55,6 +63,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from .cold_path import ColdPathWorker
 from .salience import read_recent_salience
+from .surprise import cumulative_surprise
 
 if TYPE_CHECKING:
     import sqlite3
@@ -89,6 +98,19 @@ SALIENCE_WINDOW_SIZE = 20
 DEFAULT_CEN_THRESHOLD = 8.0
 DEFAULT_DMN_THRESHOLD = 4.0
 
+# Surprise is an ADDITIVE attention signal layered on top of salience
+# (per-event entity novelty, summed over the same window). It can only
+# push toward MORE focus: a burst of novel material forces CEN even when
+# salience hasn't crossed its threshold, and sustained novelty blocks a
+# drop to DMN ("don't go quiet while new things keep arriving"). When
+# cumulative surprise is 0 the decision reduces exactly to the
+# salience-only rule, so historical behavior is preserved at boot.
+#
+# Cumulative surprise ranges [0, N] over the N-event window (each event
+# contributes at most 1.0 of novelty).
+DEFAULT_SURPRISE_CEN_THRESHOLD = 10.0
+DEFAULT_SURPRISE_DMN_THRESHOLD = 5.0
+
 
 class ModeSwitcher(ColdPathWorker):
     """Periodically check whether attention should shift between
@@ -115,6 +137,7 @@ class ModeSwitcher(ColdPathWorker):
         stats: dict[str, Any] = {
             "current_mode": None,
             "cumulative_salience": 0.0,
+            "cumulative_surprise": 0.0,
             "transitioned": False,
             "to_mode": None,
             "cen_threshold": cen_threshold,
@@ -129,12 +152,19 @@ class ModeSwitcher(ColdPathWorker):
         cumulative = sum(score for _, score, _ in recent)
         stats["cumulative_salience"] = round(cumulative, 3)
 
+        # Per-event surprise over the same window: a burst of novel
+        # material is its own "attention shifted" signal, independent of
+        # whether salience has caught up yet. Pure substrate-derived.
+        surprise_total = cumulative_surprise(conn, limit=SALIENCE_WINDOW_SIZE)
+        stats["cumulative_surprise"] = round(surprise_total, 3)
+
         current = read_current_mode(conn)
         stats["current_mode"] = current
 
         target = _decide_target_mode(
             current,
             cumulative,
+            surprise_total,
             cen_threshold=cen_threshold,
             dmn_threshold=dmn_threshold,
         )
@@ -172,6 +202,7 @@ class ModeSwitcher(ColdPathWorker):
                 "mode_switcher.no_change",
                 current=current,
                 cumulative_salience=stats["cumulative_salience"],
+                cumulative_surprise=stats["cumulative_surprise"],
             )
             return stats
 
@@ -180,6 +211,7 @@ class ModeSwitcher(ColdPathWorker):
             to_mode=target,
             from_mode=current,
             cumulative_salience=cumulative,
+            cumulative_surprise=surprise_total,
             window=SALIENCE_WINDOW_SIZE,
         )
         stats["transitioned"] = True
@@ -189,6 +221,7 @@ class ModeSwitcher(ColdPathWorker):
             from_mode=current,
             to_mode=target,
             cumulative_salience=stats["cumulative_salience"],
+            cumulative_surprise=stats["cumulative_surprise"],
         )
         return stats
 
@@ -228,22 +261,39 @@ def read_current_mode(conn: sqlite3.Connection) -> str:
 def _decide_target_mode(
     current: str,
     cumulative: float,
+    cumulative_surprise: float = 0.0,
     *,
     cen_threshold: float = DEFAULT_CEN_THRESHOLD,
     dmn_threshold: float = DEFAULT_DMN_THRESHOLD,
+    surprise_cen_threshold: float = DEFAULT_SURPRISE_CEN_THRESHOLD,
+    surprise_dmn_threshold: float = DEFAULT_SURPRISE_DMN_THRESHOLD,
 ) -> str:
-    """Two-threshold transition decision (hysteresis).
+    """Two-signal transition decision (hysteresis).
 
-    Returns the mode we SHOULD be in given the current mode + the
-    cumulative-salience reading. Same as ``current`` when no
-    transition should fire.
+    Returns the mode we SHOULD be in given the current mode plus the
+    cumulative salience AND cumulative surprise readings. Same as
+    ``current`` when no transition should fire.
 
-    Thresholds default to the static module-level constants. Worker
-    code paths pass in tuned values from the TunableRegistry.
+    Surprise is additive and one-directional, it can only push toward
+    focus:
+
+      * CEN fires when EITHER salience crosses its threshold OR a burst
+        of novel material crosses the surprise threshold ("attention
+        shifted" even before salience caught up).
+      * DMN fires only when BOTH signals are quiet, so the system does
+        not wander off while new things are still arriving.
+
+    With ``cumulative_surprise=0`` this reduces exactly to the old
+    salience-only rule, so existing callers and historical behavior are
+    unchanged. Thresholds default to the static module-level constants;
+    worker code paths pass tuned salience thresholds from the
+    TunableRegistry.
     """
-    if current != MODE_CEN and cumulative >= cen_threshold:
+    want_cen = cumulative >= cen_threshold or cumulative_surprise >= surprise_cen_threshold
+    want_dmn = cumulative <= dmn_threshold and cumulative_surprise <= surprise_dmn_threshold
+    if current != MODE_CEN and want_cen:
         return MODE_CEN
-    if current != MODE_DMN and cumulative <= dmn_threshold:
+    if current != MODE_DMN and want_dmn:
         return MODE_DMN
     return current
 
@@ -254,13 +304,16 @@ def _write_mode_transition(
     to_mode: str,
     from_mode: str,
     cumulative_salience: float,
+    cumulative_surprise: float,
     window: int,
 ) -> None:
     """Emit the mode-switched observe event into the substrate.
 
     Uses the same ``observe`` event shape any agent would. Origin
     ``agent:mode_switcher`` distinguishes it from user-driven
-    observations in recall.
+    observations in recall. Both driving signals (salience and
+    surprise) are recorded on the payload so a recall of the transition
+    can explain WHY attention shifted.
     """
     payload = {
         "content_type": "event",
@@ -268,6 +321,7 @@ def _write_mode_transition(
         "subject": to_mode,
         "result": f"transition from {from_mode}",
         "cumulative_salience": round(cumulative_salience, 3),
+        "cumulative_surprise": round(cumulative_surprise, 3),
         "window_size": window,
     }
     event = write_event(
@@ -282,5 +336,8 @@ def _write_mode_transition(
         event_hash=event.content_hash,
         stage="mode_switcher.transitioned",
         producer=f"mode_switcher:{from_mode}->{to_mode}",
-        detail=f"cumulative_salience={cumulative_salience:.3f}",
+        detail=(
+            f"cumulative_salience={cumulative_salience:.3f} "
+            f"cumulative_surprise={cumulative_surprise:.3f}"
+        ),
     )
