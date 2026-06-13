@@ -101,8 +101,10 @@ def score_ranked(
 # ── runner ──────────────────────────────────────────────────────────────────
 
 
-def _run_one_case(case: BenchCase) -> CaseScore:
-    """Build a fresh vault, write the seeds, run shallow recall, score.
+def _run_one_case_ranked(case: BenchCase) -> list[str]:
+    """Build a fresh vault, write the seeds, run shallow recall, return the
+    ranked list of seed tags. Shared by the quality scorer and the label-free
+    regression gate.
 
     Imports are local so importing this module never drags in the MCP/server
     stack for callers who only want the pure metrics.
@@ -139,15 +141,17 @@ def _run_one_case(case: BenchCase) -> CaseScore:
                 tag_by_event_id[ev.id] = seed.tag
 
             result = handlers.recall(query=case.query, depth="shallow", limit=case.k)
-            ranked = [tag_by_event_id.get(h.event_id, "") for h in result.hits]
-
-            h1, h3, mrr, rk, leak = score_ranked(
-                ranked, set(case.relevant), set(case.forbidden), case.k
-            )
-            return CaseScore(case.family, h1, h3, mrr, rk, leak)
+            return [tag_by_event_id.get(h.event_id, "") for h in result.hits]
         finally:
             db.close()
             clear_context()
+
+
+def _run_one_case(case: BenchCase) -> CaseScore:
+    """Run a case and score it against its gold/forbidden labels."""
+    ranked = _run_one_case_ranked(case)
+    h1, h3, mrr, rk, leak = score_ranked(ranked, set(case.relevant), set(case.forbidden), case.k)
+    return CaseScore(case.family, h1, h3, mrr, rk, leak)
 
 
 @dataclass
