@@ -171,6 +171,28 @@ def _live_articles(conn) -> list:
     ).fetchall()
 
 
+def test_article_carries_source_citations(conn, monkeypatch) -> None:
+    """BUILD #3 — a synthesized article cites the source events it drew from,
+    so a recalled article is a *cited* answer (provenance back to records)."""
+    for i in range(3):
+        _seed_mention(conn, name="Letta", kind="product", text=f"Letta fact number {i}")
+    _stub_llm(monkeypatch)
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    article = _articles(conn)[0]
+    payload = json.loads(article["payload"])
+    citations = payload.get("citations")
+    assert citations, "article must carry source citations"
+
+    # Every citation is the content_hash of a real source (remember) event.
+    source_hashes = {
+        r["content_hash"]
+        for r in conn.execute("SELECT content_hash FROM events WHERE kind = 'remember'").fetchall()
+    }
+    assert set(citations) <= source_hashes
+    assert len(citations) == 3  # the three seeded source events
+
+
 def test_supersession_heals_a_crash_orphaned_article(conn, monkeypatch) -> None:
     """Race M1 — if a past cycle crashed between writing a new article and
     invalidating the prior, the orphan would otherwise live forever. The next

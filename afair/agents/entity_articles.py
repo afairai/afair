@@ -142,6 +142,9 @@ Plain language, present tense, second person where the user is involved
 ("you decided", "you and Sajinth shipped X"). Synthesize across the
 mentions — resolve duplication, prefer the most recent state. Don't pad.
 
+Ground every statement in the provided records. Do not invent facts the
+records do not support — this article is cited back to its source events.
+
 Use the write_entity_article tool exactly once.
 """
 
@@ -162,6 +165,11 @@ class _Article(BaseModel):
     summary: str
     aliases: list[str] = []
     key_facts: list[str] = []
+    # Provenance: the source event content_hashes this article was synthesized
+    # from (deterministic — taken from the mentions fed to the LLM, not the LLM
+    # output). Makes a recalled article a *cited* answer: every article points
+    # back at the records behind it, so the AI can verify or quote sources.
+    citations: list[str] = []
 
 
 class EntityArticleWorker(ColdPathWorker):
@@ -416,10 +424,20 @@ def _synthesize(
         max_tokens=900,
     )
     data = result.data
+    # Citations are the source events fed to the synthesis — deterministic
+    # provenance, independent of what the model returns.
+    citations: list[str] = []
+    seen: set[str] = set()
+    for m in mentions:
+        h = m.get("event_hash")
+        if h and h not in seen:
+            seen.add(h)
+            citations.append(h)
     return _Article(
         summary=str(data.get("summary", "")),
         aliases=_coerce_to_string_list(data.get("aliases"))[:6],
         key_facts=_coerce_to_string_list(data.get("key_facts"))[:6],
+        citations=citations,
     )
 
 
@@ -451,6 +469,7 @@ def _gather_mentions(conn: sqlite3.Connection, group: _EntityGroup) -> list[dict
         p = event.payload
         briefs.append(
             {
+                "event_hash": ehash,
                 "surface_form": r["surface_form"],
                 "at": r["canonicalized_at"],
                 "text": (p.get("text") or "")[:600],
@@ -552,6 +571,7 @@ def _write_article(
         "entity_ids": group.entity_ids,
         "aliases": article.aliases,
         "key_facts": article.key_facts,
+        "citations": article.citations,
         "mention_count": group.mention_count,
         "produced_by": ENTITY_ARTICLE_PRODUCER,
         "context": context,
