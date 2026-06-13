@@ -130,7 +130,7 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             "afair.recall(query=...). After a recall, the next time you "
             'call recall or remember, include feedback={"useful_event_ids'
             '":[...], "not_useful_event_ids":[...], "missing_topic":'
-            '"..."} referencing the hits from the prior recall — this '
+            '"..."} referencing the hits from the prior recall. This '
             "signal trains the self-improvement tuner. Empty payload is a "
             "no-op."
         ),
