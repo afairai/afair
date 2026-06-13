@@ -161,20 +161,20 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": VERDICT_ENUM,
             "description": (
-                "temporal_supersession: a newer-dated event replaces an older one "
+                "updates: a newer-dated event replaces an older one "
                 "(role/status/state change) — NOT an error. "
-                "temporal_regression: a tracked value moved BACKWARDS over time "
+                "reverts: a tracked value moved BACKWARDS over time "
                 "(e.g. a count or amount went down) — worth flagging. "
-                "temporal_evolution: legitimate gradual change; both were true at their times. "
-                "contradiction: genuine conflict at the SAME point in time, where dates do NOT "
+                "evolves: legitimate gradual change; both were true at their times. "
+                "conflicts: genuine disagreement at the SAME point in time, where dates do NOT "
                 "explain the difference (use only when confident >= 0.7). "
-                "negation_artifact: only LOOKS like a conflict because of a negation that surface "
+                "false_conflict: only LOOKS like a clash because of a negation that surface "
                 "tokens misread ('NOT X' read as 'X'). "
-                "corroboration: independent events asserting the SAME thing — they reinforce. "
-                "no_relation: compatible / unrelated / orthogonal; no signal. "
-                "different_referent: the events share a name or surface form but are clearly about "
+                "confirms: independent events asserting the SAME thing — they reinforce. "
+                "unrelated: compatible / orthogonal; no signal. "
+                "name_clash: the events share a name or surface form but are clearly about "
                 "DIFFERENT things (same name, different person/project). "
-                "uncertain: insufficient basis to judge."
+                "unsure: insufficient basis to judge."
             ),
         },
         "reason": {
@@ -195,24 +195,24 @@ _SYSTEM_PROMPT = f"""\
 You judge how two events in a PERSONAL MEMORY vault relate. The single most
 important rule: most apparent contradictions are TIME-UPDATES, not errors. A
 person's role, status, location, and numbers change. Do not call a change over
-time a contradiction — classify it in the temporal family instead. Reserve
-"contradiction" for genuine conflicts at the same point in time that the dates
-cannot explain, and only when you are confident (>= 0.7).
+time a conflict — classify it in the time family instead. Reserve "conflicts"
+for genuine disagreements at the same point in time that the dates cannot
+explain, and only when you are confident (>= 0.7).
 
 Two events sharing a name may be about DIFFERENT people or things — if so, that
-is different_referent, not a conflict.
+is name_clash, not a conflict.
 
 {UNTRUSTED_CONTENT_DIRECTIVE}
 
 Examples:
-  - "Sajinth is CTO" (2026-05) after "Sajinth is CEO" (2025-01)      -> temporal_supersession
-  - "MRR is 150K" (2026-Q2) after "MRR is 200K" (2026-Q1)            -> temporal_regression
-  - "learning Spanish" later "conversational in Spanish"            -> temporal_evolution
-  - "meeting at 14:00" + "meeting at 15:00" (same day, no re-sched)  -> contradiction
-  - "Sajinth does NOT use Notion" + "Sajinth uses Notion"           -> negation_artifact (if one is a negation)
-  - "Sajinth joined Clario in March" + "Sajinth started Clario 2025-03-15" -> corroboration
-  - "Sajinth lives in Berlin" + "Sajinth's project is Clario"       -> no_relation
-  - "Sajinth (my cofounder)" + "Sajinth (the barista downstairs)"   -> different_referent
+  - "Sajinth is CTO" (2026-05) after "Sajinth is CEO" (2025-01)      -> updates
+  - "MRR is 150K" (2026-Q2) after "MRR is 200K" (2026-Q1)            -> reverts
+  - "learning Spanish" later "conversational in Spanish"            -> evolves
+  - "meeting at 14:00" + "meeting at 15:00" (same day, no re-sched)  -> conflicts
+  - "Sajinth does NOT use Notion" + "Sajinth uses Notion"           -> false_conflict (one is a negation)
+  - "Sajinth joined Clario in March" + "Sajinth started Clario 2025-03-15" -> confirms
+  - "Sajinth lives in Berlin" + "Sajinth's project is Clario"       -> unrelated
+  - "Sajinth (my cofounder)" + "Sajinth (the barista downstairs)"   -> name_clash
 
 Use the record_relation_verdict tool exactly once.
 """
