@@ -201,9 +201,13 @@ class ConflictFlag(BaseModel):
 
     Surfaces on a recall hit when a later cycle of the Conflict-Resolver
     judged this event against some other event in the vault. The
-    ``verdict`` is the LLM's call: ``contradicts`` / ``compatible`` /
-    ``unclear``. The AI client uses these to decide whether to surface
-    or suppress conflicting facts when answering the user.
+    ``verdict`` is one of the relation taxonomy in ``afair/agents/verdicts.py``
+    (temporal_supersession / temporal_regression / temporal_evolution /
+    contradiction / negation_artifact / corroboration / no_relation /
+    different_referent / uncertain). Historical rows may carry the legacy
+    strings (contradicts / compatible / unclear), which normalize on read.
+    The AI client uses these to decide whether to surface or suppress
+    conflicting facts when answering the user.
     """
 
     with_event_id: str
@@ -212,7 +216,8 @@ class ConflictFlag(BaseModel):
     with_content_hash: str
 
     verdict: str
-    """One of: contradicts, compatible, unclear."""
+    """A relation verdict — see afair/agents/verdicts.py VERDICT_ENUM (legacy
+    contradicts/compatible/unclear strings still appear on historical rows)."""
 
     reason: str = ""
     confidence: float = 0.0
