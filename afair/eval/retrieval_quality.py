@@ -34,10 +34,15 @@ FAMILIES = (
 
 class BenchSeed(BaseModel):
     """One event to seed into the case's vault. ``tag`` is a stable handle the
-    case uses to name gold/forbidden answers without knowing content hashes."""
+    case uses to name gold/forbidden answers without knowing content hashes.
+
+    ``age_days`` backdates the event's created_at so temporal/recency behaviour
+    can be tested honestly (an "old role" vs a "current role" that were recorded
+    at different times, not both at once)."""
 
     tag: str
     text: str
+    age_days: int = 0
 
 
 class BenchCase(BaseModel):
@@ -102,6 +107,8 @@ def _run_one_case(case: BenchCase) -> CaseScore:
     Imports are local so importing this module never drags in the MCP/server
     stack for callers who only want the pure metrics.
     """
+    from datetime import UTC, datetime, timedelta
+
     from ..mcp import handlers
     from ..mcp.context import ServerContext, clear_context, set_context
     from ..substrate import open_db, write_event
@@ -116,13 +123,18 @@ def _run_one_case(case: BenchCase) -> CaseScore:
         )
         set_context(sc)
         try:
+            now = datetime.now(UTC)
             tag_by_event_id: dict[str, str] = {}
             for seed in case.seeds:
+                created_at = (
+                    (now - timedelta(days=seed.age_days)).isoformat() if seed.age_days else None
+                )
                 ev = write_event(
                     db,
                     origin="agent",
                     kind="remember",
                     payload={"content_type": "text", "text": seed.text},
+                    created_at=created_at,
                 )
                 tag_by_event_id[ev.id] = seed.tag
 
@@ -207,8 +219,11 @@ DEFAULT_GATE = Gate(
     hard={
         "entity-name": {"hit_at_1": 0.9},
         "alias": {"hit_at_3": 0.9},
+        # Promoted to hard once the temporal-intent recency re-rank landed —
+        # "current/latest" queries must surface the newest record.
+        "temporal": {"hit_at_1": 0.9},
     },
-    soft=("temporal", "contradiction-present", "multi-event-dilution", "hard-negative"),
+    soft=("contradiction-present", "multi-event-dilution", "hard-negative"),
 )
 
 

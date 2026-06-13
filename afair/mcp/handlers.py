@@ -918,6 +918,40 @@ def _auto_route_depth(query: str) -> Depth:
     return "normal"
 
 
+# Queries that explicitly ask for the *current* state. When present, recall
+# re-ranks the (already relevance-filtered) matches newest-first, so "current
+# role" surfaces the latest record instead of an equally-text-matching older
+# one. Non-temporal queries are untouched — no ranking regression.
+_TEMPORAL_INTENT_RE = re.compile(
+    r"\b(current|currently|latest|now|today|recent|recently|nowadays|present|"
+    r"these days|right now|as of)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_temporal_intent(query: str) -> bool:
+    return bool(_TEMPORAL_INTENT_RE.search(query))
+
+
+def _recency_rerank(events: list[Event]) -> list[Event]:
+    """Stable sort newest-first by created_at.
+
+    Applied ONLY when the query shows temporal intent. All ``events`` already
+    matched the query terms (FTS/vec), so among relevant matches "newest first"
+    is the right answer for a "current/latest X" question. Pure FTS has no
+    recency notion — this is the targeted fix for that gap (found by the recall
+    benchmark: temporal queries scored hit@1=0 before this).
+    """
+
+    def _key(e: Event) -> datetime:
+        try:
+            return datetime.fromisoformat(e.created_at)
+        except (ValueError, TypeError):
+            return datetime.min.replace(tzinfo=UTC)
+
+    return sorted(events, key=_key, reverse=True)
+
+
 # Caveats layer thresholds. A topic whose *newest* matching event is older
 # than this is flagged as possibly out of date. THIN = at most this many hits
 # before recall admits "the vault may not hold this yet."
@@ -1180,6 +1214,13 @@ def recall(
                         "deep depth is not yet richer than normal "
                         "(Phase 3+ reasoning agent pending); returned hybrid results"
                     )
+
+        # Temporal intent ("current role", "latest …") → prefer the newest
+        # matching record. Only kicks in for temporal queries; everything else
+        # keeps its relevance ranking. (Closes the recency gap the recall
+        # benchmark surfaced.)
+        if query and _has_temporal_intent(query):
+            events = _recency_rerank(events)
 
         # Article-first: when an entity article matched, surface the dense
         # synthesis before the raw events it summarizes (query path only —
