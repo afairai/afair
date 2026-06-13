@@ -305,3 +305,68 @@ system this morning, and a parallel AI session caught it during normal
 daily use via the entity graph + recall surface we just shipped. The
 vault as cross-session debugging medium is exactly the "this saved me
 work" pattern the gate is looking for.
+
+---
+
+### Day N — 2026-06-13 (bring-current entry)
+
+**Window status note (honest):** the original calendar window (Day 1
+2026-05-25 to Day 14 2026-06-08) has elapsed, but logged daily-use days
+are thin. The period was build-dominated: the GBrain competitive
+response (recall honesty layer, recall benchmark, article citations,
+gazetteer, temporal recency), the pre-launch hardening sprint, the
+Stripe + Chatwoot setup, the copy/impeccable pass, and the
+cumulative-surprise wiring all landed in this window. Those were
+shipping days, not pure validation days, the same caveat Day 2 flagged.
+The calendar gate ran out before a clean two-week daily-use record
+accumulated. The verdict (below) is the user's to set; this entry only
+brings the evidence current.
+
+**Wins this session ✅**
+- The vault is being used live right now: this Claude Code session called
+  `recall`, `remember`, and `observe` against the deployed substrate
+  end-to-end. `recall` returned the just-written copy-voice decision with
+  the new `coverage` honesty field populated and a real caveat surfaced.
+  The three-verb surface still feels like the right forever-shape.
+- Cross-vendor reach verified at the server: OAuth 2.1 discovery, DCR,
+  PKCE (S256), RFC 9728 protected-resource metadata, and the `/mcp` 401 +
+  `WWW-Authenticate` challenge all confirmed live on `mcp.afair.ai`. The
+  web-client path (Claude.ai / ChatGPT / Perplexity) is now URL-only via
+  OAuth; the stale "OAuth later, bearer fails" note in claude-ai.md is
+  gone. See `docs/clients/`.
+- The Day-1 Claude.ai blocker ("custom-connector UI only offers OAuth,
+  bearer fails") is resolved by shipping OAuth, which is exactly what
+  that surface wanted. The same flow unblocks ChatGPT + Perplexity.
+
+**Retrieval quality 🔍**
+- The recall honesty layer (BUILD #1) is doing real work: the live recall
+  this session flagged "a newer record updates an older one" as a caveat,
+  the kind of hedge the gate wanted recall to volunteer instead of
+  presenting stale facts as settled.
+
+**Architecture pressure 🏗️**
+- Still nothing that says "bulldoze it." The two-register copy decision
+  (marketing no-first-person, emails keep founder voice) and the
+  surprise-into-mode-switcher wiring both fit the existing shapes
+  (additive recall fields, append-only observe events, a new
+  substrate-derived signal) without touching I1 to I8.
+
+**What still needs a human (not me) 🛠️**
+- The per-vendor browser click-through: actually connecting Claude.ai,
+  ChatGPT, and Perplexity through their OAuth UIs, confirming the three
+  tools appear, then doing a save-here / recall-there round-trip across
+  two web vendors. The server side is proven; only hands-on use closes it.
+
+**Gate verdict, the user's call (not logged as decided here):**
+
+| Option | What it means now |
+|---|---|
+| **PASS** | The architecture earned its keep across a heavy build-and-use stretch; proceed to Phase 1. |
+| **EXTEND** | Re-baseline a clean two-week window from a chosen date and log pure daily-use (especially the web-vendor round-trips) before declaring the gate. |
+| **FAIL** | Name the piece that did not survive contact. Nothing in this window points here so far. |
+
+Recommendation to weigh (yours to accept or reject): **EXTEND with a
+re-baselined window** once the web-vendor connectors are exercised by
+hand, because the calendar window was build-dominated and the cleanest
+evidence (cross-vendor daily use from the UI clients) is exactly the part
+only you can produce.
