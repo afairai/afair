@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from afair.agents.verdicts import (
-    CONTRADICTION_CONFIDENCE_FLOOR,
+    CONFLICT_CONFIDENCE_FLOOR,
     RELATION_VERDICTS,
     VERDICT_ENUM,
     enforce_confidence_floor,
@@ -22,67 +22,72 @@ from afair.agents.verdicts import (
 
 def test_taxonomy_has_the_nine_expected_verdicts() -> None:
     assert set(VERDICT_ENUM) == {
-        "temporal_supersession",
-        "temporal_regression",
-        "temporal_evolution",
-        "contradiction",
-        "negation_artifact",
-        "corroboration",
-        "no_relation",
-        "different_referent",
-        "uncertain",
+        "updates",
+        "reverts",
+        "evolves",
+        "conflicts",
+        "false_conflict",
+        "confirms",
+        "unrelated",
+        "name_clash",
+        "unsure",
     }
     assert len(RELATION_VERDICTS) == 9
 
 
-def test_legacy_verdicts_normalize_onto_current_taxonomy() -> None:
-    assert normalize_verdict("contradicts") == "contradiction"
-    assert normalize_verdict("compatible") == "no_relation"
-    assert normalize_verdict("unclear") == "uncertain"
+def test_historical_verdicts_normalize_onto_current_names() -> None:
+    # Original afair v0 strings.
+    assert normalize_verdict("contradicts") == "conflicts"
+    assert normalize_verdict("compatible") == "unrelated"
+    assert normalize_verdict("unclear") == "unsure"
+    # GBrain-style names briefly used before the rename normalize too.
+    assert normalize_verdict("temporal_supersession") == "updates"
+    assert normalize_verdict("different_referent") == "name_clash"
+    assert normalize_verdict("contradiction") == "conflicts"
     # Current values pass through unchanged.
-    assert normalize_verdict("temporal_supersession") == "temporal_supersession"
+    assert normalize_verdict("updates") == "updates"
     # Unknown/garbled → safe abstain, never a false alarm.
-    assert normalize_verdict("garbage_value") == "uncertain"
+    assert normalize_verdict("garbage_value") == "unsure"
 
 
 @pytest.mark.parametrize(
     ("verdict", "expected"),
     [
-        ("contradiction", True),
-        ("temporal_regression", True),  # backwards-moving value is worth flagging
-        ("temporal_supersession", False),  # a normal update, not a conflict
-        ("temporal_evolution", False),
-        ("negation_artifact", False),
-        ("corroboration", False),
-        ("no_relation", False),
-        ("different_referent", False),
-        ("uncertain", False),
-        ("contradicts", True),  # legacy string still resolves correctly
+        ("conflicts", True),
+        ("reverts", True),  # backwards-moving value is worth flagging
+        ("updates", False),  # a normal update, not a conflict
+        ("evolves", False),
+        ("false_conflict", False),
+        ("confirms", False),
+        ("unrelated", False),
+        ("name_clash", False),
+        ("unsure", False),
+        ("contradicts", True),  # historical string still resolves correctly
     ],
 )
 def test_unresolved_conflict_classification(verdict: str, expected: bool) -> None:
     assert is_unresolved_conflict(verdict) is expected
 
 
-def test_confidence_floor_downgrades_low_confidence_contradiction() -> None:
-    below = CONTRADICTION_CONFIDENCE_FLOOR - 0.01
-    at = CONTRADICTION_CONFIDENCE_FLOOR
-    assert enforce_confidence_floor("contradiction", below) == "uncertain"
-    assert enforce_confidence_floor("contradiction", at) == "contradiction"
-    # The floor applies only to contradiction; nothing else is touched.
-    assert enforce_confidence_floor("temporal_regression", 0.1) == "temporal_regression"
-    assert enforce_confidence_floor("corroboration", 0.1) == "corroboration"
+def test_confidence_floor_downgrades_low_confidence_conflict() -> None:
+    below = CONFLICT_CONFIDENCE_FLOOR - 0.01
+    at = CONFLICT_CONFIDENCE_FLOOR
+    assert enforce_confidence_floor("conflicts", below) == "unsure"
+    assert enforce_confidence_floor("conflicts", at) == "conflicts"
+    # The floor applies only to conflicts; nothing else is touched.
+    assert enforce_confidence_floor("reverts", 0.1) == "reverts"
+    assert enforce_confidence_floor("confirms", 0.1) == "confirms"
 
 
-def test_corroboration_raises_confidence_and_carries_no_caveat() -> None:
-    m = meta("corroboration")
+def test_confirms_raises_confidence_and_carries_no_caveat() -> None:
+    m = meta("confirms")
     assert m.raises_confidence is True
     assert m.caveat is None
 
 
 def test_afair_specific_verdicts_have_user_facing_caveats() -> None:
-    # The two afair additions and the temporal/conflict flags carry a caveat
-    # the recall layer can surface verbatim.
-    assert meta("different_referent").caveat is not None
-    assert meta("temporal_supersession").caveat is not None
-    assert meta("contradiction").caveat is not None
+    # The afair additions and the time/conflict flags carry a caveat the recall
+    # layer can surface verbatim.
+    assert meta("name_clash").caveat is not None
+    assert meta("updates").caveat is not None
+    assert meta("conflicts").caveat is not None

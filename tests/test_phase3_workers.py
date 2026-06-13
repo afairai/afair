@@ -114,7 +114,7 @@ def _make_bound_pair(db) -> tuple[Any, Any]:
 def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
     db, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End-to-end: pair exists, LLM returns a 'contradiction' verdict, a
+    """End-to-end: pair exists, LLM returns a 'conflicts' verdict, a
     conflict_flag row gets written keyed on the pair, and the unresolved-
     conflict rollup the caveats layer reads is incremented."""
     a, b = _make_bound_pair(db)
@@ -122,7 +122,7 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
     def fake_call(**_: Any) -> LLMResult:
         return LLMResult(
             data={
-                "verdict": "contradiction",
+                "verdict": "conflicts",
                 "reason": "CEO and CTO at the same time are mutually exclusive.",
                 "confidence": 0.92,
             },
@@ -134,7 +134,7 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
 
     stats = ConflictResolver().run(db, settings_local)
     assert stats["pairs_examined"] == 1
-    assert stats["contradiction"] == 1
+    assert stats["conflicts"] == 1
     assert stats["unresolved_conflicts"] == 1
 
     # The interpretation row is keyed on the anchor with a producer
@@ -146,7 +146,7 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
     ).fetchone()
     assert row is not None
     data = json.loads(row["extraction"])
-    assert data["verdict"] == "contradiction"
+    assert data["verdict"] == "conflicts"
     assert data["event_b_hash"] == b.content_hash
     assert "verdict_taxonomy_version" in data
 
@@ -154,9 +154,9 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
 def test_conflict_resolver_normalizes_legacy_verdict_and_enforces_floor(
     db, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A model returning the legacy 'contradicts' string is normalized to
-    'contradiction'; a low-confidence contradiction is downgraded to
-    'uncertain' (the confidence floor, double-enforced in code)."""
+    """A model returning the historical 'contradicts' string is normalized to
+    'conflicts'; a low-confidence conflict is downgraded to 'unsure' (the
+    confidence floor, double-enforced in code)."""
     a, _b = _make_bound_pair(db)
 
     def low_conf_legacy(**_: Any) -> LLMResult:
@@ -168,16 +168,16 @@ def test_conflict_resolver_normalizes_legacy_verdict_and_enforces_floor(
 
     monkeypatch.setattr("afair.agents.conflict_resolver.call_tool", low_conf_legacy)
     stats = ConflictResolver().run(db, settings_local)
-    # 'contradicts' → 'contradiction', then floored to 'uncertain' at conf 0.4.
-    assert stats.get("contradiction", 0) == 0
-    assert stats["uncertain"] == 1
+    # 'contradicts' → 'conflicts', then floored to 'unsure' at conf 0.4.
+    assert stats.get("conflicts", 0) == 0
+    assert stats["unsure"] == 1
     assert stats["unresolved_conflicts"] == 0
     row = db.execute(
         """SELECT extraction FROM interpretations
            WHERE event_hash = ? AND produced_by LIKE 'conflict_resolver:v0:%'""",
         (a.content_hash,),
     ).fetchone()
-    assert json.loads(row["extraction"])["verdict"] == "uncertain"
+    assert json.loads(row["extraction"])["verdict"] == "unsure"
 
 
 def test_conflict_resolver_skips_already_judged_pairs(
