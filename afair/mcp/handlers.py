@@ -37,6 +37,7 @@ import binascii
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
@@ -51,6 +52,8 @@ from ..agents.invalidation import (
     read_invalidations_batch,
     write_invalidation,
 )
+from ..agents.verdicts import is_unresolved_conflict
+from ..agents.verdicts import meta as _verdict_meta
 from ..substrate import (
     build_binary_payload,
     build_blob_ref_payload,
@@ -90,6 +93,7 @@ from .schemas import (
     InvalidationSummary,
     ObserveEvent,
     ObserveResult,
+    RecallCoverage,
     RecallFeedback,
     RecallHit,
     RecallResult,
@@ -914,6 +918,96 @@ def _auto_route_depth(query: str) -> Depth:
     return "normal"
 
 
+# Caveats layer thresholds. A topic whose *newest* matching event is older
+# than this is flagged as possibly out of date. THIN = at most this many hits
+# before recall admits "the vault may not hold this yet."
+STALENESS_CAVEAT_DAYS = 30
+THIN_EVIDENCE_MAX_HITS = 1
+
+
+def _compute_coverage(
+    events: list[Event],
+    invalidations: dict[str, Any],
+    conflicts: dict[str, list[dict[str, Any]]],
+) -> RecallCoverage:
+    """The honesty layer — what the vault does NOT confidently tell you.
+
+    Computed entirely from signals the hits already carry (created_at,
+    conflict verdicts, invalidation), no extra LLM call. Surfaces additively
+    on the recall result so an AI client can hedge instead of treating thin,
+    stale, or contradicted memory as settled fact. (BUILD #1 — informed by
+    GBrain's gap analysis, adapted to afair's verdict taxonomy.)
+    """
+    caveats: list[str] = []
+
+    # Thin evidence — the vault likely doesn't hold this yet.
+    thin = len(events) <= THIN_EVIDENCE_MAX_HITS
+    if not events:
+        return RecallCoverage(
+            caveats=["No matching memory — the vault likely doesn't hold this yet."],
+            thin_evidence=True,
+        )
+    if thin:
+        caveats.append(
+            "Thin evidence — only a single matching record; the vault may not hold much on this yet."
+        )
+
+    # Staleness — age of the MOST RECENT matching event.
+    newest_days: int | None = None
+    now = datetime.now(UTC)
+    ages = []
+    for e in events:
+        try:
+            ages.append((now - datetime.fromisoformat(e.created_at)).days)
+        except (ValueError, TypeError):
+            continue
+    if ages:
+        newest_days = min(ages)  # smallest age = most recent event
+        if newest_days >= STALENESS_CAVEAT_DAYS:
+            caveats.append(
+                f"Possibly out of date — even the most recent matching record is "
+                f"{newest_days} days old."
+            )
+
+    # Unresolved contradictions among the returned hits (verdict-aware, so a
+    # temporal update is NOT counted as a conflict). Also collect the distinct
+    # user-facing caveat templates for the verdicts present.
+    unresolved = 0
+    seen_caveats: set[str] = set()
+    for e in events:
+        flags = conflicts.get(e.content_hash) or []
+        hit_has_unresolved = False
+        for c in flags:
+            verdict = str(c.get("verdict", ""))
+            if is_unresolved_conflict(verdict):
+                hit_has_unresolved = True
+            cav = _verdict_meta(verdict).caveat
+            if cav:
+                seen_caveats.add(cav)
+        if hit_has_unresolved:
+            unresolved += 1
+    if unresolved:
+        caveats.append(f"{unresolved} returned record(s) are in unresolved tension with another.")
+    # Surface the distinct verdict caveats (e.g. "a newer record supersedes an
+    # older one", "share a name but appear to be different things").
+    caveats.extend(sorted(seen_caveats))
+
+    # Invalidated hits (superseded/contradicted by a later event).
+    invalidated = sum(1 for e in events if e.content_hash in invalidations)
+    if invalidated:
+        caveats.append(
+            f"{invalidated} returned record(s) were later superseded — check the invalidation note."
+        )
+
+    return RecallCoverage(
+        caveats=caveats,
+        stale_newest_event_days=newest_days,
+        unresolved_contradictions=unresolved,
+        invalidated_hits=invalidated,
+        thin_evidence=thin,
+    )
+
+
 def _article_first_order(events: list[Event], invalidated: set[str] | None = None) -> list[Event]:
     """Stable-partition entity_article hits to the front of a query result.
 
@@ -1123,6 +1217,7 @@ def recall(
         depth_used=depth_used,
         note=note,
         summary=summary,
+        coverage=_compute_coverage(events, invalidations, conflicts),
     )
 
 

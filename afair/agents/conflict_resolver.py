@@ -37,6 +37,13 @@ from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
 from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
+from .verdicts import (
+    VERDICT_ENUM,
+    VERDICT_TAXONOMY_VERSION,
+    enforce_confidence_floor,
+    is_unresolved_conflict,
+    normalize_verdict,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -143,21 +150,31 @@ def read_conflicts_batch(
     return result
 
 
-_TOOL_NAME = "record_conflict_verdict"
+_TOOL_NAME = "record_relation_verdict"
 _TOOL_DESCRIPTION = (
-    "Record whether two events from the user's substrate contradict, "
-    "are compatible, or remain unclear. Call exactly once per request."
+    "Record how two events from the user's personal memory relate. Call exactly once per request."
 )
 _TOOL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "verdict": {
             "type": "string",
-            "enum": ["contradicts", "compatible", "unclear"],
+            "enum": VERDICT_ENUM,
             "description": (
-                "contradicts: the two events make claims that cannot both be true. "
-                "compatible: the two events make claims that can coexist (possibly reinforcing, possibly orthogonal). "
-                "unclear: insufficient information to judge."
+                "temporal_supersession: a newer-dated event replaces an older one "
+                "(role/status/state change) — NOT an error. "
+                "temporal_regression: a tracked value moved BACKWARDS over time "
+                "(e.g. a count or amount went down) — worth flagging. "
+                "temporal_evolution: legitimate gradual change; both were true at their times. "
+                "contradiction: genuine conflict at the SAME point in time, where dates do NOT "
+                "explain the difference (use only when confident >= 0.7). "
+                "negation_artifact: only LOOKS like a conflict because of a negation that surface "
+                "tokens misread ('NOT X' read as 'X'). "
+                "corroboration: independent events asserting the SAME thing — they reinforce. "
+                "no_relation: compatible / unrelated / orthogonal; no signal. "
+                "different_referent: the events share a name or surface form but are clearly about "
+                "DIFFERENT things (same name, different person/project). "
+                "uncertain: insufficient basis to judge."
             ),
         },
         "reason": {
@@ -175,20 +192,29 @@ _TOOL_SCHEMA: dict[str, Any] = {
 }
 
 _SYSTEM_PROMPT = f"""\
-You are a conflict detector for a personal memory vault. Given two events,
-decide whether they CONTRADICT (they can't both be true), are COMPATIBLE
-(they can coexist), or UNCLEAR (you can't tell).
+You judge how two events in a PERSONAL MEMORY vault relate. The single most
+important rule: most apparent contradictions are TIME-UPDATES, not errors. A
+person's role, status, location, and numbers change. Do not call a change over
+time a contradiction — classify it in the temporal family instead. Reserve
+"contradiction" for genuine conflicts at the same point in time that the dates
+cannot explain, and only when you are confident (>= 0.7).
+
+Two events sharing a name may be about DIFFERENT people or things — if so, that
+is different_referent, not a conflict.
 
 {UNTRUSTED_CONTENT_DIRECTIVE}
 
 Examples:
-  - "Sajinth is CEO" + "Sajinth is CTO"           -> contradicts
-  - "Sajinth joined Clario in March" + "Sajinth started at Clario 2025-03-15" -> compatible (reinforcing)
-  - "Sajinth lives in Berlin" + "Sajinth's project is Clario" -> compatible (orthogonal)
-  - "team meeting at 14:00" + "team meeting at 15:00" -> contradicts (re-scheduled?)
-  - "API key is X" + "API key is Y" (no timestamps) -> unclear
+  - "Sajinth is CTO" (2026-05) after "Sajinth is CEO" (2025-01)      -> temporal_supersession
+  - "MRR is 150K" (2026-Q2) after "MRR is 200K" (2026-Q1)            -> temporal_regression
+  - "learning Spanish" later "conversational in Spanish"            -> temporal_evolution
+  - "meeting at 14:00" + "meeting at 15:00" (same day, no re-sched)  -> contradiction
+  - "Sajinth does NOT use Notion" + "Sajinth uses Notion"           -> negation_artifact (if one is a negation)
+  - "Sajinth joined Clario in March" + "Sajinth started Clario 2025-03-15" -> corroboration
+  - "Sajinth lives in Berlin" + "Sajinth's project is Clario"       -> no_relation
+  - "Sajinth (my cofounder)" + "Sajinth (the barista downstairs)"   -> different_referent
 
-Use the record_conflict_verdict tool exactly once.
+Use the record_relation_verdict tool exactly once.
 """
 
 
@@ -199,7 +225,7 @@ class ConflictPair(BaseModel):
     event_a_hash: str
     event_b_hash: str
     event_b_id: str
-    verdict: str  # contradicts | compatible | unclear
+    verdict: str  # one of verdicts.VERDICT_ENUM (see afair/agents/verdicts.py)
     reason: str
     confidence: float
 
@@ -213,9 +239,7 @@ class ConflictResolver(ColdPathWorker):
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         stats: dict[str, Any] = {
             "pairs_examined": 0,
-            "contradicts": 0,
-            "compatible": 0,
-            "unclear": 0,
+            "unresolved_conflicts": 0,  # contradiction + temporal_regression
             "llm_errors": 0,
             "skipped_already_judged": 0,
         }
@@ -244,7 +268,11 @@ class ConflictResolver(ColdPathWorker):
                 log.warning("conflict_resolver.llm_error", error=str(e))
                 stats["llm_errors"] += 1
                 continue
+            # Per-verdict tally (dynamic keys across the taxonomy) plus a
+            # rolled-up unresolved-conflict count the caveats layer cares about.
             stats[verdict.verdict] = stats.get(verdict.verdict, 0) + 1
+            if is_unresolved_conflict(verdict.verdict):
+                stats["unresolved_conflicts"] += 1
             _write_verdict(conn, event_a=event_a, pair=verdict)
 
         pe.record(
@@ -254,8 +282,7 @@ class ConflictResolver(ColdPathWorker):
             producer="conflict_resolver:v0",
             detail=(
                 f"pairs={stats.get('pairs_examined', 0)} "
-                f"contradicts={stats.get('contradicts', 0)} "
-                f"compatible={stats.get('compatible', 0)} "
+                f"unresolved_conflicts={stats.get('unresolved_conflicts', 0)} "
                 f"llm_errors={stats.get('llm_errors', 0)}"
             ),
         )
@@ -355,13 +382,20 @@ def _judge_pair(*, event_a: Event, event_b: Event, model: str, api_key: str | No
         max_tokens=400,
     )
     data = result.data
+    confidence = float(data.get("confidence", 0.5))
+    # Normalize onto the current taxonomy, then double-enforce the
+    # contradiction confidence floor in code (a model that ignores the
+    # prompt floor still cannot raise a low-confidence alarm).
+    verdict = enforce_confidence_floor(
+        normalize_verdict(str(data.get("verdict", "uncertain"))), confidence
+    )
     return ConflictPair(
         event_a_hash=event_a.content_hash,
         event_b_hash=event_b.content_hash,
         event_b_id=event_b.id,
-        verdict=str(data.get("verdict", "unclear")),
+        verdict=verdict,
         reason=str(data.get("reason", "")),
-        confidence=float(data.get("confidence", 0.5)),
+        confidence=confidence,
     )
 
 
@@ -397,6 +431,7 @@ def _write_verdict(conn: sqlite3.Connection, *, event_a: Event, pair: ConflictPa
     extraction: dict[str, Any] = {
         "content_type": CONFLICT_KIND,
         "status": "success",
+        "verdict_taxonomy_version": VERDICT_TAXONOMY_VERSION,
         **pair.model_dump(),
     }
     # Pair-specific producer string keeps the UNIQUE constraint happy
