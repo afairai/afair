@@ -18,17 +18,16 @@ from pathlib import Path
 
 from afair.eval import (
     BenchCase,
+    capture_baseline,
+    compare_to_baseline,
     evaluate_gate,
+    regression_gate_ok,
     run_retrieval_quality,
 )
 
-_DEFAULT_FIXTURE = (
-    Path(__file__).resolve().parent.parent
-    / "afair"
-    / "eval"
-    / "fixtures"
-    / "retrieval_quality.jsonl"
-)
+_FIXTURE_DIR = Path(__file__).resolve().parent.parent / "afair" / "eval" / "fixtures"
+_DEFAULT_FIXTURE = _FIXTURE_DIR / "retrieval_quality.jsonl"
+_BASELINE = _FIXTURE_DIR / "regression_baseline.json"
 
 
 def load_cases(path: Path) -> list[BenchCase]:
@@ -44,6 +43,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Recall retrieval-quality benchmark + gate")
     parser.add_argument("--fixture", type=Path, default=_DEFAULT_FIXTURE)
     parser.add_argument("--json", action="store_true", help="emit the report as JSON")
+    parser.add_argument(
+        "--capture",
+        action="store_true",
+        help="re-freeze the label-free regression baseline from current recall",
+    )
     args = parser.parse_args()
 
     if not args.fixture.exists():
@@ -51,8 +55,21 @@ def main() -> int:
         return 2
 
     cases = load_cases(args.fixture)
+
+    if args.capture:
+        baseline = capture_baseline(cases)
+        _BASELINE.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        print(f"baseline re-frozen: {len(baseline)} cases → {_BASELINE}")
+        return 0
+
     report = run_retrieval_quality(cases)
     gate = evaluate_gate(report)
+
+    # Label-free regression check against the frozen baseline.
+    reg_passed, reg_reasons = True, []
+    if _BASELINE.exists():
+        reg = compare_to_baseline(cases, json.loads(_BASELINE.read_text(encoding="utf-8")))
+        reg_passed, reg_reasons = regression_gate_ok(reg)
 
     if args.json:
         print(
@@ -81,9 +98,12 @@ def main() -> int:
             print(f"  WARN  {w}")
         for f in gate.failures:
             print(f"  FAIL  {f}")
-        print("\nGATE:", "PASS" if gate.passed else "FAIL")
+        for r in reg_reasons:
+            print(f"  DRIFT {r}")
+        print("\nQUALITY GATE:", "PASS" if gate.passed else "FAIL")
+        print("REGRESSION GATE:", "PASS" if reg_passed else "FAIL")
 
-    return 0 if gate.passed else 1
+    return 0 if (gate.passed and reg_passed) else 1
 
 
 if __name__ == "__main__":

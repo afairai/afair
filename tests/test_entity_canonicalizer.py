@@ -319,6 +319,53 @@ def test_llm_hallucinated_entity_id_falls_back_to_new(
     assert stats["entities_created"] == 1
 
 
+def test_alias_gazetteer_matches_without_an_llm_call(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stage 1.5 — a surface form matching a known emergent alias links to the
+    entity WITHOUT paying for the LLM (canonicalizer cost-cutter)."""
+    _no_sleep(monkeypatch)
+
+    # Create Sajinth (person) via the exact path.
+    h1 = _write_event_with_extraction(
+        db, text="Sajinth runs Clario", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    ec.EntityCanonicalizer().run(db, settings)
+    sajinth_id = iter_mentions_for_event(db, h1)[0].entity_id
+
+    # The entity-article worker has recorded an emergent alias "Saji".
+    write_event(
+        db,
+        origin="agent",
+        kind=ec.ENTITY_ARTICLE_KIND,
+        payload={
+            "content_type": "text",
+            "text": "Sajinth is a person.",
+            "entity_key": "person\x1fsajinth",
+            "canonical_name": "Sajinth",
+            "entity_kind": "person",
+            "entity_ids": [sajinth_id],
+            "aliases": ["Saji"],
+        },
+    )
+
+    # Now an event mentions "Saji". The LLM must NOT be called.
+    def _boom(**_: Any) -> LLMResult:
+        raise AssertionError("LLM was called — the alias gazetteer should have matched first")
+
+    monkeypatch.setattr(ec, "call_tool", _boom)
+    h2 = _write_event_with_extraction(
+        db, text="Saji approved the plan", entities=[{"name": "Saji", "type": "person"}]
+    )
+    stats = ec.EntityCanonicalizer().run(db, settings)
+
+    assert stats["entities_matched_alias"] == 1
+    assert stats["llm_calls"] == 0
+    saji_mention = iter_mentions_for_event(db, h2)[0]
+    assert saji_mention.entity_id == sajinth_id
+    assert saji_mention.match_method == "alias"
+
+
 def test_llm_match_to_real_but_out_of_pool_entity_is_rejected(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

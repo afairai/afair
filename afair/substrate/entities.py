@@ -182,8 +182,8 @@ def write_entity_mention(
     row or None if the mention already existed (UNIQUE-constraint
     silently absorbs duplicates).
     """
-    if match_method not in {"exact", "embedding", "llm", "new"}:
-        msg = f"match_method must be one of exact/embedding/llm/new, got {match_method!r}"
+    if match_method not in {"exact", "alias", "embedding", "llm", "new"}:
+        msg = f"match_method must be one of exact/alias/embedding/llm/new, got {match_method!r}"
         raise ValueError(msg)
 
     row_id = _new_row_id()

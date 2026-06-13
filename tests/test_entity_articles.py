@@ -171,6 +171,51 @@ def _live_articles(conn) -> list:
     ).fetchall()
 
 
+def test_per_fact_inline_citations_resolve_to_source_hashes(conn, monkeypatch) -> None:
+    """BUILD #3 step 2 — each key fact cites the record number(s) behind it,
+    which resolve to real source-event content_hashes."""
+    for i in range(3):
+        _seed_mention(conn, name="Letta", kind="product", text=f"Letta fact number {i}")
+
+    def structured(**_: object) -> LLMResult:
+        # cite record #1 (the newest mention; mentions are ordered newest-first)
+        return LLMResult(
+            data={
+                "summary": "Letta is a product.",
+                "aliases": [],
+                "key_facts": [
+                    {"fact": "Letta is a product", "sources": [1]},
+                    {"fact": "uncited claim", "sources": []},
+                    {"fact": "ignores hallucinated source", "sources": [99]},
+                ],
+            },
+            model="stub",
+            raw="{}",
+        )
+
+    monkeypatch.setattr(ea, "call_tool", structured)
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    payload = json.loads(_articles(conn)[0]["payload"])
+    cited = payload["cited_facts"]
+    assert [c["fact"] for c in cited] == [
+        "Letta is a product",
+        "uncited claim",
+        "ignores hallucinated source",
+    ]
+    # first fact cites a real source event; the others cite nothing
+    source_hashes = {
+        r["content_hash"]
+        for r in conn.execute("SELECT content_hash FROM events WHERE kind='remember'").fetchall()
+    }
+    assert len(cited[0]["citations"]) == 1
+    assert cited[0]["citations"][0] in source_hashes
+    assert cited[1]["citations"] == []
+    assert cited[2]["citations"] == []  # [#99] is out of range → no citation
+    # flat key_facts still derived for back-compat
+    assert payload["key_facts"][0] == "Letta is a product"
+
+
 def test_article_carries_source_citations(conn, monkeypatch) -> None:
     """BUILD #3 — a synthesized article cites the source events it drew from,
     so a recalled article is a *cited* answer (provenance back to records)."""

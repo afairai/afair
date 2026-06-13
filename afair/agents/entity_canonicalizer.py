@@ -63,6 +63,7 @@ from ..substrate.entities import (
 )
 from ..substrate.events import read_event_by_hash
 from .cold_path import ColdPathWorker
+from .entity_articles import ENTITY_ARTICLE_KIND
 from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
 from .llm import LLMError, call_tool
@@ -214,6 +215,7 @@ class EntityCanonicalizer(ColdPathWorker):
             "events_canonicalized": 0,
             "entities_created": 0,
             "entities_matched_exact": 0,
+            "entities_matched_alias": 0,
             "entities_matched_llm": 0,
             "edges_created": 0,
             "edges_skipped_unresolved": 0,
@@ -231,6 +233,10 @@ class EntityCanonicalizer(ColdPathWorker):
         llm_budget = MAX_LLM_CALLS_PER_CYCLE
         last_llm_call: float | None = None
 
+        # Build the alias gazetteer once per cycle (cheap, no LLM) so Stage 1.5
+        # can short-circuit known aliases before paying for the LLM.
+        gazetteer = _build_alias_gazetteer(conn)
+
         # Phase A — canonicalize new events.
         events_with_extractions = _find_uncanonicalized_events(conn, MAX_EVENTS_PER_CYCLE)
         for event, extraction in events_with_extractions:
@@ -243,10 +249,12 @@ class EntityCanonicalizer(ColdPathWorker):
                 api_key=api_key,
                 llm_budget=llm_budget,
                 last_llm_call=last_llm_call,
+                gazetteer=gazetteer,
             )
             stats["events_canonicalized"] += 1
             stats["entities_created"] += result["created"]
             stats["entities_matched_exact"] += result["matched_exact"]
+            stats["entities_matched_alias"] += result["matched_alias"]
             stats["entities_matched_llm"] += result["matched_llm"]
             stats["edges_created"] += result["edges_created"]
             stats["edges_skipped_unresolved"] += result["edges_skipped"]
@@ -376,6 +384,50 @@ def _find_uncanonicalized_events(
     return out
 
 
+def _gazetteer_key(surface_form: str, kind: str) -> str:
+    """Normalized lookup key: lowercased alias scoped by kind (so 'Apple' the
+    company and 'apple' the fruit never collide)."""
+    return f"{kind}\x1f{surface_form.strip().lower()}"
+
+
+def _build_alias_gazetteer(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map normalized (kind, alias) → entity_id, from the entity-article worker's
+    emergent aliases. Built once per cycle.
+
+    Conservative on purpose: an alias that points at MORE THAN ONE entity is
+    dropped (ambiguous → let the LLM decide), aliases shorter than 3 chars are
+    skipped (too generic), and an alias equal to its own canonical name is
+    redundant with Stage-1 exact match so it adds nothing. Only unambiguous,
+    specific aliases short-circuit the LLM.
+    """
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE kind = ?",
+        (ENTITY_ARTICLE_KIND,),
+    ).fetchall()
+
+    # alias-key → set of entity_ids it could mean (to detect ambiguity)
+    candidates: dict[str, set[str]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            continue
+        entity_ids = payload.get("entity_ids") or []
+        kind = str(payload.get("entity_kind") or "").strip()
+        canonical = str(payload.get("canonical_name") or "").strip().lower()
+        if not entity_ids or not kind:
+            continue
+        primary = str(entity_ids[0])
+        for alias in payload.get("aliases") or []:
+            a = str(alias).strip().lower()
+            if len(a) < 3 or a == canonical:
+                continue
+            candidates.setdefault(_gazetteer_key(a, kind), set()).add(primary)
+
+    # keep only unambiguous aliases (exactly one entity)
+    return {key: next(iter(ids)) for key, ids in candidates.items() if len(ids) == 1}
+
+
 def _canonicalize_one_event(
     conn: sqlite3.Connection,
     *,
@@ -386,14 +438,17 @@ def _canonicalize_one_event(
     api_key: str | None,
     llm_budget: int,
     last_llm_call: float | None,
+    gazetteer: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], float | None]:
     """Resolve entities + relations for one event into substrate rows.
 
     Returns (stats_delta, updated_last_llm_call_time).
     """
+    gazetteer = gazetteer or {}
     stats = {
         "created": 0,
         "matched_exact": 0,
+        "matched_alias": 0,
         "matched_llm": 0,
         "edges_created": 0,
         "edges_skipped": 0,
@@ -445,6 +500,29 @@ def _canonicalize_one_event(
                 confidence=1.0,
             )
             continue
+
+        # Stage 1.5: alias gazetteer — a cheap, deterministic, NO-LLM lookup.
+        # Surface forms that match a known ALIAS (emergent — produced by the
+        # entity-article worker from real usage) of exactly one entity of this
+        # kind link directly, skipping the LLM. Cuts canonicalizer LLM volume
+        # for the common "Saji" → "Sajinth" case without an imposed ontology.
+        alias_eid = gazetteer.get(_gazetteer_key(surface_form, kind))
+        if alias_eid is not None:
+            aliased = read_entity_by_id(conn, alias_eid)
+            if aliased is not None and aliased.kind == kind:
+                resolved[surface_form] = aliased
+                stats["matched_alias"] += 1
+                write_entity_mention(
+                    conn,
+                    entity_id=aliased.id,
+                    event_id=event.id,
+                    event_hash=event.content_hash,
+                    surface_form=surface_form,
+                    canonicalized_by=CANONICALIZER_PRODUCED_BY,
+                    match_method="alias",
+                    confidence=0.9,
+                )
+                continue
 
         # Stage 2: LLM judgment against candidate pool (if budget allows).
         candidates = _candidate_pool(
