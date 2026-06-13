@@ -1,0 +1,37 @@
+{
+  "0:entity-name:Sajinth": [
+    "saj"
+  ],
+  "1:entity-name:Maya design": [
+    "maya"
+  ],
+  "2:alias:Saji": [
+    "saji"
+  ],
+  "3:alias:Clario": [
+    "clario"
+  ],
+  "4:temporal:Sajinth current role": [
+    "cto",
+    "ceo"
+  ],
+  "5:temporal:Maya latest title": [
+    "vp",
+    "lead"
+  ],
+  "6:contradiction-present:Sajinth title at Clario": [
+    "ceo",
+    "cto",
+    "city"
+  ],
+  "7:multi-event-dilution:Clario Series A funding round": [
+    "funding",
+    "d3",
+    "d2",
+    "d4",
+    "d1"
+  ],
+  "8:hard-negative:Sajinth": [
+    "saj"
+  ]
+}

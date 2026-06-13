@@ -15,6 +15,12 @@ The label-free regression gate (Jaccard@k + top-1 stability vs a captured
 baseline — drift detection before gold labels exist) is the planned follow-up.
 """
 
+from .regression import (
+    RegressionReport,
+    capture_baseline,
+    compare_to_baseline,
+    regression_gate_ok,
+)
 from .retrieval_quality import (
     DEFAULT_GATE,
     BenchCase,
@@ -32,7 +38,11 @@ __all__ = [
     "FamilyScore",
     "GateResult",
     "QualityReport",
+    "RegressionReport",
+    "capture_baseline",
+    "compare_to_baseline",
     "evaluate_gate",
+    "regression_gate_ok",
     "run_retrieval_quality",
     "score_ranked",
 ]

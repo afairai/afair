@@ -119,11 +119,24 @@ _TOOL_SCHEMA: dict[str, Any] = {
         "key_facts": {
             "type": "array",
             "description": (
-                "Up to 6 short, durable factual statements about the entity "
-                "(roles, relationships, decisions, status). Each a single "
-                "clause, not a sentence with sub-clauses."
+                "Up to 6 short, durable facts about the entity (roles, "
+                "relationships, decisions, status). Each a single clause. For "
+                "each fact, list in `sources` the record number(s) [#N] from "
+                "the provided records that support it, so the fact is cited "
+                "back to its evidence. Use only numbers you were shown."
             ),
-            "items": {"type": "string"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "fact": {"type": "string", "description": "The fact, a single clause."},
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Record numbers [#N] that support this fact.",
+                    },
+                },
+                "required": ["fact"],
+            },
             "maxItems": 6,
         },
     },
@@ -144,6 +157,9 @@ mentions — resolve duplication, prefer the most recent state. Don't pad.
 
 Ground every statement in the provided records. Do not invent facts the
 records do not support — this article is cited back to its source events.
+The records are numbered ([#1], [#2], …). For each key fact, list in its
+`sources` the record number(s) that support it. Use only numbers you were
+shown; never invent a record number.
 
 Use the write_entity_article tool exactly once.
 """
@@ -165,6 +181,9 @@ class _Article(BaseModel):
     summary: str
     aliases: list[str] = []
     key_facts: list[str] = []
+    # Per-fact provenance: [{fact, citations:[source content_hash]}]. The flat
+    # key_facts above is derived from this for back-compat / FTS context.
+    cited_facts: list[dict[str, Any]] = []
     # Provenance: the source event content_hashes this article was synthesized
     # from (deterministic — taken from the mentions fed to the LLM, not the LLM
     # output). Makes a recalled article a *cited* answer: every article points
@@ -399,11 +418,14 @@ def _synthesize(
     mentions = _gather_mentions(conn, group)
     edges = _gather_edges(conn, group)
 
+    # Number the records so the model can cite each fact back to its evidence
+    # by [#N]. The same ordered list resolves those numbers → source hashes.
+    numbered_mentions = [{"n": i + 1, **m} for i, m in enumerate(mentions)]
     payload = {
         "entity": group.canonical_name,
         "kinds": group.kinds,
         "mention_count": group.mention_count,
-        "mentions": mentions,
+        "records": numbered_mentions,
         "relationships": edges,
     }
     user_msg = (
@@ -433,12 +455,54 @@ def _synthesize(
         if h and h not in seen:
             seen.add(h)
             citations.append(h)
+    cited_facts = _resolve_cited_facts(data.get("key_facts"), mentions)
     return _Article(
         summary=str(data.get("summary", "")),
         aliases=_coerce_to_string_list(data.get("aliases"))[:6],
-        key_facts=_coerce_to_string_list(data.get("key_facts"))[:6],
+        key_facts=[cf["fact"] for cf in cited_facts],  # flat list, back-compat
+        cited_facts=cited_facts,
         citations=citations,
     )
+
+
+def _resolve_cited_facts(raw: Any, mentions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn the model's key_facts into ``[{fact, citations:[hash]}]``.
+
+    Resolves each fact's 1-based source record numbers to source event hashes
+    via the ordered ``mentions`` list. Robust to the model returning plain
+    strings (old/garbled shape) — those become facts with no citations rather
+    than dropping the fact. Caps at 6, dedups citations, ignores out-of-range
+    numbers (a hallucinated [#99] simply doesn't cite anything).
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:6]:
+        sources: Any = []
+        if isinstance(item, str):
+            fact = item
+        elif isinstance(item, dict):
+            fact = str(item.get("fact", "")).strip()
+            sources = item.get("sources") or []
+        else:
+            continue
+        if not fact:
+            continue
+        cites: list[str] = []
+        cite_seen: set[str] = set()
+        if isinstance(sources, list):
+            for n in sources:
+                try:
+                    idx = int(n) - 1
+                except (ValueError, TypeError):
+                    continue
+                if 0 <= idx < len(mentions):
+                    h = mentions[idx].get("event_hash")
+                    if h and h not in cite_seen:
+                        cite_seen.add(h)
+                        cites.append(h)
+        out.append({"fact": fact, "citations": cites})
+    return out
 
 
 def _gather_mentions(conn: sqlite3.Connection, group: _EntityGroup) -> list[dict[str, Any]]:
@@ -571,6 +635,7 @@ def _write_article(
         "entity_ids": group.entity_ids,
         "aliases": article.aliases,
         "key_facts": article.key_facts,
+        "cited_facts": article.cited_facts,
         "citations": article.citations,
         "mention_count": group.mention_count,
         "produced_by": ENTITY_ARTICLE_PRODUCER,
