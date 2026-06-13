@@ -59,6 +59,7 @@ def write_event(
     kind: str,
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
+    created_at: str | None = None,
 ) -> Event:
     """Insert one event, idempotent on its content hash. Returns the Event.
 
@@ -71,6 +72,7 @@ def write_event(
         kind=kind,
         payload=payload,
         parent_hashes=parent_hashes,
+        created_at=created_at,
     )
     return event
 
@@ -82,6 +84,7 @@ def write_event_with_status(
     kind: str,
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
+    created_at: str | None = None,
 ) -> tuple[Event, bool]:
     """Insert-or-return-existing variant that also reports whether a fresh
     INSERT happened.
@@ -101,7 +104,10 @@ def write_event_with_status(
     chash = content_hash(kind=kind, origin=origin, payload=payload, parent_hashes=sorted_parents)
 
     event_id = _new_id()
-    created_at = _now_iso()
+    # created_at is NOT part of the content_hash (identity is kind/origin/
+    # payload/parents), so an explicit timestamp is safe — used by backfills
+    # and the eval harness to write events at a controlled point in time.
+    created_at = created_at or _now_iso()
     payload_json = canonical_json(payload)
     parents_json = canonical_json(sorted_parents) if sorted_parents else None
     searchable = derive_searchable_text(payload)

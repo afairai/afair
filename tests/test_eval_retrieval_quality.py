@@ -86,3 +86,44 @@ def test_shipped_fixture_passes_the_gate() -> None:
 def test_entity_name_lookup_is_near_perfect() -> None:
     report = run_retrieval_quality(_load())
     assert report.families["entity-name"]["hit_at_1"] >= 0.9
+
+
+def test_temporal_queries_now_prefer_the_recent_record() -> None:
+    """The gap the benchmark found (temporal hit@1=0) is closed by the
+    temporal-intent recency re-rank. Lock it in as a regression guard."""
+    report = run_retrieval_quality(_load())
+    assert report.families["temporal"]["hit_at_1"] >= 0.9
+
+
+# ── the recency re-rank itself (unit) ───────────────────────────────────────
+
+
+def test_temporal_intent_detection() -> None:
+    from afair.mcp.handlers import _has_temporal_intent
+
+    for q in ["current role", "Maya latest title", "what is X now", "as of today"]:
+        assert _has_temporal_intent(q), q
+    for q in ["who is Sajinth", "Clario funding", "design system"]:
+        assert not _has_temporal_intent(q), q
+
+
+def test_recency_rerank_orders_newest_first() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from afair.mcp.handlers import _recency_rerank
+    from afair.substrate.events import Event
+
+    def _ev(tag: str, age_days: int) -> Event:
+        return Event(
+            id=tag,
+            content_hash=f"sha256:{abs(hash(tag)):064d}"[:71],
+            created_at=(datetime.now(UTC) - timedelta(days=age_days)).isoformat(),
+            origin="agent",
+            kind="remember",
+            payload={"content_type": "text", "text": tag},
+            schema_version=1,
+        )
+
+    # old first in input; recency re-rank must put the newer one on top.
+    out = _recency_rerank([_ev("old", 700), _ev("new", 5)])
+    assert [e.id for e in out] == ["new", "old"]
