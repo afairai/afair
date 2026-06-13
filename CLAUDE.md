@@ -195,14 +195,20 @@
 
 - Task #6 — cross-vendor MCP verification (Claude Code, Codex CLI, Claude.ai)
 - Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
-- **Cumulative-surprise feed into ModeSwitcher** — currently only
-  cumulative-salience drives CEN↔DMN transitions. Recall-side
-  per-hit surprise score is live; need to fold the per-event
-  variant into the mode-switcher's threshold for a true "attention
-  shifted" signal.
 
 ### 0.2-resolved (was in flight, now done)
 
+- ~~Cumulative-surprise feed into ModeSwitcher~~ → live
+  (`afair/agents/surprise.py`). The recall path already surfaced a
+  per-hit surprise score; the per-event sibling (`read_recent_surprise`
+  / `cumulative_surprise`, entity-novelty against a running
+  within-window familiarity set, pure substrate, no LLM) now feeds the
+  ModeSwitcher as an additive CEN trigger + DMN gate. Backward-compatible:
+  with cumulative surprise 0 the decision reduces exactly to the old
+  salience-only hysteresis. A novelty burst can shift attention to CEN
+  before salience catches up, and high novelty blocks a premature drop
+  to DMN. Thresholds static for now (`DEFAULT_SURPRISE_{CEN,DMN}_THRESHOLD`),
+  promotable to tunables later. 6 new tests.
 - ~~Phase 2 Salience agent + Phase 4 Track 2 mode-switching agent~~
   → both live as cold-path workers (see §0.1).
 - ~~Multi-user provisioning script~~ → live at

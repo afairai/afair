@@ -16,10 +16,13 @@ import pytest
 from afair.agents.mode_switcher import (
     DEFAULT_CEN_THRESHOLD,
     DEFAULT_DMN_THRESHOLD,
+    DEFAULT_SURPRISE_CEN_THRESHOLD,
+    DEFAULT_SURPRISE_DMN_THRESHOLD,
     MODE_CEN,
     MODE_DMN,
     MODE_SWITCHER_ORIGIN,
     ModeSwitcher,
+    _decide_target_mode,
     read_current_mode,
 )
 from afair.agents.salience import (
@@ -29,8 +32,10 @@ from afair.agents.salience import (
     read_recent_salience,
     score_event,
 )
+from afair.agents.surprise import cumulative_surprise, read_recent_surprise
 from afair.settings import Settings
 from afair.substrate import open_db, write_event
+from afair.substrate.entities import write_entity, write_entity_mention
 
 if TYPE_CHECKING:
     import sqlite3
@@ -336,3 +341,145 @@ def test_salience_interpretation_idempotent(db: sqlite3.Connection, settings: Se
         (SALIENCE_PRODUCED_BY,),
     ).fetchone()[0]
     assert count == 1
+
+
+# ── per-event surprise signal ───────────────────────────────────────────────
+
+
+def _event_with_entities(
+    db: sqlite3.Connection,
+    *,
+    text: str,
+    entities: list[str],
+    when: datetime,
+    kind: str = "remember",
+) -> None:
+    """Write one event plus a canonical entity + mention per name.
+
+    Entity ids derive from (canonical_name, kind), so the same name
+    across two events resolves to the same canonical entity, which is
+    exactly what makes the second occurrence read as familiar.
+    """
+    ev = write_event(
+        db,
+        origin="user",
+        kind=kind,
+        payload={"content_type": "text", "text": text},
+        created_at=when.isoformat(),
+    )
+    for name in entities:
+        ent = write_entity(
+            db,
+            canonical_name=name,
+            kind="person",
+            created_by="test",
+            source_event_id=ev.id,
+            confidence=1.0,
+        )
+        write_entity_mention(
+            db,
+            entity_id=ent.id,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            surface_form=name,
+            canonicalized_by="test",
+            match_method="new",
+            confidence=1.0,
+        )
+
+
+def test_read_recent_surprise_running_novelty(db: sqlite3.Connection) -> None:
+    """Novelty is measured against entities seen earlier in the window:
+    a repeat entity scores 0, fresh entities score 1."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    _event_with_entities(db, text="a", entities=["Alice"], when=base)
+    _event_with_entities(db, text="b", entities=["Alice"], when=base + timedelta(seconds=1))
+    _event_with_entities(db, text="c", entities=["Bob", "Carol"], when=base + timedelta(seconds=2))
+    _event_with_entities(db, text="d", entities=["Bob"], when=base + timedelta(seconds=3))
+
+    rows = read_recent_surprise(db, limit=20)
+    # Returned most-recent-first: d, c, b, a.
+    scores = [round(s, 3) for _, s, _ in rows]
+    assert scores == [0.0, 1.0, 0.0, 1.0]
+    # Alice(novel) + Alice(familiar) + Bob,Carol(novel) + Bob(familiar) = 2.0
+    assert round(cumulative_surprise(db, limit=20), 3) == 2.0
+
+
+def test_read_recent_surprise_entityless_events_score_zero(db: sqlite3.Connection) -> None:
+    """Events with no canonical entities contribute nothing and do not
+    advance the running set."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(5):
+        write_event(
+            db,
+            origin="user",
+            kind="remember",
+            payload={"content_type": "text", "text": f"x{i}"},
+            created_at=(base + timedelta(seconds=i)).isoformat(),
+        )
+    assert cumulative_surprise(db, limit=20) == 0.0
+    assert all(score == 0.0 for _, score, _ in read_recent_surprise(db, limit=20))
+
+
+def test_decide_target_mode_salience_only_unchanged() -> None:
+    """With no surprise argument (default 0.0) the decision reduces to
+    the original salience-only hysteresis rule."""
+    assert _decide_target_mode(MODE_DMN, DEFAULT_CEN_THRESHOLD) == MODE_CEN
+    assert _decide_target_mode(MODE_CEN, DEFAULT_DMN_THRESHOLD) == MODE_DMN
+    # Mid-band: stay put in either direction.
+    assert _decide_target_mode(MODE_DMN, 6.0) == MODE_DMN
+    assert _decide_target_mode(MODE_CEN, 6.0) == MODE_CEN
+
+
+def test_decide_target_mode_surprise_triggers_cen() -> None:
+    """A burst of novelty forces CEN even when salience is well below
+    its own threshold."""
+    target = _decide_target_mode(
+        MODE_DMN,
+        2.0,  # salience far below CEN threshold
+        DEFAULT_SURPRISE_CEN_THRESHOLD + 1.0,  # but surprise crosses
+    )
+    assert target == MODE_CEN
+
+
+def test_decide_target_mode_surprise_blocks_dmn() -> None:
+    """Quiet salience alone is not enough to wander into DMN while novel
+    material is still arriving; both signals must be low."""
+    # Salience low enough for DMN, but novelty still high → stay in CEN.
+    assert _decide_target_mode(MODE_CEN, 1.0, DEFAULT_SURPRISE_DMN_THRESHOLD + 1.0) == MODE_CEN
+    # Once novelty also drops, DMN fires.
+    assert _decide_target_mode(MODE_CEN, 1.0, 0.0) == MODE_DMN
+
+
+def test_mode_switcher_surprise_burst_forces_cen(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """End-to-end: 20 events each carrying a brand-new entity push
+    cumulative surprise over its threshold while salience stays low
+    (old-dated events → near-zero recency). The switcher flips DMN→CEN
+    on the surprise signal alone."""
+    base = datetime(2025, 1, 1, tzinfo=UTC)  # old → recency ~0
+    for i in range(20):
+        _event_with_entities(
+            db,
+            text=f"novel {i}",
+            entities=[f"Entity{i}"],
+            when=base + timedelta(seconds=i),
+        )
+    SalienceWorker().run(db, settings)
+
+    stats = ModeSwitcher().run(db, settings)
+    assert stats["cumulative_surprise"] >= DEFAULT_SURPRISE_CEN_THRESHOLD
+    assert stats["cumulative_salience"] < DEFAULT_CEN_THRESHOLD
+    assert stats["to_mode"] == MODE_CEN
+    assert read_current_mode(db) == MODE_CEN
+
+    # The transition payload records the driving surprise signal so a
+    # later recall can explain why attention shifted.
+    row = db.execute(
+        "SELECT payload FROM events WHERE origin = ? ORDER BY created_at DESC LIMIT 1",
+        (MODE_SWITCHER_ORIGIN,),
+    ).fetchone()
+    payload = json.loads(row["payload"])
+    assert "cumulative_surprise" in payload
+    assert payload["cumulative_surprise"] >= DEFAULT_SURPRISE_CEN_THRESHOLD
