@@ -291,8 +291,13 @@ two callers dispatch it through `.github/workflows/retire.yml`:
 
 | Trigger | Reason | Path |
 |---|---|---|
-| 30 days after a canceled sub's period ends | `canceled-grace` | afair-web cron `grace-period-cleanup.mjs` → dispatch `retire.yml` |
+| 30 days after a canceled sub's period ends | `canceled-grace` | afair-web daily cron curls `POST /api/internal/grace-sweep` (runs inside afair-web, where the DB resolves) → selects expired users → dispatch `retire.yml` per row |
 | User clicks "Delete my account" (after export) | `user-requested` | afair-web `deleteAccount` server action → cancel Stripe → dispatch `retire.yml` |
+
+> Why the sweep runs *inside* afair-web, not in CI: Postgres lives at the
+> Fly-internal `afair-web-db.flycast` host, unreachable from a GitHub runner.
+> Selecting candidates server-side keeps the DB credential on the Fly network
+> and the cron a thin authenticated curl.
 
 `retire_user.py <clerk_user_id> --reason <r>` does, idempotently:
 
@@ -330,16 +335,17 @@ window — rarely needed, but documented.
 The teardown code ships dormant until these secrets are wired (all
 additive — nothing breaks before they exist):
 
-- [ ] `gh secret set RETIRE_CALLBACK_SECRET -R gowry/afair` (value in
-      `.env.secrets.backup`) — retire.yml → callback.
-- [ ] `fly secrets set RETIRE_CALLBACK_SECRET=... -a afair-web` — the
-      `/api/internal/retired` route reads it at runtime.
-- [ ] `gh secret set DATABASE_URL -R gowry/afair-web` — the grace cron
-      selects candidates (was referencing a non-existent Actions secret
-      before this refactor).
-- [ ] `gh secret set GH_DISPATCH_TOKEN -R gowry/afair-web` — the grace
-      cron dispatches retire.yml (same token the webhook uses at runtime
-      on Fly; needed here as an Actions secret too).
+- [x] `gh secret set RETIRE_CALLBACK_SECRET -R gowry/afair` — retire.yml → callback. **(done 2026-06-14)**
+- [x] `fly secrets set RETIRE_CALLBACK_SECRET=... -a afair-web` — the
+      `/api/internal/retired` route reads it at runtime. **(done)**
+- [x] `fly secrets set GRACE_SWEEP_SECRET=... -a afair-web` — the
+      `/api/internal/grace-sweep` endpoint reads it. **(done)**
+- [x] `gh secret set GRACE_SWEEP_SECRET -R gowry/afair-web` — the daily
+      cron curls the endpoint with it. **(done)**
+
+`GH_DISPATCH_TOKEN` and `DATABASE_URL` stay **Fly secrets on afair-web
+only** (runtime). They are deliberately NOT GitHub Actions secrets — the
+grace sweep runs inside afair-web, so no DB credential lives in CI.
 
 Single-tenant makes erasure physically obvious: one user = one app = one
 `fly apps destroy`.
