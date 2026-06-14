@@ -77,3 +77,16 @@ logs/
 .claude/.history
 .playwright-mcp/
 .migrate_secrets.env
+
+# Vendored design tooling — kept locally for use across projects, not shipped
+.claude/skills/
+.github/skills/
+
+# Business-internal strategy docs — kept locally, never in the public repo.
+# Funding stance, competitor teardowns, marketing positioning, and the
+# hosted-dashboard concept are not part of the open-source product.
+POSITIONING.md
+analysis/2026-05-27-funding-stance.md
+analysis/2026-06-13-gbrain-competitive-analysis.md
+analysis/2026-06-13-feature-response-to-gbrain.md
+analysis/2026-05-27-dashboard-concept.md

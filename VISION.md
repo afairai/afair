@@ -358,7 +358,7 @@ For each competitor: what they have, what they don't, and the **structural reaso
 **[GBrain](https://github.com/garrytan/gbrain)** — MIT, ~22.7K stars, built by Garry Tan (YC President). Single-developer "agent brain", viral on author profile + YC's company-brain RFS tailwind. Synthesis **with gap analysis** (`think` — tells you what the brain doesn't know yet, staleness, contradictions), **self-wiring typed knowledge graph** (zero-LLM edge extraction, benchmarked), 24/7 "dream cycle" overnight enrich/consolidate, multi-source ingestion (meetings/email/tweets/voice), 30+ MCP tools (OAuth 2.1/PKCE/DCR, scope tiers), broad client support incl. Perplexity + ChatGPT. Both single-tenant local (PGLite) **and** multi-tenant company-brain with fuzz-tested per-login isolation.
 - **Has that we don't (yet):** gap-analysis, benchmarked zero-LLM graph, multi-source ingestion daemon, multi-tenant company-brain. In raw memory-engine terms it currently leads.
 - **Doesn't have:** hosted product (DIY daemon — "your hardware, your DB, your keys"), EU/jurisdictional posture, durability/forever-API contract, emergent ontology (its typed `works_at`/`invested_in`/`founded` edges are an **imposed VC/CRM schema** — VISION §9.D applies directly), build-nothing end-user onramp (assumes you run OpenClaw/Hermes or wire a daemon yourself).
-- **Structural limit:** it is an open-source tool you operate, not a product someone operates for you; opinionated to its author's stack; no jurisdiction, no managed isolation, no durability guarantee. afair's separation is **product-form + EU jurisdiction + emergent ontology + durability — not memory-engine quality, where GBrain leads today.** Full snapshot: [analysis/2026-06-13-gbrain-competitive-analysis.md](analysis/2026-06-13-gbrain-competitive-analysis.md). **Track as a first-class competitor.**
+- **Structural limit:** it is an open-source tool you operate, not a product someone operates for you; opinionated to its author's stack; no jurisdiction, no managed isolation, no durability guarantee. afair's separation is **product-form + EU jurisdiction + emergent ontology + durability — not memory-engine quality, where GBrain leads today.** **Track as a first-class competitor.**
 
 **[LangMem](https://github.com/langchain-ai/langmem)** / **[LlamaIndex Memory](https://www.llamaindex.ai)** — Framework-bound memory primitives. Outside their host frameworks, no value. Structural limit: tied to LangGraph / LlamaIndex.
 
@@ -450,11 +450,13 @@ What this is explicitly not.
 
 ## 12. Licensing Posture
 
-The license decision is deferred until real adoption data exists. Until then the operational rule is binding:
+The license is decided: **the open-source core is released under AGPLv3** (see `LICENSE`). Anyone can self-host, fork, and modify; a network-service fork must publish its modifications under the same license. The hosted offering at afair.ai is one deployment of this code, not a separate proprietary fork. The same posture that lets a user take their memory anywhere lets anyone take the code anywhere, and the copyleft keeps forks open, which fits the trust-driven, EU/regulated audience.
+
+The operational rule that produced a clean, publishable codebase stays binding:
 
 > **Build everything as if the repo goes public tomorrow.**
 
-This is the only stance that keeps both doors open without expensive rewrites. Concretely:
+Concretely:
 
 - Code quality, naming, comments, architecture — production-grade always.
 - No secrets in code; no hardcoded credentials; no internal jokes or slurs against competitors in code or commit messages.
@@ -463,18 +465,19 @@ This is the only stance that keeps both doors open without expensive rewrites. C
 - Telemetry minimal, off-by-default, anonymized.
 - Tests and docs at every layer. A stranger should be able to read the repo and understand what is happening.
 - Commit messages and PR descriptions reviewable by a stranger.
-- Dependency licenses tracked. Transitive deps Apache2/MIT/BSD-compatible so an open release is not accidentally GPL-tainted (or vice versa, so a closed release is not accidentally AGPL-poisoned).
+- Dependency licenses tracked. Transitive deps stay AGPL-compatible (Apache2/MIT/BSD) so the open release has no license conflict.
 
-Invariants are independent of the license choice. I4 (user owns the substrate) is satisfied by documented export + binary self-hosting whether the code is open or closed. I1 (MCP surface stability) is independent of license — the protocol surface is forever; the implementation behind it is not.
+Invariants are independent of the license. I4 (user owns the substrate) is satisfied by documented export + binary self-hosting. I1 (MCP surface stability) is independent of license: the protocol surface is forever; the implementation behind it is not.
 
-Reference matrix for when the decision arrives:
+The hosted control plane (afair-web: provisioning, billing, the customer dashboard) is a separate, private codebase, not part of the AGPLv3 release. The split is deliberate: the product that delivers I4 is open; the business that operates the managed offering is not.
 
-| Option | When it is the right answer |
+Why AGPLv3 over the alternatives that were on the table:
+
+| Option | Why not chosen |
 |---|---|
-| **AGPL3 core + closed orchestration** (PostHog / Plausible) | Trust-driven sales motion; EU/regulated buyers want forks-stay-open; viral copyleft welcome. |
-| **Apache2 core + closed orchestration** (Supabase / Mem0) | Maximum adoption; enterprise-friendly; willing to accept commercial forks. |
-| **BSL / source-available** (Sentry / Cockroach) | Prevent specific cloud-provider forks while staying mostly transparent. |
-| **Closed source** (1Password / Fastmail) | Service quality + brand is the moat; small team, no community capacity. |
+| **Apache2 core** (Supabase / Mem0) | Maximises adoption but lets a cloud provider run a closed fork. The copyleft is the point here. |
+| **BSL / source-available** (Sentry / Cockroach) | Restricts forks but is not OSI-open; weaker trust signal for the EU/regulated audience. |
+| **Closed source** (1Password / Fastmail) | Contradicts the user-ownership ethos and I4's self-hosting-first stance. |
 
 ---
 

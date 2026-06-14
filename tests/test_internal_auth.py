@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 HUB_SECRET = "hub-shared-secret"
-ISSUER = "https://solis-e03.mcp.afair.ai"
+ISSUER = "https://test-vault.mcp.afair.ai"
 USER = "user_TESToperator00000000000000"
 
 
