@@ -111,7 +111,7 @@ These show up across multiple days; track them cumulatively:
   Fixed in commit `d3feeea` — installer now writes to both paths.
 - Three credentials leaked into the chat transcript via file-diff
   system-reminders (Anthropic, OpenAI, MCP bearer). Annotated in
-  `.env.secrets.backup` as compromised; rotation deferred by user choice.
+  `a secure off-repo backup` as compromised; rotation deferred by user choice.
 - Initial deploy hit a `flyctl` token validation error in CI — first token
   pipe corrupted by trailing newline. Resolved by reading from a file with
   explicit `tr -d '\n'`.

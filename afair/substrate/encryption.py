@@ -26,7 +26,7 @@ Threat model this layer does NOT cover:
     LLM providers is still in plaintext over the wire)
 
 For Stufe 2+ designs (per-event payload encryption, BYOK, TEE), see
-docs/operations.md §encryption-roadmap.
+docs/self-hosting.md ("Encryption and the vault key").
 """
 
 from __future__ import annotations
