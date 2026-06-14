@@ -156,8 +156,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
-| `scripts/retire_user.py` | Canonical per-user teardown (destroy app+volume+cert+CNAME, callback wipes escrow). Shared by grace cron + instant-delete | When the teardown contract changes |
-| `.github/workflows/retire.yml` | Dispatches retire_user.py (from afair-web grace cron + delete action) | When the retire inputs/secrets change |
+| _(hosted fleet ops — `provision`/`retire`/`hourly-backup` workflows + `provision_user.py`/`retire_user.py`)_ | Moved to the private **afair-web** repo (control plane), not in this product repo | n/a here |
 | `analysis/build-log.md` | Archived per-feature build-log (detail moved out of CLAUDE.md §0 to keep it lean) | Append when a phase closes |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-06-03-recursive-self-improvement.md` | Design of the tuner / judge / rollback self-improvement loop (referenced from `afair/agents/tuner.py`) | When the loop design changes |
