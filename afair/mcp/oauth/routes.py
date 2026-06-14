@@ -124,6 +124,32 @@ def _validate_redirect_uri(uri: str) -> str | None:
     return None
 
 
+def _redirect_uri_registered(presented: str, registered: list[str]) -> bool:
+    """Whether ``presented`` matches one of the client's registered URIs.
+
+    Exact match for everything — PLUS RFC 8252 §7.3: a native client (Claude
+    Code, CLI tools) listens on an EPHEMERAL loopback port that differs
+    between the registration and the authorize request. So for a loopback
+    redirect (``http://localhost`` / ``127.0.0.1`` / ``[::1]``) we match
+    scheme + host-class + path and IGNORE the port. Non-loopback redirects
+    (the web clients' fixed callbacks) keep strict exact matching.
+    """
+    if presented in registered:
+        return True
+    p = urllib.parse.urlparse(presented)
+    if p.scheme.lower() != "http" or (p.hostname or "").lower() not in _DCR_LOOPBACK_HOSTS:
+        return False
+    for reg in registered:
+        r = urllib.parse.urlparse(reg)
+        if (
+            r.scheme.lower() == "http"
+            and (r.hostname or "").lower() in _DCR_LOOPBACK_HOSTS
+            and r.path == p.path
+        ):
+            return True
+    return False
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -361,7 +387,7 @@ async def oauth_authorize(request: Request) -> Response:
         client = storage.get_client(db, client_id)
         if client is None:
             return _error("invalid_client", description="unknown client_id", status=401)
-        if redirect_uri not in client.redirect_uris:
+        if not _redirect_uri_registered(redirect_uri, client.redirect_uris):
             return _error(
                 "invalid_redirect_uri",
                 description="redirect_uri not registered for this client",
