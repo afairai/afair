@@ -23,6 +23,11 @@ from starlette.responses import JSONResponse
 from ..substrate import open_db
 from . import api_tokens as _toks
 
+# Shared CORS allow-list so the token routes and the export route never
+# drift on which origins may carry the master bearer. (server.py imports
+# the OPTIONS preflight straight from .cors.)
+from .cors import cors_headers as _cors_headers
+
 if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
@@ -32,40 +37,6 @@ log = structlog.get_logger(__name__)
 _BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 _MAX_LABEL = 80
 
-# CORS allow-list for the /account dashboard, which loads from afair.ai
-# but calls the per-user vault at <vanity>.mcp.afair.ai. Anything else
-# is rejected — the master token is too sensitive to expose to arbitrary
-# origins.
-_ALLOWED_ORIGINS = frozenset(
-    {
-        "https://afair.ai",
-        "http://localhost:3000",  # local dev for afair-web
-    }
-)
-
-
-def _cors_headers(request: Request) -> dict[str, str]:
-    """If the request comes from an allow-listed origin, return the
-    matching CORS headers. Otherwise return an empty dict so the
-    response includes nothing CORS-related (same-origin clients are
-    unaffected).
-    """
-    origin = request.headers.get("origin", "")
-    if origin in _ALLOWED_ORIGINS:
-        return {
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-            "Access-Control-Max-Age": "300",
-            "Vary": "Origin",
-        }
-    return {}
-
-
-async def preflight_endpoint(request: Request) -> Response:
-    """OPTIONS handler so browsers stop pre-failing the fetch."""
-    return JSONResponse({}, headers=_cors_headers(request))
 
 
 def _unauthorized(request: Request) -> Response:

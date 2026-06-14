@@ -45,6 +45,12 @@ from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
 from .correlation import CorrelationIdMiddleware
+from .cors import preflight_endpoint as tokens_preflight_endpoint
+from .export_async_routes import (
+    export_download_endpoint,
+    export_request_endpoint,
+    export_status_endpoint,
+)
 from .export_route import export_endpoint
 from .oauth import routes as oauth_routes
 from .rate_limit import (
@@ -56,7 +62,6 @@ from .security_headers import SecurityHeadersMiddleware
 from .signup_route import signup_endpoint
 from .tokens_route import list_endpoint as tokens_list_endpoint
 from .tokens_route import mint_endpoint as tokens_mint_endpoint
-from .tokens_route import preflight_endpoint as tokens_preflight_endpoint
 from .tokens_route import revoke_endpoint as tokens_revoke_endpoint
 
 log = structlog.get_logger(__name__)
@@ -146,6 +151,12 @@ def build_server(settings: Settings) -> FastMCP:
         embedding_dim=settings.embedding_dim,
         interval_seconds=300,
     )
+
+    # Auto-purge expired async-export artifacts (a full plaintext-equivalent
+    # vault dump must not linger past its 72h download window).
+    from .export_job import start_purge_loop
+
+    start_purge_loop(settings, interval_seconds=3600)
 
     # Pre-warm in a background thread so boot stays fast but the first
     # user request hits an already-open SQLite connection AND an already-
@@ -282,7 +293,11 @@ def build_app(settings: Settings) -> Starlette:
         # the JWT/auth-rate-limit stack.
         "/internal/tokens",
     }
-    exempt_prefixes_set = ("/internal/tokens/",)
+    # Prefix-exempt: the token sub-routes (/internal/tokens/<id>) and the
+    # async-export sub-routes (/internal/export/{request,status,download}),
+    # each of which enforces its own credential (master bearer, or the
+    # capability token on download).
+    exempt_prefixes_set = ("/internal/tokens/", "/internal/export/")
     exempt_prefixes = ("/oauth/",)
 
     # Per-identity rate limiter. Instance lives for process lifetime so
@@ -300,7 +315,11 @@ def build_app(settings: Settings) -> Starlette:
         burst_multiplier=2.0,
         max_identities=8192,
     )
-    internal_rate_limited_prefixes = ("/internal/signup", "/internal/export", "/internal/tokens")
+    internal_rate_limited_prefixes = (
+        "/internal/signup",
+        "/internal/export",
+        "/internal/tokens",
+    )
 
     middleware = [
         # Outermost — correlation id must bind BEFORE other middlewares so
@@ -397,6 +416,18 @@ def build_app(settings: Settings) -> Starlette:
         # surface independent of the main MCP auth. See
         # afair/mcp/export_route.py.
         Route("/internal/export", export_endpoint, methods=["GET"]),
+        # OPTIONS preflight so the browser dashboard's cross-origin export
+        # fetch (afair.ai → vanity host, with the master bearer) isn't
+        # pre-failed. Same shared handler the token routes use.
+        Route("/internal/export", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        # Async export: request a job, poll its status, download the artifact.
+        # request/status are cross-origin (dashboard + master bearer) → CORS +
+        # preflight; download is a capability-token link → plain navigation.
+        Route("/internal/export/request", export_request_endpoint, methods=["POST"]),
+        Route("/internal/export/request", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        Route("/internal/export/status", export_status_endpoint, methods=["GET"]),
+        Route("/internal/export/status", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        Route("/internal/export/download", export_download_endpoint, methods=["GET"]),
         # API token management. GET=list, POST=mint, DELETE one by id.
         # Handler enforces master-bearer auth (AFAIR_AUTH_TOKEN only —
         # minted sub-tokens cannot self-escalate). See tokens_route.py.

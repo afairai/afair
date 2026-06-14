@@ -58,6 +58,9 @@ jobs:
           SENTRY_DSN: ${{ secrets.AFAIR_SENTRY_DSN }}
           EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
           EMBEDDING_DIM: ${{ secrets.EMBEDDING_DIM }}
+          # Lets the provisioned machine call afair-web back when an async
+          # vault export is ready (machine → /api/internal/export-ready).
+          EXPORT_READY_CALLBACK_SECRET: ${{ secrets.EXPORT_READY_CALLBACK_SECRET }}
           # Onboarding email (token stays in this job, never reaches afair-web).
           MAILERSEND_API_TOKEN: ${{ secrets.MAILERSEND_API_TOKEN }}
           MAILERSEND_FROM_EMAIL: ${{ secrets.MAILERSEND_FROM_EMAIL }}

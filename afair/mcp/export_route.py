@@ -51,6 +51,7 @@ from starlette.responses import StreamingResponse
 
 from ..substrate import open_db
 from ..substrate.objects import object_exists, object_size, read_object
+from .cors import cors_headers
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterator
@@ -64,13 +65,15 @@ log = structlog.get_logger(__name__)
 _TOKEN_RE = re.compile(r"^Bearer\s+(.+)$")
 
 
-def _unauthorized() -> Response:
+def _unauthorized(request: Request) -> Response:
     from starlette.responses import JSONResponse
 
+    # CORS on the 401 too, so the browser surfaces the real status to the
+    # dashboard instead of an opaque CORS error when the token is wrong.
     return JSONResponse(
         {"error": "unauthorized"},
         status_code=401,
-        headers={"WWW-Authenticate": 'Bearer realm="export"'},
+        headers={"WWW-Authenticate": 'Bearer realm="export"', **cors_headers(request)},
     )
 
 
@@ -268,7 +271,7 @@ def _extract_blob_hashes(payload: Any) -> Iterator[str]:
 async def export_endpoint(request: Request) -> Response:
     credential = _check_auth(request)
     if credential is None:
-        return _unauthorized()
+        return _unauthorized(request)
 
     include_blobs = request.query_params.get("blobs", "") == "inline"
     vault_dir = Path(request.app.state.settings.vault_dir)
@@ -305,5 +308,11 @@ async def export_endpoint(request: Request) -> Response:
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
             "X-Format-Version": "1",
+            # Cross-origin so the /account dashboard (afair.ai) can fetch the
+            # stream with the master bearer and trigger a browser download.
+            # Expose Content-Disposition so the client JS can read the
+            # server-suggested filename off the response.
+            **cors_headers(request),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Format-Version",
         },
     )

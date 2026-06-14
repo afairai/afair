@@ -249,6 +249,11 @@ SHARED_PROVISION_SECRETS: tuple[str, ...] = (
     "SENTRY_DSN",
     "EMBEDDING_MODEL",
     "EMBEDDING_DIM",
+    # Lets the machine call afair-web back when an async vault export is
+    # ready, so afair-web emails the user the download link. Shared (same
+    # value on every machine + afair-web); the machine never sends the
+    # vault, only a capability download URL.
+    "EXPORT_READY_CALLBACK_SECRET",
 )
 REQUIRED_SHARED_PROVISION_SECRETS: frozenset[str] = frozenset(
     {"IDENTITY_HUB_SECRET", "EMBEDDING_MODEL", "EMBEDDING_DIM"}
