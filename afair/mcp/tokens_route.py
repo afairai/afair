@@ -132,7 +132,8 @@ async def mint_endpoint(request: Request) -> Response:
             "note": "Save this token now. It is shown only this once.",
         },
         status_code=201,
-        headers=_cors_headers(request),
+        # no-store: this body carries the plaintext token, shown only once.
+        headers={**_cors_headers(request), "Cache-Control": "no-store"},
     )
 
 
