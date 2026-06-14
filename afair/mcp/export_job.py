@@ -268,7 +268,13 @@ def _reconcile_orphans(vault_dir: Path, conn: sqlite3.Connection) -> int:
         name = entry.name
         if name.endswith(".bin"):
             job = export_jobs.job_by_id(conn, name[: -len(".bin")])
-            if job is None or job.status != "ready":
+            # Only remove a .bin that is genuinely dead. A 'pending' job's
+            # .bin can exist transiently — generate_artifact writes the file
+            # BEFORE mark_ready commits — so unlinking on 'pending' would race
+            # a live generate and delete a good artifact. Stale-pending jobs
+            # are flipped to 'failed' in step 2 above, so they're caught on a
+            # later pass (or this one, after the flip).
+            if job is None or job.status in ("failed", "expired"):
                 _safe_unlink(vault_dir, name)
                 removed += 1
         elif name.endswith(".tmp"):
