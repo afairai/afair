@@ -857,11 +857,19 @@ def provision(
             )
             sys.exit(2)
 
-    # 1. Fly app + volume + secrets + deploy.
+    # 1. Fly app + volume + secrets + deploy. Fly tags images per
+    #    deployment, so there is no stable :latest — derive the exact
+    #    current image of the canonical app (env-overridable) and deploy
+    #    that, identical to the migrate path. Keeps the whole fleet on one
+    #    image by digest.
+    import os as _os
+
+    image_source = _os.environ.get("PROVISION_IMAGE_SOURCE_APP", "afair-solis-e03")
+    deploy_image = DOCKER_IMAGE if dry else fly_current_image(image_source)
     fly_create_app(app, dry=dry)
     fly_create_volume(app, region=region, size_gb=DEFAULT_VOLUME_SIZE_GB, dry=dry)
     fly_set_secrets(app, secrets_map, dry=dry)
-    fly_deploy_image(app, image=DOCKER_IMAGE, dry=dry)
+    fly_deploy_image(app, image=deploy_image, dry=dry)
 
     # 2. DNS — CNAME <name>-<suffix>.mcp.afair.ai → <app>.fly.dev.
     cloudflare_create_cname(
