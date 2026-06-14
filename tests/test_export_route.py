@@ -11,6 +11,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from afair.mcp.cors import preflight_endpoint
 from afair.mcp.export_route import export_endpoint
 from afair.settings import Settings
 from afair.substrate import open_db
@@ -70,6 +71,49 @@ def test_export_rejects_wrong_bearer(vault_dir) -> None:
     client = TestClient(app)
     r = client.get("/internal/export", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+def test_export_cors_on_allowed_origin(vault_dir) -> None:
+    """A GET from the dashboard origin carries CORS headers so the browser
+    lets the cross-origin download through, plus exposes Content-Disposition
+    so the client JS can read the suggested filename."""
+    _seed_events(vault_dir, 2)
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get(
+        "/internal/export",
+        headers={"Authorization": "Bearer test-token", "Origin": "https://afair.ai"},
+    )
+    assert r.status_code == 200
+    assert r.headers.get("Access-Control-Allow-Origin") == "https://afair.ai"
+    assert "Content-Disposition" in r.headers.get("Access-Control-Expose-Headers", "")
+
+
+def test_export_cors_absent_for_unknown_origin(vault_dir) -> None:
+    """A non-allow-listed origin gets no CORS headers — the browser blocks
+    the read, so the master bearer can't be exfiltrated to arbitrary sites."""
+    _seed_events(vault_dir, 1)
+    app = _build_app(vault_dir)
+    client = TestClient(app)
+    r = client.get(
+        "/internal/export",
+        headers={"Authorization": "Bearer test-token", "Origin": "https://evil.example"},
+    )
+    assert r.status_code == 200
+    assert "Access-Control-Allow-Origin" not in r.headers
+
+
+def test_export_preflight_options(vault_dir) -> None:
+    """OPTIONS preflight from the dashboard origin returns the CORS grant."""
+    app = _build_app(vault_dir)
+    app.router.routes.append(
+        Route("/internal/export", preflight_endpoint, methods=["OPTIONS"])
+    )
+    client = TestClient(app)
+    r = client.options("/internal/export", headers={"Origin": "https://afair.ai"})
+    assert r.status_code == 200
+    assert r.headers.get("Access-Control-Allow-Origin") == "https://afair.ai"
+    assert "GET" in r.headers.get("Access-Control-Allow-Methods", "")
 
 
 def test_export_rejects_when_both_tokens_unset(vault_dir) -> None:

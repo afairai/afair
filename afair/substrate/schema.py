@@ -455,6 +455,37 @@ SCHEMA_DDL: tuple[str, ...] = (
     #    without re-windowing the whole table.
     "CREATE INDEX IF NOT EXISTS entity_merges_from_merged_idx "
     "ON entity_merges(from_entity_id, merged_at DESC)",
+    # ── export_jobs: async full-vault export (appended 2026-06-14) ──────────
+    # MUTABLE operational table (status transitions pending→ready, downloaded
+    # gets stamped, purge expires). NOT append-only substrate — it tracks an
+    # ephemeral job, not a fact about the world. Lives in the vault DB for
+    # backup-locality, like oauth_codes / api_tokens.
+    #
+    # A request generates a gzip'd JSONL snapshot of the whole vault into
+    # <vault_dir>/exports/<id>.jsonl.gz, gated behind a capability token
+    # (download_token_hash = sha256 of the plaintext token that travels in
+    # the email link). Artifacts auto-purge after expires_at — a full
+    # plaintext-equivalent vault dump must not linger on disk.
+    """
+    CREATE TABLE IF NOT EXISTS export_jobs (
+        id                   TEXT PRIMARY KEY,
+        status               TEXT NOT NULL CHECK (status IN (
+                                 'pending', 'ready', 'failed', 'expired'
+                             )),
+        include_blobs        INTEGER NOT NULL DEFAULT 1,
+        artifact_filename    TEXT,
+        download_token_hash  TEXT,
+        size_bytes           INTEGER,
+        error                TEXT,
+        requested_at         TEXT NOT NULL,
+        ready_at             TEXT,
+        expires_at           TEXT,
+        downloaded_at        TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS export_jobs_status_idx ON export_jobs(status, requested_at DESC)",
+    "CREATE INDEX IF NOT EXISTS export_jobs_token_idx ON export_jobs(download_token_hash)",
+    "CREATE INDEX IF NOT EXISTS export_jobs_expires_idx ON export_jobs(expires_at)",
 )
 
 
