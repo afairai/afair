@@ -1,0 +1,32 @@
+name: Release
+
+# On a version tag (vX.Y.Z), trigger the fleet deploy in the private control
+# plane (afair-web) pinned to this exact tag. The product repo never deploys
+# the operator's infrastructure itself — it just signals "this ref is a release"
+# and afair-web rolls it out (gates, secret check, deploy, health).
+#
+# Requires the FLEET_DISPATCH_TOKEN secret: a fine-grained PAT with Actions:write
+# on afairai/afair-web.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  trigger-fleet-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch afair-web fleet deploy (prod) at this tag
+        env:
+          TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "Releasing $TAG → afair-web fleet deploy (prod)"
+          http=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/afairai/afair-web/actions/workflows/deploy-afair-fleet.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"target\":\"prod\",\"ref\":\"$TAG\"}}")
+          echo "dispatch HTTP $http"
+          [ "$http" = "204" ] || { echo "dispatch failed"; exit 1; }
