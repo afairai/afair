@@ -1,0 +1,61 @@
+name: Retire user
+
+# Triggered two ways, both via the GitHub API from afair-web:
+#   1. grace-period-cleanup cron — retires users 30 days past a canceled
+#      subscription's period end (reason: canceled-grace).
+#   2. instant user-initiated delete — the account-page "delete account"
+#      action, after Stripe is canceled + export is offered (reason:
+#      user-requested).
+# Both dispatch the SAME retire_user.py so teardown lives in one place.
+#
+# Inputs are passed through env, NOT interpolated into the shell, so a
+# hostile value cannot inject into the run script.
+
+on:
+  workflow_dispatch:
+    inputs:
+      clerk_user_id:
+        description: "Clerk userId to retire"
+        required: true
+        type: string
+      reason:
+        description: "Audit reason (canceled-grace | user-requested | ...)"
+        required: false
+        default: manual
+        type: string
+
+concurrency:
+  # Never run two retires for the same user at once. The script is
+  # idempotent but parallel app-destroys would race on the Fly API.
+  group: retire-${{ inputs.clerk_user_id }}
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Retire the user's machine
+        env:
+          # Org-scoped Fly token: retiring DESTROYS apps, which an
+          # app-scoped deploy token cannot do.
+          FLY_API_TOKEN: ${{ secrets.FLY_ORG_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Callback into afair-web to set deleted_at + wipe the escrow.
+          RETIRE_CALLBACK_SECRET: ${{ secrets.RETIRE_CALLBACK_SECRET }}
+          RETIRE_CALLBACK_URL: https://afair.ai/api/internal/retired
+          CLERK_USER_ID: ${{ inputs.clerk_user_id }}
+          RETIRE_REASON: ${{ inputs.reason }}
+        run: |
+          uv run python scripts/retire_user.py "$CLERK_USER_ID" --reason "$RETIRE_REASON"
