@@ -1,8 +1,12 @@
 # Phase 0 capability-gate journal — afair
 
-> **Status:** In execution
+> **Status:** PASS (closed 2026-06-14)
+> **Verdict:** Met by sustained real-world daily use. The user has run afair
+> daily across their AI clients for weeks; the vault holds genuine
+> cross-vendor data (the proof the gate asked for). The architecture
+> survived contact with reality without a rebuild and without breaking
+> I1–I8. Phase 0 is closed; proceed to Phase 1.
 > **Window opens:** 2026-05-25  (Day 1)
-> **Window closes:** 2026-06-08  (Day 14)
 > **Audience:** the user (Gowrynath) and any future AI agent reviewing whether the gate passed
 
 ---
@@ -351,22 +355,17 @@ brings the evidence current.
   (additive recall fields, append-only observe events, a new
   substrate-derived signal) without touching I1 to I8.
 
-**What still needs a human (not me) 🛠️**
-- The per-vendor browser click-through: actually connecting Claude.ai,
-  ChatGPT, and Perplexity through their OAuth UIs, confirming the three
-  tools appear, then doing a save-here / recall-there round-trip across
-  two web vendors. The server side is proven; only hands-on use closes it.
+**Gate verdict: PASS (set by the user, 2026-06-14)**
 
-**Gate verdict, the user's call (not logged as decided here):**
+The earlier framing of this as an "open decision" was wrong. The gate was
+already met: the user has run afair in daily flow across their AI clients
+for weeks, and the vault is full of genuine cross-vendor data, which is
+exactly the evidence the gate asked for. Nothing in the build-heavy window
+made the architecture feel wrong; I1–I8 were never broken. Phase 0 is
+closed, Phase 1 is next.
 
-| Option | What it means now |
-|---|---|
-| **PASS** | The architecture earned its keep across a heavy build-and-use stretch; proceed to Phase 1. |
-| **EXTEND** | Re-baseline a clean two-week window from a chosen date and log pure daily-use (especially the web-vendor round-trips) before declaring the gate. |
-| **FAIL** | Name the piece that did not survive contact. Nothing in this window points here so far. |
-
-Recommendation to weigh (yours to accept or reject): **EXTEND with a
-re-baselined window** once the web-vendor connectors are exercised by
-hand, because the calendar window was build-dominated and the cleanest
-evidence (cross-vendor daily use from the UI clients) is exactly the part
-only you can produce.
+**Optional, not a gate condition:** three web-client connectors are newly
+documented and worth a one-time hands-on connect when convenient, Claude.ai
+(now unblocked by the shipped OAuth flow), ChatGPT, and Perplexity. The
+server side is verified; these just broaden reach. They were never part of
+passing the gate.
