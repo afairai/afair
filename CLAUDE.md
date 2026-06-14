@@ -6,7 +6,10 @@
 ## 0. Current state
 
 **Phase:** 0 — Substrate + MCP Surface (cross-vendor, zero automated ingestion)
-**Status:** In execution
+**Status:** Capability gate PASSED 2026-06-14 (see `analysis/phase-0-journal.md`);
+Phase 1 next. The substrate, frozen 3-verb MCP surface, cold-path agents,
+entity graph, recall honesty layer, and recursive self-improvement loop are
+all live and in daily real-world use.
 **Audience:** solo build; future contributors
 
 ### 0.1 What's live
@@ -193,22 +196,23 @@
 
 ### 0.2 What's in flight
 
-- Task #6 — cross-vendor MCP verification. **Server side verified live
-  + documented (2026-06-13):** OAuth 2.1 discovery, DCR, PKCE (S256),
-  RFC 9728 protected-resource metadata, and the `/mcp` 401 +
-  `WWW-Authenticate` challenge all confirmed on `mcp.afair.ai`; the
-  authenticated remember/recall/observe round-trip runs live every
-  session. Client reach broadened to web vendors — added
-  `docs/clients/{chatgpt,perplexity}.md`, rewrote `claude-ai.md` for the
-  now-shipped OAuth flow (was stale "OAuth later" warning), and added a
-  reproducible "Server capabilities (verified live)" section to the
-  clients README. Still pending: the per-vendor UI click-through
-  (Claude.ai / ChatGPT / Perplexity browser approval + tools showing
-  up), which only a human can drive — folds into the Task #7 journal.
-- Task #7 — Phase 0 capability-gate journal (2-week daily-use window)
+- _(nothing — the Phase 0 threads below are resolved)_
 
 ### 0.2-resolved (was in flight, now done)
 
+- ~~Task #7 — Phase 0 capability-gate journal~~ → gate **PASSED 2026-06-14**.
+  Met by sustained real-world daily use (the vault is full of genuine
+  cross-vendor data); the architecture survived contact with reality
+  without a rebuild and without breaking I1–I8. Verdict logged in
+  `analysis/phase-0-journal.md`.
+- ~~Task #6 — cross-vendor MCP verification~~ → server side verified live
+  (OAuth 2.1 discovery, DCR, PKCE S256, RFC 9728, `/mcp` 401 challenge on
+  `mcp.afair.ai`) and the authenticated 3-verb round-trip runs every
+  session. Docs broadened to web vendors (`docs/clients/{chatgpt,
+  perplexity}.md`, `claude-ai.md` rewritten for the now-shipped OAuth
+  flow, reproducible "Server capabilities" section in the clients README).
+  A one-time hands-on connect of the three web connectors is optional
+  reach, not a gate condition.
 - ~~Cumulative-surprise feed into ModeSwitcher~~ → live
   (`afair/agents/surprise.py`). The recall path already surfaced a
   per-hit surprise score; the per-event sibling (`read_recent_surprise`
