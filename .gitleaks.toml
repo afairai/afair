@@ -1,0 +1,13 @@
+# gitleaks config for the secret-scan CI job (.github/workflows/security.yml).
+# Extends the default ruleset; allowlists known false positives.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false positives"
+regexes = [
+  # 'deny-with-429' is a rate-limit policy value (return 429 on deny),
+  # not an API key — the generic-api-key rule mis-flags it.
+  '''deny-with-429''',
+]
