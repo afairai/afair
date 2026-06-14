@@ -1,7 +1,7 @@
 [project]
 name = "afair"
 version = "0.0.1"
-description = "User-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents — exposed via MCP."
+description = "Your memory across every AI you use: a self-hostable, append-only memory vault for AI assistants, over MCP."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "AGPL-3.0-or-later" }
