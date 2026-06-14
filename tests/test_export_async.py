@@ -217,6 +217,71 @@ def test_download_rejects_expired(vault_dir) -> None:
 # ── purge ────────────────────────────────────────────────────────────────────
 
 
+def test_has_active_pending_ignores_stale(vault_dir) -> None:
+    """A pending job older than the dead-ceiling must NOT block new requests,
+    and must show up for the purge sweep to fail."""
+    conn = open_db(vault_dir)
+    try:
+        job_id, _ = export_jobs.create_job(conn)
+        conn.execute(
+            "UPDATE export_jobs SET requested_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (job_id,),
+        )
+        conn.commit()
+        assert export_jobs.has_active_pending(conn) is None
+        assert len(export_jobs.stale_pending_jobs(conn)) == 1
+    finally:
+        conn.close()
+
+
+def test_mark_ready_lost_race_returns_zero(vault_dir) -> None:
+    """If the job is no longer pending, mark_ready is a no-op and signals it
+    via rowcount so the runner can clean up its orphan artifact."""
+    conn = open_db(vault_dir)
+    try:
+        job_id, _ = export_jobs.create_job(conn)
+        export_jobs.mark_failed(conn, job_id, error="killed")
+        touched = export_jobs.mark_ready(conn, job_id, artifact_filename="x.bin", size_bytes=1)
+        assert touched == 0
+    finally:
+        conn.close()
+
+
+def test_purge_reconciles_orphan_bin(vault_dir) -> None:
+    """A .bin file with no live 'ready' row behind it is reconciled away."""
+    d = export_job.exports_dir(vault_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    orphan = d / "exp_orphan.bin"
+    orphan.write_bytes(b"leftover plaintext dump")
+    conn = open_db(vault_dir)
+    try:
+        removed = export_job.purge_expired(vault_dir, conn)
+        assert removed >= 1
+        assert not orphan.exists()
+    finally:
+        conn.close()
+
+
+def test_purge_keeps_ready_artifact(vault_dir) -> None:
+    """A live ready job's artifact must survive the reconciliation pass."""
+    settings = _settings(vault_dir)
+    conn = open_db(vault_dir)
+    try:
+        job_id, token = export_jobs.create_job(conn)
+    finally:
+        conn.close()
+    export_job.run_job(settings, job_id, include_blobs=True, download_token=token)
+    conn = open_db(vault_dir)
+    try:
+        job = export_jobs.latest_job(conn)
+        artifact = export_job.exports_dir(vault_dir) / job.artifact_filename
+        assert artifact.is_file()
+        export_job.purge_expired(vault_dir, conn)  # not expired → must keep
+        assert artifact.is_file()
+    finally:
+        conn.close()
+
+
 def test_purge_expired_removes_artifact(vault_dir) -> None:
     settings = _settings(vault_dir)
     conn = open_db(vault_dir)

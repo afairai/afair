@@ -77,6 +77,16 @@ def verify_identity_token(
         return None
     h_b64, p_b64, s_b64 = parts
 
+    # Pin the algorithm. We only ever HMAC-verify, so this isn't an active
+    # alg-confusion vuln today, but asserting alg=HS256 is the defense that
+    # keeps it that way if a second verify path is ever added.
+    try:
+        header = json.loads(_b64url_decode(h_b64).decode("utf-8"))
+    except Exception:
+        return None
+    if header.get("alg") != "HS256":
+        return None
+
     expected_sig = hmac.new(
         secret.encode("utf-8"),
         f"{h_b64}.{p_b64}".encode(),
