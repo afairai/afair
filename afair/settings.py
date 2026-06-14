@@ -138,6 +138,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # — Async export: how long a generated artifact + its download link
+    # live before auto-purge. The artifact is a plaintext-equivalent dump
+    # of the whole vault, so it does not linger. 72h is the GDPR-export norm.
+    export_retention_hours: int = Field(default=72, ge=1, le=720)
+
+    # — Shared bearer for the export-ready callback to afair-web. When the
+    # async export finishes, the per-user machine POSTs the download link to
+    # ``{identity_hub_url}/api/internal/export-ready`` so afair-web emails the
+    # user. Optional: if unset, the job still completes and the dashboard
+    # poll surfaces it — only the email nudge is skipped.
+    export_ready_callback_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "export_ready_callback_secret",
+            "EXPORT_READY_CALLBACK_SECRET",
+        ),
+    )
+
     # — OAuth server signing
     # We issue JWTs signed with this secret (HS256 for Phase 1; RS256
     # upgrade lives in a later phase if/when we need cross-instance
