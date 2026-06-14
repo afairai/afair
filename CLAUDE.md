@@ -271,19 +271,14 @@ all live and in daily real-world use.
 - **Vault Dashboard** — control-plane (`app.afair.ai`) read-only surface
   with entity-graph hero view ("brain cells connected" aesthetic via
   `react-force-graph-3d`), surprise heatmap, timeline scrubber,
-  vault-stats strip. Design + framework selection captured in
-  `analysis/2026-05-27-dashboard-concept.md`. Authorized by VISION.md
-  §11 anti-pattern exception ("minimal management dashboard for the
-  hosted offering is acceptable"). Build after daily-use window
+  vault-stats strip. Design + framework selection captured in a private
+  hosted-dashboard design note (kept local, not in this repo). Authorized
+  by VISION.md §11 anti-pattern exception ("minimal management dashboard
+  for the hosted offering is acceptable"). Build after daily-use window
   closes + marketing/control-plane bootstrap; uses real vault data,
   not synthetic.
-- **Funding stance** — bootstrap by default, VC conditional, hard-reject
-  any term sheet that pressures I1–I8. EU non-dilutive options
-  (EIC Accelerator, EXIST, HTGF, Calm Company Fund, TinySeed, OSS Capital)
-  explored before any traditional VC conversation. Re-evaluate at
-  ≥500 paying users sustained for ≥90 days, or when a closing competitive
-  window demands defense capital. Full reasoning, decision tree,
-  reject criteria in `analysis/2026-05-27-funding-stance.md`.
+- **Funding stance** — bootstrap-default / VC-conditional. Tracked in a
+  private local note (business-internal, not part of the OSS repo).
 - **Observability strategy (Phase 0.5)** — three layers to make the
   designed flow visible: (A) append-only `pipeline_events` table tracing
   every event's lifecycle from `extraction.enqueued` through
@@ -334,12 +329,14 @@ planned.
 | Logging | structlog | JSON with PII redaction |
 | Deployment | Docker → Fly machine | Single binary across local / self-hosted / managed |
 
-## 2.5 Public-repo discipline (binding until VISION.md §12 resolves)
+## 2.5 Public-repo discipline (binding)
 
-The repo is **not** open source today. The licensing decision is deferred
-(see `VISION.md` §12 Licensing Posture). Until then the operational rule:
+The open-source core (this `afair` repo) is **AGPLv3** (see `LICENSE` and
+`VISION.md` §12). The hosted control plane (`afair-web`: provisioning,
+billing, dashboard) is a **separate private repo** and never merges here.
+The operational rule stands:
 
-> **Build as if the repo goes public tomorrow.**
+> **Build as if the repo is public — because the core is.**
 
 Concretely:
 
@@ -362,13 +359,13 @@ Concretely:
   why it exists.
 - Commit messages reviewable by a stranger — conventional commits,
   imperative voice, no "fix the thing" subjects.
-- Transitive dependencies stay Apache2/MIT/BSD-compatible. Avoids
-  accidentally tainting the codebase with copyleft we cannot undo
-  if we later choose Apache2, or accidentally absorbing AGPL deps
-  if we later choose closed.
+- Transitive dependencies stay AGPL-compatible (Apache2/MIT/BSD). No
+  incompatible-copyleft deps that would conflict with the AGPLv3 release.
 
-This rule does NOT prejudge §16's licensing decision. It just ensures
-we can EXECUTE either decision in Phase 6 without rewrites or churn.
+Anything genuinely business-internal (funding strategy, competitor
+teardowns, marketing positioning, hosted-control-plane design) lives in
+gitignored local files or in the private `afair-web` repo — never in this
+one. See the `.gitignore` "Business-internal strategy docs" block.
 
 ## 3. Trust ladder (binding for all phases)
 
@@ -384,9 +381,9 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | File | Purpose | Update cadence |
 |---|---|---|
 | `VISION.md` | The constitution — vision, mission, invariants, architecture, competitive landscape, research grounding | Quarterly review; treat as zeitlos — no per-phase status updates |
-| `POSITIONING.md` | Sharpened messaging spine — one-liner, who-it's-for, pillars, competitive framing, landing-hero draft. The "say this, not that" reference for all afair-facing copy (English, no first-person, humanizer before publish). Sharpened post-GBrain | When the wedge shifts or a competitor forces a reframe |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation | When setup steps change |
+| `LICENSE` | AGPLv3 — the open-source core license (see VISION §12) | Only on a license change |
 | `.env.example` | Required env vars with comments | When env shape changes |
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
@@ -399,10 +396,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/retire_user.py` | Canonical per-user teardown (destroy app+volume+cert+CNAME, callback wipes escrow). Shared by grace cron + instant-delete | When the teardown contract changes |
 | `.github/workflows/retire.yml` | Dispatches retire_user.py (from afair-web grace cron + delete action) | When the retire inputs/secrets change |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
-| `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
-| `analysis/2026-05-27-funding-stance.md` | Bootstrap-default-VC-conditional funding decision + EU non-dilutive options + hard-reject criteria | Re-evaluate at ≥500 paying users or when a closing competitive window demands defense capital |
-| `analysis/2026-06-13-gbrain-competitive-analysis.md` | Deep-dive on GBrain (garrytan/gbrain) — strongest adjacent entrant. Honest overlap (it leads on memory-engine quality), afair's defensible wedge (product-form + EU + emergent ontology + durability), strategic do/don't. Summarized in VISION §9.1 | Point-in-time snapshot; refresh if GBrain productizes or at next competitive review |
-| `analysis/2026-06-13-feature-response-to-gbrain.md` | Curated BUILD/DEFER/WON'T against GBrain's capabilities. #1 = recall honesty layer ("what your memory doesn't know yet", I1-additive); explicit non-goals (auto-ingestion daemon, multi-tenant, imposed ontology, feature-race) | Update as the build queue ships |
+| `analysis/2026-06-03-recursive-self-improvement.md` | Design of the tuner / judge / rollback self-improvement loop (referenced from `afair/agents/tuner.py`) | When the loop design changes |
 | `analysis/2026-05-28-observability-strategy.md` | Three-layer plan to make the designed flow visible — pipeline_events table, expectation checker, enriched /health. Triggered by heizzeit stall + consolidator silence | Refresh as drops 1–7 ship |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention — redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in `docs/operations.md §12` | When the source logo changes |
