@@ -11,7 +11,7 @@ __pycache__
 htmlcov
 .env
 .env.local
-.env.secrets.backup
+*.backup
 .fly
 .vscode
 .idea

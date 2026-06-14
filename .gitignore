@@ -49,7 +49,7 @@ coverage.xml
 .env
 .env.local
 .env.*.local
-.env.secrets.backup
+*.backup
 *.pem
 *.key
 

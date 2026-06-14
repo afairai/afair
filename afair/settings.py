@@ -305,15 +305,15 @@ class Settings(BaseSettings):
 
         The key is one-shot per vault: once data has been written under
         a given key, that key is the only way to read it. Losing it
-        means losing the data. The .env.secrets.backup convention is
-        the canonical recovery path; see docs/operations.md.
+        means losing the data. Keep a copy somewhere safe and separate
+        from the server; see docs/self-hosting.md.
         """
         if self.environment == "fly" and self.vault_key is None:
             msg = (
                 "AFAIR_VAULT_KEY must be set when ENVIRONMENT=fly. "
                 "Generate one with: python -c "
                 "'import secrets; print(secrets.token_urlsafe(32))'. "
-                "Persist in Fly secret + .env.secrets.backup. "
+                "Set it as a deployment secret and keep a separate safe copy. "
                 "Losing it = losing the vault."
             )
             raise ValueError(msg)

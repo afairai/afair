@@ -31,7 +31,7 @@ The vault key MUST already be set as a Fly secret BEFORE running this
 script there: ``fly secrets set AFAIR_VAULT_KEY=$(python -c 'import
 secrets; print(secrets.token_urlsafe(32))') -a afair``. Once data is
 encrypted with a key, losing the key means losing the data — back up
-the key in ``.env.secrets.backup`` first.
+the key in ``a secure off-repo backup`` first.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ def main() -> int:
     if settings.vault_key is None:
         print("ERROR: AFAIR_VAULT_KEY is not set. Generate one with:")
         print("  python -c 'import secrets; print(secrets.token_urlsafe(32))'")
-        print("Then set it as a Fly secret AND in .env.secrets.backup.")
+        print("Then set it as a Fly secret AND in a secure off-repo backup.")
         return 2
 
     master_key = settings.vault_key.get_secret_value().encode("utf-8")
