@@ -22,12 +22,18 @@ if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
 
-ALLOWED_ORIGINS = frozenset(
-    {
-        "https://afair.ai",
-        "http://localhost:3000",  # local dev for afair-web
-    }
-)
+PROD_ALLOWED_ORIGINS = frozenset({"https://afair.ai"})
+# localhost is added ONLY off-prod — a production server must never reflect
+# CORS for http://localhost:3000, or any local process that binds that port
+# becomes a permitted reader of the master-bearer-protected responses.
+DEV_ALLOWED_ORIGINS = frozenset({"http://localhost:3000"})
+
+
+def _allowed_origins(request: Request) -> frozenset[str]:
+    settings = request.app.state.settings
+    if getattr(settings, "environment", None) == "fly":
+        return PROD_ALLOWED_ORIGINS
+    return PROD_ALLOWED_ORIGINS | DEV_ALLOWED_ORIGINS
 
 
 def cors_headers(request: Request) -> dict[str, str]:
@@ -37,9 +43,12 @@ def cors_headers(request: Request) -> dict[str, str]:
     non-browser clients (curl, the MCP transport) completely unaffected —
     they never send an ``Origin`` header that matches, and get a normal
     response with no CORS decoration.
+
+    The localhost dev origin is allow-listed only when ENVIRONMENT != "fly",
+    so production (mcp.afair.ai) reflects CORS for https://afair.ai alone.
     """
     origin = request.headers.get("origin", "")
-    if origin in ALLOWED_ORIGINS:
+    if origin in _allowed_origins(request):
         return {
             "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Credentials": "true",

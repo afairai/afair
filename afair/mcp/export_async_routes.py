@@ -93,7 +93,8 @@ async def export_request_endpoint(request: Request) -> Response:
     # the hash is persisted; a later status poll never re-surfaces it.
     return JSONResponse(
         {"job": _job_view(job), "started": True, "download_token": token},
-        headers=cors_headers(request),
+        # no-store: this body carries the plaintext capability token.
+        headers={**cors_headers(request), "Cache-Control": "no-store"},
     )
 
 

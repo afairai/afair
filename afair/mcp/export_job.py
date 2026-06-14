@@ -15,6 +15,7 @@ only when the user downloads it.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import urllib.request
@@ -53,31 +54,47 @@ def _artifact_path(vault_dir: Path, filename: str) -> Path:
 
 
 def generate_artifact(vault_dir: Path, job_id: str, *, include_blobs: bool) -> tuple[str, int]:
-    """Build the gzip'd + encrypted JSONL artifact. Returns (filename, size)."""
+    """Build the gzip'd + encrypted JSONL artifact. Returns (filename, size).
+
+    The JSONL is streamed straight into a gzip temp FILE (not a BytesIO), so
+    the uncompressed export never lives in RAM. Encryption is still one-pass
+    AES-GCM over the gzip'd bytes — for a blob-heavy vault that gzip can be
+    large, so a future scale fix is framed/streaming encryption; today the
+    peak is ~1x the gzip size, down from ~3x the previous BytesIO path.
+
+    On ANY failure every temp + the half-written final is unlinked, so a
+    crash mid-generate never leaks a stray file onto the (tight) volume.
+    """
     vault_dir = Path(vault_dir)
-    exports_dir(vault_dir).mkdir(parents=True, exist_ok=True)
-
-    # Stream the JSONL through gzip into memory. Phase-0 vaults are sub-GB
-    # and mostly text, so the gzip'd buffer is tens of MB — comfortably in
-    # RAM. (When vaults outgrow this, swap to a streaming gzip-to-temp-file
-    # writer; the on-disk + download shape stay identical.)
-    import io
-
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6, mtime=0) as gz:
-        for line in _iter_export(vault_dir, include_blobs=include_blobs):
-            gz.write(line.encode("utf-8"))
-    gzipped = buf.getvalue()
-
-    blob_key = _blob_key_or_none()
-    on_disk = encrypt_blob(gzipped, blob_key) if blob_key is not None else gzipped
+    out_dir = exports_dir(vault_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     filename = f"{job_id}.bin"
     path = _artifact_path(vault_dir, filename)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(on_disk)
-    tmp.replace(path)
-    return filename, len(gzipped)
+    gz_tmp = out_dir / f"{job_id}.gz.tmp"
+    bin_tmp = out_dir / f"{job_id}.bin.tmp"
+    try:
+        # 1. Stream JSONL → gzip directly to a temp file (no full RAM copy).
+        with gzip.open(gz_tmp, "wb", compresslevel=6) as gz:
+            for line in _iter_export(vault_dir, include_blobs=include_blobs):
+                gz.write(line.encode("utf-8"))
+        gz_size = gz_tmp.stat().st_size
+
+        # 2. Encrypt one-pass, freeing each buffer as soon as it's consumed.
+        blob_key = _blob_key_or_none()
+        gz_bytes = gz_tmp.read_bytes()
+        on_disk = encrypt_blob(gz_bytes, blob_key) if blob_key is not None else gz_bytes
+        del gz_bytes
+        bin_tmp.write_bytes(on_disk)
+        del on_disk
+        bin_tmp.replace(path)
+        return filename, gz_size
+    except BaseException:
+        bin_tmp.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        gz_tmp.unlink(missing_ok=True)
 
 
 def read_artifact(vault_dir: Path, filename: str) -> bytes:
@@ -109,8 +126,16 @@ def run_job(settings: Settings, job_id: str, *, include_blobs: bool, download_to
     conn = open_db(vault_dir)
     try:
         filename, size = generate_artifact(vault_dir, job_id, include_blobs=include_blobs)
-        export_jobs.mark_ready(conn, job_id, artifact_filename=filename, size_bytes=size)
-        job = export_jobs.latest_job(conn)
+        touched = export_jobs.mark_ready(conn, job_id, artifact_filename=filename, size_bytes=size)
+        if touched == 0:
+            # Lost race: the job was already failed/expired (e.g. the stuck-
+            # pending watchdog flipped it). The artifact we just wrote is an
+            # orphan — unlink it and do NOT email a link for a dead job.
+            log.warning("export.job.lost_race", job_id=job_id)
+            with contextlib.suppress(OSError, ValueError):
+                _artifact_path(vault_dir, filename).unlink(missing_ok=True)
+            return
+        job = export_jobs.job_by_id(conn, job_id)
         log.info("export.job.ready", job_id=job_id, size_bytes=size)
         _notify_export_ready(settings, download_token=download_token, job=job)
     except Exception as exc:
@@ -193,18 +218,68 @@ def start_purge_loop(settings: Settings, *, interval_seconds: int = 3600) -> Non
 
 
 def purge_expired(vault_dir: Path, conn: sqlite3.Connection) -> int:
-    """Delete artifacts whose link has expired; flip the rows to 'expired'.
-    Returns the number purged. Safe to call repeatedly."""
+    """Delete expired artifacts, fail stuck-pending jobs, and reconcile orphan
+    files on disk. Returns the number of artifacts removed. Safe to re-run."""
     vault_dir = Path(vault_dir)
     purged = 0
+
+    # 1. Expired ready artifacts → unlink + mark expired.
     for job in export_jobs.expired_ready_jobs(conn):
         if job.artifact_filename:
-            try:
-                _artifact_path(vault_dir, job.artifact_filename).unlink(missing_ok=True)
-            except (OSError, ValueError) as exc:
-                log.warning("export.purge.unlink_failed", job_id=job.id, error=str(exc))
+            _safe_unlink(vault_dir, job.artifact_filename)
         export_jobs.mark_expired(conn, job.id)
         purged += 1
+
+    # 2. Stuck-pending jobs (worker crashed/OOM before mark_*) → failed, so a
+    #    new request isn't blocked and the dashboard stops spinning.
+    for job in export_jobs.stale_pending_jobs(conn):
+        export_jobs.fail_if_pending(conn, job.id, error="timed out (worker presumed dead)")
+        log.warning("export.purge.failed_stale_pending", job_id=job.id)
+
+    # 3. Orphan files: a *.bin whose job is gone/not-ready (lost-race leftover),
+    #    or a stale *.tmp from a crashed generate. Belt-and-suspenders against
+    #    a full plaintext-equivalent dump lingering on the volume.
+    purged += _reconcile_orphans(vault_dir, conn)
+
     if purged:
         log.info("export.purge.done", purged=purged)
     return purged
+
+
+def _safe_unlink(vault_dir: Path, filename: str) -> None:
+    try:
+        _artifact_path(vault_dir, filename).unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        log.warning("export.purge.unlink_failed", filename=filename, error=str(exc))
+
+
+def _reconcile_orphans(vault_dir: Path, conn: sqlite3.Connection) -> int:
+    """Unlink export files with no live 'ready' row behind them."""
+    import time
+
+    out_dir = exports_dir(vault_dir)
+    if not out_dir.is_dir():
+        return 0
+    removed = 0
+    now = time.time()
+    for entry in out_dir.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name.endswith(".bin"):
+            job = export_jobs.job_by_id(conn, name[: -len(".bin")])
+            if job is None or job.status != "ready":
+                _safe_unlink(vault_dir, name)
+                removed += 1
+        elif name.endswith(".tmp"):
+            # Leftover from a crashed generate. Only remove if it's not from an
+            # in-flight job (older than the dead-ceiling) to avoid racing a
+            # live generate writing right now.
+            try:
+                age_min = (now - entry.stat().st_mtime) / 60
+            except OSError:
+                continue
+            if age_min > export_jobs.PENDING_DEAD_AFTER_MINUTES:
+                entry.unlink(missing_ok=True)
+                removed += 1
+    return removed

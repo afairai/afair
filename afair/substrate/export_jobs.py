@@ -30,6 +30,12 @@ from datetime import UTC, datetime, timedelta
 DEFAULT_RETENTION_HOURS = 72
 """How long a ready artifact + its download link live before auto-purge."""
 
+PENDING_DEAD_AFTER_MINUTES = 30
+"""A job still 'pending' after this long is presumed dead (the worker was
+OOM-killed / crashed before it could mark_failed). The purge sweep flips it
+to 'failed', and has_active_pending ignores it so a new request isn't blocked
+forever by a stuck row."""
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -106,8 +112,11 @@ def create_job(
 
 def mark_ready(
     conn: sqlite3.Connection, job_id: str, *, artifact_filename: str, size_bytes: int
-) -> None:
-    conn.execute(
+) -> int:
+    """Flip a pending job to ready. Returns rows touched (0 = the job was no
+    longer pending — a lost race; the caller must clean up the artifact it
+    just wrote and NOT notify, or the user gets a dead link)."""
+    cur = conn.execute(
         """
         UPDATE export_jobs
         SET status = 'ready', artifact_filename = ?, size_bytes = ?, ready_at = ?
@@ -116,14 +125,16 @@ def mark_ready(
         (artifact_filename, size_bytes, _iso(_now()), job_id),
     )
     conn.commit()
+    return cur.rowcount
 
 
-def mark_failed(conn: sqlite3.Connection, job_id: str, *, error: str) -> None:
-    conn.execute(
+def mark_failed(conn: sqlite3.Connection, job_id: str, *, error: str) -> int:
+    cur = conn.execute(
         "UPDATE export_jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'pending'",
         (error[:2000], job_id),
     )
     conn.commit()
+    return cur.rowcount
 
 
 def mark_downloaded(conn: sqlite3.Connection, job_id: str) -> None:
@@ -146,6 +157,14 @@ def latest_job(conn: sqlite3.Connection) -> ExportJob | None:
     return ExportJob.from_row(row) if row else None
 
 
+def job_by_id(conn: sqlite3.Connection, job_id: str) -> ExportJob | None:
+    """Fetch a specific job — the runner reports on ITS job, not 'latest'
+    (which is the wrong key when two requests race)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM export_jobs WHERE id = ? LIMIT 1", (job_id,)).fetchone()
+    return ExportJob.from_row(row) if row else None
+
+
 def job_by_token_hash(conn: sqlite3.Connection, token_hash: str) -> ExportJob | None:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -156,13 +175,37 @@ def job_by_token_hash(conn: sqlite3.Connection, token_hash: str) -> ExportJob | 
 
 
 def has_active_pending(conn: sqlite3.Connection) -> ExportJob | None:
-    """Return a still-pending job if one exists, so a double-click doesn't
-    spawn two generations."""
+    """Return a FRESH still-pending job if one exists, so a double-click
+    doesn't spawn two generations. A job pending longer than
+    PENDING_DEAD_AFTER_MINUTES is presumed dead (worker crashed/OOM) and does
+    NOT block — otherwise one stuck row bricks the feature forever."""
     conn.row_factory = sqlite3.Row
+    cutoff = _iso(_now() - timedelta(minutes=PENDING_DEAD_AFTER_MINUTES))
     row = conn.execute(
-        "SELECT * FROM export_jobs WHERE status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+        "SELECT * FROM export_jobs WHERE status = 'pending' AND requested_at >= ? "
+        "ORDER BY requested_at DESC LIMIT 1",
+        (cutoff,),
     ).fetchone()
     return ExportJob.from_row(row) if row else None
+
+
+def stale_pending_jobs(conn: sqlite3.Connection) -> list[ExportJob]:
+    """Pending jobs older than the dead-ceiling — the purge sweep fails them."""
+    conn.row_factory = sqlite3.Row
+    cutoff = _iso(_now() - timedelta(minutes=PENDING_DEAD_AFTER_MINUTES))
+    rows = conn.execute(
+        "SELECT * FROM export_jobs WHERE status = 'pending' AND requested_at < ?",
+        (cutoff,),
+    ).fetchall()
+    return [ExportJob.from_row(r) for r in rows]
+
+
+def fail_if_pending(conn: sqlite3.Connection, job_id: str, *, error: str) -> None:
+    conn.execute(
+        "UPDATE export_jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'pending'",
+        (error[:2000], job_id),
+    )
+    conn.commit()
 
 
 def expired_ready_jobs(conn: sqlite3.Connection) -> list[ExportJob]:
