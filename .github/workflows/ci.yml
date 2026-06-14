@@ -1,10 +1,9 @@
 name: CI
 
-# Product CI for afair: lint, types, tests. No deploy, no secrets, no Fly
-# tokens. The operator's fleet is deployed from the private afair-web repo
-# (deploy-afair-fleet.yml), which checks out a pinned ref of this repo. That
-# keeps the open-source product repo free of any path that touches the
-# operator's infrastructure — a fork's PR runs exactly this and nothing more.
+# Product CI for afair: lint, types, tests across supported Python versions,
+# lockfile integrity, and a Docker build. No deploy, no secrets, no Fly tokens
+# — the operator fleet is deployed from the private afair-web repo. A fork's PR
+# runs exactly this.
 
 on:
   push:
@@ -13,33 +12,43 @@ on:
 
 jobs:
   test:
+    name: test (py${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
-      - name: Set up Python
-        run: uv python install 3.12
+      - run: uv python install ${{ matrix.python }}
 
+      # --locked asserts uv.lock is in sync with pyproject.toml (no drift).
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked --python ${{ matrix.python }}
 
       - name: Lint
         run: uv run ruff check
-
       - name: Format check
         run: uv run ruff format --check
-
       - name: Type check
         run: uv run mypy afair
+      - name: Tests + coverage
+        run: uv run pytest -q --cov=afair --cov-report=term-missing
 
-      - name: Tests
-        run: uv run pytest -q
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # The fleet deploy builds this image; a PR that breaks the Dockerfile
+      # should go red here, before a deploy, not during one.
+      - name: Build image (no push)
+        run: docker build -t afair:ci .
