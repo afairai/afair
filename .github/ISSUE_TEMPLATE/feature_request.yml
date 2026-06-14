@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing, skim VISION.md §4 (the invariants) and §11
+        (anti-patterns). afair deliberately does not do some things, and a
+        proposal that fits the constitution is far easier to land.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that afair makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should afair do? If it touches the MCP surface, remember it must be additive (I1).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Constitution check
+      options:
+        - label: This does not break a shipped MCP signature (I1) or require editing past data (I2/I3).
+          required: true
