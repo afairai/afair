@@ -196,6 +196,18 @@ all live and in daily real-world use.
 
 ### 0.2 What's in flight
 
+- **Async vault export — shipped 2026-06-14.** A full export runs as a
+  background job on the per-user machine (slow/blob-heavy vaults shouldn't
+  block a browser stream): `POST /internal/export/request` spawns it and
+  returns a one-time capability token; `GET /internal/export/status` is the
+  dashboard poll; `GET /internal/export/download?token=…` streams the
+  gzip'd + AES-GCM-encrypted JSONL artifact. On ready, the machine calls
+  afair-web `/api/internal/export-ready` (EXPORT_READY_CALLBACK_SECRET) →
+  emails the link. Artifacts auto-purge after a 72h TTL (hourly sweep +
+  on-access expiry). Mutable `export_jobs` table; shared `mcp/cors.py`
+  extracted so export + token routes share one CORS allow-list. Dashboard
+  `ExportVault` component (paste master → prepare → poll → download). 14
+  new tests, full suite green. Secrets wired live.
 - **Retire flow + dashboards — code-complete, awaiting go-live secrets
   (2026-06-14).** Built the symmetric teardown counterpart to
   `provision_user.py`: `scripts/retire_user.py` is the SINGLE canonical

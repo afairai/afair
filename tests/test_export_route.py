@@ -106,9 +106,7 @@ def test_export_cors_absent_for_unknown_origin(vault_dir) -> None:
 def test_export_preflight_options(vault_dir) -> None:
     """OPTIONS preflight from the dashboard origin returns the CORS grant."""
     app = _build_app(vault_dir)
-    app.router.routes.append(
-        Route("/internal/export", preflight_endpoint, methods=["OPTIONS"])
-    )
+    app.router.routes.append(Route("/internal/export", preflight_endpoint, methods=["OPTIONS"]))
     client = TestClient(app)
     r = client.options("/internal/export", headers={"Origin": "https://afair.ai"})
     assert r.status_code == 200
