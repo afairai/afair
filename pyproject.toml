@@ -37,7 +37,7 @@ dependencies = [
     "httpx-oauth>=0.15.0",
     # JWT signing/verification for the OAuth resource server (we issue +
     # verify HS256 tokens; PKCE/DCR are implemented directly, not via Authlib)
-    "pyjwt[crypto]>=2.10.0",
+    "pyjwt[crypto]>=2.13.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
     "litellm>=1.52.0",
     # Local ONNX embeddings — opt-in vendor for the embedding hot path.
