@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import sqlite3
 
 DEFAULT_RETENTION_HOURS = 72
 """How long a ready artifact + its download link live before auto-purge."""
@@ -150,7 +153,6 @@ def mark_downloaded(conn: sqlite3.Connection, job_id: str) -> None:
 
 def latest_job(conn: sqlite3.Connection) -> ExportJob | None:
     """The most recently requested job — what the dashboard status reflects."""
-    conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM export_jobs ORDER BY requested_at DESC LIMIT 1",
     ).fetchone()
@@ -160,13 +162,11 @@ def latest_job(conn: sqlite3.Connection) -> ExportJob | None:
 def job_by_id(conn: sqlite3.Connection, job_id: str) -> ExportJob | None:
     """Fetch a specific job — the runner reports on ITS job, not 'latest'
     (which is the wrong key when two requests race)."""
-    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM export_jobs WHERE id = ? LIMIT 1", (job_id,)).fetchone()
     return ExportJob.from_row(row) if row else None
 
 
 def job_by_token_hash(conn: sqlite3.Connection, token_hash: str) -> ExportJob | None:
-    conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM export_jobs WHERE download_token_hash = ? LIMIT 1",
         (token_hash,),
@@ -179,7 +179,6 @@ def has_active_pending(conn: sqlite3.Connection) -> ExportJob | None:
     doesn't spawn two generations. A job pending longer than
     PENDING_DEAD_AFTER_MINUTES is presumed dead (worker crashed/OOM) and does
     NOT block — otherwise one stuck row bricks the feature forever."""
-    conn.row_factory = sqlite3.Row
     cutoff = _iso(_now() - timedelta(minutes=PENDING_DEAD_AFTER_MINUTES))
     row = conn.execute(
         "SELECT * FROM export_jobs WHERE status = 'pending' AND requested_at >= ? "
@@ -191,7 +190,6 @@ def has_active_pending(conn: sqlite3.Connection) -> ExportJob | None:
 
 def stale_pending_jobs(conn: sqlite3.Connection) -> list[ExportJob]:
     """Pending jobs older than the dead-ceiling — the purge sweep fails them."""
-    conn.row_factory = sqlite3.Row
     cutoff = _iso(_now() - timedelta(minutes=PENDING_DEAD_AFTER_MINUTES))
     rows = conn.execute(
         "SELECT * FROM export_jobs WHERE status = 'pending' AND requested_at < ?",
@@ -210,7 +208,6 @@ def fail_if_pending(conn: sqlite3.Connection, job_id: str, *, error: str) -> Non
 
 def expired_ready_jobs(conn: sqlite3.Connection) -> list[ExportJob]:
     """Ready jobs whose link has expired — their artifacts must be purged."""
-    conn.row_factory = sqlite3.Row
     now = _iso(_now())
     rows = conn.execute(
         "SELECT * FROM export_jobs WHERE status = 'ready' AND expires_at < ?",
