@@ -221,6 +221,7 @@ class UserSecrets:
     auth_token: str
     jwt_secret: str
     signup_token: str
+    vault_key: str  # SQLCipher master key; the app will not boot without it.
 
     @classmethod
     def fresh(cls) -> UserSecrets:
@@ -228,7 +229,30 @@ class UserSecrets:
             auth_token=mint_token(),
             jwt_secret=mint_token(),
             signup_token=mint_token(),
+            vault_key=mint_token(),
         )
+
+
+# Shared secrets every per-user app needs to actually FUNCTION (LLM
+# extraction, embeddings, the identity hub, error tracking). Carried
+# verbatim from the provisioning environment — NOT minted per user. The
+# per-user auth/jwt/vault secrets above ARE minted fresh; these are the
+# operator-wide ones. EMBEDDING_MODEL/DIM matter: a fresh vault's vec table
+# is created at the configured dim, so it must match what recall queries
+# with (fastembed/BAAI/bge-small-en-v1.5, 384) across the fleet.
+SHARED_PROVISION_SECRETS: tuple[str, ...] = (
+    "IDENTITY_HUB_SECRET",
+    "IDENTITY_HUB_URL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "SENTRY_DSN",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIM",
+)
+REQUIRED_SHARED_PROVISION_SECRETS: frozenset[str] = frozenset(
+    {"IDENTITY_HUB_SECRET", "EMBEDDING_MODEL", "EMBEDDING_DIM"}
+)
 
 
 # ── Fly CLI shims ──────────────────────────────────────────────────────────
@@ -437,6 +461,12 @@ AFAIR_SIGNUP_TOKEN_{app.upper().replace("-", "_")}={s.signup_token}
 # created: {today}, expires: no expiry
 # rotate: same as above; afair-web also needs the new value if it
 #         posts signups to this user's app
+
+AFAIR_VAULT_KEY_{app.upper().replace("-", "_")}={s.vault_key}
+# placed: Fly secret on {app}. SQLCipher master key — the vault is
+#         UNRECOVERABLE without it. Back this up; never rotate casually
+#         (re-keying requires full vault re-encryption).
+# created: {today}, expires: no expiry
 """
     with ENV_SECRETS_BACKUP.open("a", encoding="utf-8") as fh:
         fh.write(block)
@@ -711,6 +741,41 @@ def migrate(
     return app, vanity
 
 
+def notify_provisioned(*, identity: str, app: str, vanity: str) -> bool:
+    """Tell afair-web the machine is up so it fills fly_app/vanity_host and
+    the /welcome poll flips from in_flight to complete.
+
+    Shared-bearer authed (PROVISION_CALLBACK_SECRET). Best-effort: the
+    machine already exists, so a failed callback is logged, not fatal — the
+    admin can re-fire or the next poll's webhook_late path covers it.
+    """
+    import os
+    import urllib.request
+
+    url = os.environ.get("PROVISION_CALLBACK_URL", "https://afair.ai/api/internal/provisioned")
+    secret = os.environ.get("PROVISION_CALLBACK_SECRET")
+    if not secret:
+        print("notify_provisioned: PROVISION_CALLBACK_SECRET not set — skipping callback")
+        return False
+    body = json.dumps({"clerk_user_id": identity, "fly_app": app, "vanity_host": vanity}).encode(
+        "utf-8"
+    )
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            ok = 200 <= resp.status < 300
+            print(f"notify_provisioned: {url} -> HTTP {resp.status}")
+            return ok
+    except Exception as exc:
+        print(f"notify_provisioned: callback failed: {exc}")
+        return False
+
+
 def provision(
     *,
     identity: str,
@@ -755,8 +820,11 @@ def provision(
 
     s = UserSecrets.fresh()
     secrets_map: dict[str, str] = {
+        # Per-user, minted fresh. The vault key is the SQLCipher master:
+        # without it the app does not boot (settings enforces a min length).
         "AFAIR_AUTH_TOKEN": s.auth_token,
         "AFAIR_JWT_SECRET": s.jwt_secret,
+        "AFAIR_VAULT_KEY": s.vault_key,
         # OAUTH_ISSUER points at the VANITY URL — JWTs carry the
         # branded iss claim, well-known metadata advertises the
         # branded URL. The fly.dev fallback still resolves to the
@@ -773,21 +841,21 @@ def provision(
     if enable_signup_token:
         secrets_map["AFAIR_SIGNUP_TOKEN"] = s.signup_token
 
-    # Identity-hub secret is shared across all per-user MCP servers —
-    # they verify identity-tokens minted by afair-web's hub against
-    # this secret, and the hub uses the same value to sign. The
-    # operator must export this in the shell before running this
-    # script. GitHub OAuth client_id/secret are not used any more —
-    # Clerk owns the actual authentication step.
-    for shared_key in ("IDENTITY_HUB_SECRET",):
+    # Operator-wide shared secrets the app needs to actually function (LLM
+    # extraction, embeddings, identity hub, Sentry). Carried verbatim from
+    # the provisioning environment. Without these a provisioned app boots
+    # but extraction/recall/auth are broken — which is exactly the gap that
+    # made early per-user provisioning ship half-configured machines.
+    for shared_key in SHARED_PROVISION_SECRETS:
         v = os.environ.get(shared_key)
-        if not v:
+        if v:
+            secrets_map[shared_key] = v
+        elif shared_key in REQUIRED_SHARED_PROVISION_SECRETS and not dry:
             print(
-                f"ERROR: env var {shared_key} must be set before running",
+                f"ERROR: required shared secret {shared_key} must be set before running",
                 file=sys.stderr,
             )
             sys.exit(2)
-        secrets_map[shared_key] = v
 
     # 1. Fly app + volume + secrets + deploy.
     fly_create_app(app, dry=dry)
@@ -861,6 +929,13 @@ def main() -> None:
         help="Image ref to deploy to the migrated app. Defaults to the exact "
         "image the source app currently runs (derived by digest).",
     )
+    ap.add_argument(
+        "--email",
+        default=None,
+        help="User email. When set (the automated checkout flow), the freshly "
+        "minted bearer is delivered by onboarding email and the afair-web "
+        "callback is fired; the token is NOT printed to stdout/CI logs.",
+    )
     args = ap.parse_args()
 
     if args.migrate_from:
@@ -897,20 +972,28 @@ def main() -> None:
     print("                  available ~5 min after DNS propagates +")
     print("                  Fly Let's-Encrypt cert is ready)")
     print(f"  Fallback URL:   https://{app}.fly.dev               (works immediately)")
-    print()
     print(f"  MCP endpoint:   https://{vanity}/mcp")
-    print(f"  Health probe:   https://{vanity}/health")
-    print(f"  OAuth metadata: https://{vanity}/.well-known/oauth-authorization-server")
     print()
-    print("  Tokens (also persisted in .env.secrets.backup):")
-    print(f"    AFAIR_AUTH_TOKEN   = {s.auth_token}")
-    print(f"    AFAIR_JWT_SECRET   = {s.jwt_secret}")
-    print(f"    AFAIR_SIGNUP_TOKEN = {s.signup_token}")
-    print()
-    print("  Next steps:")
-    print(f"    1. Smoke (fallback URL works now): curl https://{app}.fly.dev/health")
-    print(f"    2. Send onboarding email to user '{args.identity}'")
-    print(f"    3. Confirm vanity URL is up: curl https://{vanity}/health (~5 min)")
+
+    if args.email and not args.dry_run:
+        # Automated flow: the bearer reaches the user by email only, never
+        # stdout / CI logs. Then tell afair-web so /welcome flips to ready.
+        from onboarding_email import send_onboarding_email
+
+        sent = send_onboarding_email(email=args.email, vanity_host=vanity, auth_token=s.auth_token)
+        print(f"  Onboarding email: {'sent' if sent else 'FAILED (see log)'} -> {args.email}")
+        notified = notify_provisioned(identity=args.identity, app=app, vanity=vanity)
+        print(f"  afair-web callback: {'ok' if notified else 'FAILED (fly_app not recorded)'}")
+    else:
+        print("  Tokens (also persisted in .env.secrets.backup):")
+        print(f"    AFAIR_AUTH_TOKEN   = {s.auth_token}")
+        print(f"    AFAIR_JWT_SECRET   = {s.jwt_secret}")
+        print(f"    AFAIR_SIGNUP_TOKEN = {s.signup_token}")
+        print()
+        print("  Next steps:")
+        print(f"    1. Smoke (fallback URL works now): curl https://{app}.fly.dev/health")
+        print("    2. Send onboarding email (or re-run with --email <addr>)")
+        print(f"    3. Confirm vanity URL is up: curl https://{vanity}/health (~5 min)")
 
 
 if __name__ == "__main__":
