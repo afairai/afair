@@ -286,3 +286,26 @@ def test_revoke_and_register_buckets_are_separate(tmp_path: Path) -> None:
             ).status_code
             == 201
         )
+
+
+def test_redirect_uri_registered_loopback_port_agnostic() -> None:
+    """RFC 8252 §7.3: a registered loopback redirect matches any port (native
+    clients use an ephemeral port that differs between register + authorize).
+    Non-loopback redirects stay strict exact-match."""
+    from afair.mcp.oauth.routes import _redirect_uri_registered as m
+
+    reg = ["http://localhost:51160/callback"]
+    # Exact match.
+    assert m("http://localhost:51160/callback", reg) is True
+    # Different port on the same loopback host + path → accepted.
+    assert m("http://localhost:49222/callback", reg) is True
+    # Different loopback host (127.0.0.1), same path → accepted.
+    assert m("http://127.0.0.1:8080/callback", reg) is True
+    # Different path → rejected.
+    assert m("http://localhost:51160/other", reg) is False
+    # Non-loopback presented → strict (must be exact in the list).
+    assert m("https://evil.example/callback", reg) is False
+    # Non-loopback registered (web client) stays exact — different port fails.
+    web = ["https://claude.ai/api/mcp/auth_callback"]
+    assert m("https://claude.ai/api/mcp/auth_callback", web) is True
+    assert m("https://claude.ai:8443/api/mcp/auth_callback", web) is False
