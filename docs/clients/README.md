@@ -4,7 +4,7 @@ Connect any MCP-speaking AI client to the deployed afair server.
 
 **Server endpoint:** `https://mcp.afair.ai/mcp`
 **Auth:** `Authorization: Bearer <AFAIR_AUTH_TOKEN>` on every request
-**Health:** `https://afair.fly.dev/health` (no auth required)
+**Health:** `https://mcp.afair.ai/health` (no auth required)
 
 ## The easy path: one command
 
