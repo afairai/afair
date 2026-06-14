@@ -32,13 +32,8 @@ jobs:
     timeout-minutes: 5
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      VAULT_VOLUME_ID: vol_4qloyddzwwzzwlgr  # mcp.afair.ai — see ops §7
-      VAULT_APP: afair
-      # NOTE: the live vault moved to afair-solis-e03 (vol_rkg63jm29n2jymk4).
-      # Retargeting this job is blocked on the FLY_API_TOKEN being scoped to
-      # app 'afair' only — it cannot snapshot the new app's volume. The new
-      # vault is covered by Fly's daily auto-snapshots (retention 5) until the
-      # CI/token model is sorted (afair retire decision, model A vs B).
+      VAULT_VOLUME_ID: vol_rkg63jm29n2jymk4  # solis-e03.mcp.afair.ai (live vault) — see ops §7
+      VAULT_APP: afair-solis-e03
     steps:
       - name: Install flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master

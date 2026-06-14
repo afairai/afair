@@ -1,8 +1,13 @@
 name: Deploy to Fly
 
 # Branch-based environments:
-#   push to `main` → afair (prod)        — uses FLY_API_TOKEN
-#   push to `dev`  → afair-dev (staging) — uses FLY_API_TOKEN_DEV
+#   push to `main` → afair-solis-e03 (the operator's per-user prod vault) — uses FLY_API_TOKEN
+#   push to `dev`  → afair-dev (staging)                                  — uses FLY_API_TOKEN_DEV
+#
+# NB: the operator's vault is a normal per-user app (afair-<name>-<suffix>),
+# the same shape every user gets. For Phase 0 (one user) CI deploys straight
+# to it; when the fleet grows this step evolves to build-once + roll the image
+# to every per-user app listed in the afair-web users table.
 # Both branches share the same workflow file; the matrix below selects
 # config + token + URL per branch. Concurrency groups per env keep
 # in-flight deploys from racing themselves.
@@ -38,7 +43,7 @@ jobs:
       # GitHub Environments are gated by branch protection rules + can
       # carry env-scoped secrets. We use two: `prod` and `dev`.
       name: ${{ (github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev') && 'dev' || 'prod' }}
-      url: ${{ (github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev') && 'https://afair-dev.fly.dev' || 'https://afair.fly.dev' }}
+      url: ${{ (github.ref == 'refs/heads/dev' || github.event.inputs.target == 'dev') && 'https://afair-dev.fly.dev' || 'https://afair-solis-e03.fly.dev' }}
 
     steps:
       - name: Checkout
@@ -86,9 +91,9 @@ jobs:
             CFG=fly.dev.toml
             URL=https://afair-dev.fly.dev
           else
-            APP=afair
+            APP=afair-solis-e03
             CFG=fly.toml
-            URL=https://afair.fly.dev
+            URL=https://afair-solis-e03.fly.dev
           fi
           echo "Deploying to $APP using $CFG"
           flyctl deploy \
@@ -103,7 +108,7 @@ jobs:
           if [ "$IS_DEV" = "true" ]; then
             URL=https://afair-dev.fly.dev
           else
-            URL=https://afair.fly.dev
+            URL=https://afair-solis-e03.fly.dev
           fi
           for i in 1 2 3 4 5; do
             status=$(curl -s -o /dev/null -w "%{http_code}" "$URL/health" || echo "000")

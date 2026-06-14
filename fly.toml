@@ -2,7 +2,7 @@
 # This file describes the user's own dedicated machine. When renaming the
 # codename: update `app` here, then `fly apps create <new>` + `fly deploy`.
 
-app = "afair"
+app = "afair-solis-e03"  # the operator's per-user vault; CI overrides --app per target
 primary_region = "fra"  # EU residency by default; change deliberately if needed.
 
 [build]
