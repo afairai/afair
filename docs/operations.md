@@ -67,9 +67,12 @@ The fleet workflow checks out this repo at the chosen ref, runs the gates +
 ### Manual fallback (direct flyctl)
 
 If you need to deploy by hand (afair-web Actions unavailable, or a non-main
-ref), from a checkout of this repo:
+ref): the operator fly config lives in **afair-web** (`fleet/fly.toml`,
+`fleet/fly.dev.toml`), not in this repo. From a checkout of this repo, copy it
+in and deploy:
 
 ```bash
+cp /path/to/afair-web/fleet/fly.toml ./fly.toml
 flyctl deploy --app afair-solis-e03 --config fly.toml --remote-only --wait-timeout 5m
 ```
 
