@@ -12,9 +12,7 @@ agent token cannot mint more):
 
 from __future__ import annotations
 
-import hmac
 import json
-import re
 from typing import TYPE_CHECKING
 
 import structlog
@@ -28,13 +26,17 @@ from . import api_tokens as _toks
 # the OPTIONS preflight straight from .cors.)
 from .cors import cors_headers as _cors_headers
 
+# Either the static master bearer OR a dashboard session JWT authorises
+# token management — see internal_auth. Lets the logged-in dashboard manage
+# tokens without the user pasting their onboarding bearer.
+from .internal_auth import authorize_internal
+
 if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
 
 log = structlog.get_logger(__name__)
 
-_BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 _MAX_LABEL = 80
 
 
@@ -47,25 +49,6 @@ def _unauthorized(request: Request) -> Response:
             **_cors_headers(request),
         },
     )
-
-
-def _check_master(request: Request) -> bool:
-    """Only the static AFAIR_AUTH_TOKEN may manage other tokens.
-
-    Sub-tokens (the ones this endpoint mints) cannot self-elevate by
-    minting more tokens, even though they pass the main MCP bearer
-    middleware. Constant-time compare.
-    """
-    settings = request.app.state.settings
-    expected = settings.auth_token
-    if expected is None:
-        return False
-    expected_value = expected.get_secret_value()
-    header = request.headers.get("authorization", "")
-    m = _BEARER_RE.match(header)
-    if m is None:
-        return False
-    return hmac.compare_digest(m.group(1).strip(), expected_value)
 
 
 def _conn(request: Request):  # type: ignore[no-untyped-def]
@@ -83,7 +66,7 @@ def _conn(request: Request):  # type: ignore[no-untyped-def]
 
 
 async def list_endpoint(request: Request) -> Response:
-    if not _check_master(request):
+    if not authorize_internal(request):
         return _unauthorized(request)
     tokens = _toks.list_all(_conn(request))
     return JSONResponse(
@@ -105,7 +88,7 @@ async def list_endpoint(request: Request) -> Response:
 
 
 async def mint_endpoint(request: Request) -> Response:
-    if not _check_master(request):
+    if not authorize_internal(request):
         return _unauthorized(request)
     try:
         body = await request.json()
@@ -154,7 +137,7 @@ async def mint_endpoint(request: Request) -> Response:
 
 
 async def revoke_endpoint(request: Request) -> Response:
-    if not _check_master(request):
+    if not authorize_internal(request):
         return _unauthorized(request)
     token_id = request.path_params.get("token_id", "")
     if not token_id or not token_id.startswith("tok_"):
