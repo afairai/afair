@@ -66,9 +66,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import secrets
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -263,8 +265,12 @@ def fly_app_exists(app: str) -> bool:
     return f'"{app}"' in out
 
 
-def fly_create_app(app: str, *, dry: bool) -> None:
-    _run_fly(["apps", "create", app, "--name", app], dry=dry)
+DEFAULT_ORG = "personal"
+
+
+def fly_create_app(app: str, *, dry: bool, org: str = DEFAULT_ORG) -> None:
+    # --org is required when flyctl runs non-interactively (no TTY to prompt).
+    _run_fly(["apps", "create", app, "--name", app, "--org", org], dry=dry)
 
 
 def fly_create_volume(app: str, *, region: str, size_gb: int, dry: bool) -> None:
@@ -287,13 +293,20 @@ def fly_create_volume(app: str, *, region: str, size_gb: int, dry: bool) -> None
 
 def fly_set_secrets(app: str, secrets_map: dict[str, str], *, dry: bool) -> None:
     """Set all secrets in one ``fly secrets set`` call so the app
-    restarts ONCE not N times. Values stay out of shell history
-    because flyctl reads them from argv directly — same posture as
-    the manual workflow we're automating."""
-    args = ["secrets", "set", "-a", app, "--stage"]
+    restarts ONCE not N times.
+
+    Prints only the secret KEYS, never the values: the values are
+    passed to flyctl via argv but must not leak into stdout / shell
+    history / CI logs. (flyctl itself does not echo them.)
+    """
+    keys = ", ".join(sorted(secrets_map))
+    print(f"  $ flyctl secrets set -a {app} --stage  [{len(secrets_map)} secrets: {keys}]")
+    if dry:
+        return
+    args = ["flyctl", "secrets", "set", "-a", app, "--stage"]
     for key, value in secrets_map.items():
         args.append(f"{key}={value}")
-    _run_fly(args, dry=dry)
+    subprocess.run(args, check=True, capture_output=True, text=True)
 
 
 def fly_deploy_image(app: str, *, image: str, dry: bool) -> None:
@@ -432,6 +445,272 @@ AFAIR_SIGNUP_TOKEN_{app.upper().replace("-", "_")}={s.signup_token}
 # ── orchestration ─────────────────────────────────────────────────────────
 
 
+# ── migration: clone an existing vault onto a properly-named per-user app ───
+
+# Secrets carried verbatim from the source app to the migrated app. The two
+# host/identity-specific ones (OAUTH_ISSUER, IDENTITY_ALLOWLIST) are NOT in
+# this list — they are recomputed for the new vanity host + identity. Values
+# are read from the operator's environment (source .env.secrets.backup plus
+# the recovered core secrets) so they never live in this file, and flyctl
+# reads them from argv exactly like the manual workflow.
+CARRY_SECRET_KEYS: tuple[str, ...] = (
+    "AFAIR_VAULT_KEY",  # SQLCipher master key — MUST match the cloned volume
+    "AFAIR_AUTH_TOKEN",  # static bearer — kept so CLI clients keep working
+    "AFAIR_JWT_SECRET",
+    "IDENTITY_HUB_SECRET",
+    "IDENTITY_HUB_URL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "SENTRY_DSN",
+    "AFAIR_SIGNUP_TOKEN",
+    "AFAIR_EXPORT_TOKEN",
+    "GITHUB_OAUTH_CLIENT_ID",
+    "GITHUB_OAUTH_CLIENT_SECRET",
+)
+
+# Carry-secrets without which the migrated app cannot work at all.
+REQUIRED_CARRY_KEYS: frozenset[str] = frozenset(
+    {"AFAIR_VAULT_KEY", "AFAIR_AUTH_TOKEN", "AFAIR_JWT_SECRET", "IDENTITY_HUB_SECRET"}
+)
+
+
+def fly_source_volume_id(app: str, *, volume_name: str = "vault") -> str:
+    """Return the id of the named volume on ``app``."""
+    out = subprocess.run(
+        ["flyctl", "volumes", "list", "-a", app, "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    for v in json.loads(out):
+        if v.get("name") == volume_name:
+            return str(v["id"])
+    msg = f"no '{volume_name}' volume found on app {app!r}"
+    raise RuntimeError(msg)
+
+
+def fly_volume_exists(app: str, *, volume_name: str = "vault") -> bool:
+    """Whether ``app`` already has a volume of the given name."""
+    try:
+        out = subprocess.run(
+            ["flyctl", "volumes", "list", "-a", app, "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return False
+    return any(v.get("name") == volume_name for v in json.loads(out))
+
+
+def fly_current_image(app: str) -> str:
+    """The exact image ref the app currently runs, as ``registry/repo@digest``.
+
+    Fly tags deployed images per-deployment (``:deployment-...``), so there
+    is no stable ``:latest`` to deploy from. Pinning by digest also makes
+    the migrated app bit-identical to the source.
+    """
+    out = subprocess.run(
+        ["flyctl", "image", "show", "-a", app, "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    data = json.loads(out)
+    if isinstance(data, list):
+        data = data[0]
+    registry = data.get("Registry", "registry.fly.io")
+    repo = data["Repository"]
+    digest = data["Digest"]
+    return f"{registry}/{repo}@{digest}"
+
+
+def _newest_ready_snapshot(volume_id: str) -> tuple[str, str] | None:
+    """(id, created_at) of the newest status=created snapshot, or None."""
+    out = subprocess.run(
+        ["flyctl", "volumes", "snapshots", "list", volume_id, "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    ready = [s for s in json.loads(out) if s.get("status") == "created"]
+    if not ready:
+        return None
+    newest = max(ready, key=lambda s: s.get("created_at", ""))
+    return str(newest["id"]), str(newest.get("created_at", ""))
+
+
+def fly_snapshot_create_and_wait(volume_id: str, *, dry: bool, timeout_s: int = 600) -> str:
+    """Trigger a fresh snapshot and return its id once it is ready.
+
+    Records the newest existing snapshot timestamp first, then polls
+    until a strictly-newer one appears, so we never grab a stale
+    hourly-backup snapshot instead of the one we just took.
+    """
+    if dry:
+        print(f"  $ flyctl volumes snapshots create {volume_id}   (+ poll until ready)")
+        return "<dry-run-snapshot-id>"
+
+    before = _newest_ready_snapshot(volume_id)
+    before_ts = before[1] if before else ""
+    print(f"  $ flyctl volumes snapshots create {volume_id}")
+    subprocess.run(["flyctl", "volumes", "snapshots", "create", volume_id], check=True)
+
+    waited = 0
+    while waited < timeout_s:
+        time.sleep(10)
+        waited += 10
+        cur = _newest_ready_snapshot(volume_id)
+        if cur and cur[1] > before_ts:
+            print(f"    snapshot ready: {cur[0]} ({cur[1]})")
+            return cur[0]
+        print(f"    waiting for snapshot... ({waited}s)")
+    msg = f"snapshot of {volume_id} did not become ready within {timeout_s}s"
+    raise RuntimeError(msg)
+
+
+def fly_create_volume_from_snapshot(
+    app: str, *, region: str, size_gb: int, snapshot_id: str, dry: bool
+) -> None:
+    """Create the ``vault`` volume on ``app`` seeded from a snapshot.
+
+    Same shape as :func:`fly_create_volume` but restores the source
+    bytes instead of an empty filesystem. The restored volume is the
+    SQLCipher-encrypted substrate, so the app MUST carry the matching
+    ``AFAIR_VAULT_KEY`` to open it.
+    """
+    _run_fly(
+        [
+            "volumes",
+            "create",
+            "vault",
+            "-a",
+            app,
+            "--region",
+            region,
+            "--size",
+            str(size_gb),
+            "--snapshot-id",
+            snapshot_id,
+            "--yes",
+        ],
+        dry=dry,
+    )
+
+
+def migrate(
+    *,
+    identity: str,
+    source_app: str,
+    region: str,
+    dry: bool,
+    org: str = DEFAULT_ORG,
+    snapshot_id: str | None = None,
+    image: str | None = None,
+) -> tuple[str, str]:
+    """Clone the vault from ``source_app`` onto a properly-named per-user
+    app derived from ``identity`` (``afair-<name>-<suffix>``), with the
+    canonical vanity host.
+
+    NON-destructive: ``source_app`` is never touched. Cutover is
+    DNS-only and the operator performs it after verifying the new host.
+    Reuses every provisioning helper; only the volume is seeded from a
+    snapshot instead of created empty, and the carry-secrets are read
+    from the environment instead of minted fresh (so the same vault key
+    + bearer travel with the data).
+    """
+    import os
+
+    app = app_name_for(identity)
+    vanity = vanity_host_for(identity)
+    print(f"== Migrate vault: {source_app} → {app} ==")
+    print(f"   New app:      {app}")
+    print(f"   Vanity host:  {vanity}")
+    print(f"   Source app:   {source_app}  (left untouched)")
+    if dry:
+        print("  (dry run — no remote calls)")
+
+    # Idempotent / resumable: each remote step below skips itself if it
+    # already landed, so a migration that failed partway (bad image ref,
+    # network blip) can be re-run safely without clobbering the new app's
+    # volume or data.
+    cloudflare_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not dry and not cloudflare_token:
+        print("ERROR: CLOUDFLARE_API_TOKEN must be set", file=sys.stderr)
+        sys.exit(2)
+
+    # Build the secret map: carry verbatim from env, override the
+    # host/identity-specific ones for the new box.
+    secrets_map: dict[str, str] = {}
+    missing: list[str] = []
+    for key in CARRY_SECRET_KEYS:
+        value = os.environ.get(key)
+        if value:
+            secrets_map[key] = value
+        elif key in REQUIRED_CARRY_KEYS:
+            missing.append(key)
+    if missing and not dry:
+        print(
+            f"ERROR: required carry-secrets missing from env: {missing}. "
+            "Source .env.secrets.backup and .migrate_secrets.env first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    secrets_map["OAUTH_ISSUER"] = f"https://{vanity}"
+    secrets_map["IDENTITY_ALLOWLIST"] = identity
+    secrets_map["ENVIRONMENT"] = "fly"
+
+    # 1. Snapshot of the source vault. Reuse a caller-supplied one (retry
+    #    path) or take a fresh one to capture the latest state.
+    if snapshot_id:
+        print(f"  (reusing snapshot {snapshot_id})")
+    else:
+        src_vol = fly_source_volume_id(source_app) if not dry else "<src-vault-vol>"
+        snapshot_id = fly_snapshot_create_and_wait(src_vol, dry=dry)
+
+    # 2. New app (skip if it already exists from a prior run).
+    if dry or not fly_app_exists(app):
+        fly_create_app(app, dry=dry, org=org)
+    else:
+        print(f"  (app {app} already exists — skipping create)")
+
+    # 3. Volume seeded FROM the snapshot (skip if the vault volume is
+    #    already restored — never re-restore over existing data).
+    if not dry and fly_volume_exists(app):
+        print(f"  (volume 'vault' already on {app} — skipping restore)")
+    else:
+        fly_create_volume_from_snapshot(
+            app, region=region, size_gb=DEFAULT_VOLUME_SIZE_GB, snapshot_id=snapshot_id, dry=dry
+        )
+
+    # 4. Secrets — same AFAIR_VAULT_KEY so the restored volume decrypts.
+    #    Idempotent: re-staging the same values is harmless.
+    fly_set_secrets(app, secrets_map, dry=dry)
+
+    # 5. Deploy the SAME image the source app runs (Fly tags images per
+    #    deployment, so derive the exact ref instead of guessing :latest).
+    #    Picks up the repo fly.toml [mounts] vault at deploy time.
+    deploy_image = image or (DOCKER_IMAGE if dry else fly_current_image(source_app))
+    fly_deploy_image(app, image=deploy_image, dry=dry)
+
+    # 5. DNS + cert: vanity host → the NEW app (not the source).
+    cloudflare_create_cname(
+        hostname=vanity,
+        target=f"{app}.fly.dev",
+        token=cloudflare_token or "<dry-run>",
+        dry=dry,
+    )
+    fly_add_cert(app, vanity, dry=dry)
+
+    print("\n-- migration steps issued --")
+    print(f"   Fallback:  curl https://{app}.fly.dev/health      (works first)")
+    print(f"   Vanity:    curl https://{vanity}/health           (after DNS+cert settle)")
+    print(f"   Cutover:   re-point MCP clients to https://{vanity}/mcp and re-auth")
+    print(f"   Source app '{source_app}' is untouched — retire it only after you verify.")
+    return app, vanity
+
+
 def provision(
     *,
     identity: str,
@@ -558,7 +837,50 @@ def main() -> None:
         help="Skip the AFAIR_SIGNUP_TOKEN (only useful if the user "
         "isn't running their own signup landing page)",
     )
+    ap.add_argument(
+        "--migrate-from",
+        metavar="SOURCE_APP",
+        default=None,
+        help="Clone an existing vault onto the properly-named per-user app "
+        "instead of provisioning an empty one. Snapshots SOURCE_APP's vault "
+        "volume and seeds the new app from it; carries the vault key + bearer "
+        "(read from the environment) so the encrypted data stays readable. "
+        "Non-destructive: SOURCE_APP is left running for you to retire after "
+        "verifying the new host.",
+    )
+    ap.add_argument("--org", default=DEFAULT_ORG, help="Fly org slug for the new app")
+    ap.add_argument(
+        "--snapshot-id",
+        default=None,
+        help="Reuse an existing volume snapshot id instead of taking a fresh "
+        "one (migration retry path).",
+    )
+    ap.add_argument(
+        "--image",
+        default=None,
+        help="Image ref to deploy to the migrated app. Defaults to the exact "
+        "image the source app currently runs (derived by digest).",
+    )
     args = ap.parse_args()
+
+    if args.migrate_from:
+        app, vanity = migrate(
+            identity=args.identity,
+            source_app=args.migrate_from,
+            region=args.region,
+            dry=args.dry_run,
+            org=args.org,
+            snapshot_id=args.snapshot_id,
+            image=args.image,
+        )
+        print()
+        print("=" * 64)
+        print(f"  Migrated vault {args.migrate_from} → {app}")
+        print("=" * 64)
+        print(f"  Vanity URL:   https://{vanity}/mcp     (re-auth here)")
+        print(f"  Fallback URL: https://{app}.fly.dev/mcp")
+        print(f"  Source '{args.migrate_from}' left running — retire after verification.")
+        return
 
     app, vanity, s = provision(
         identity=args.identity,

@@ -76,3 +76,4 @@ logs/
 .claude/sessions/
 .claude/.history
 .playwright-mcp/
+.migrate_secrets.env
