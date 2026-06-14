@@ -2,23 +2,21 @@
 
 Three endpoints on the per-user machine, all under /internal/export/*:
 
-  POST /internal/export/request   master bearer → start a job (or return the
-                                  in-flight one), respond with status
-  GET  /internal/export/status    master bearer → latest job state for the
-                                  dashboard poll
+  POST /internal/export/request   master bearer OR dashboard session → start
+                                  a job (or return the in-flight one)
+  GET  /internal/export/status    master bearer OR dashboard session → latest
+                                  job state for the dashboard poll
   GET  /internal/export/download  ?token=… capability link (from the email or
                                   the dashboard) → stream the artifact
 
 request + status are cross-origin (the afair.ai dashboard calls them with
-the master bearer), so they carry CORS + have OPTIONS preflights. download
-is a plain top-level navigation gated by the token in the URL — no CORS, no
-bearer, the token IS the credential.
+the user's session credential — see internal_auth), so they carry CORS +
+have OPTIONS preflights. download is a plain top-level navigation gated by
+the token in the URL — no CORS, no bearer, the token IS the credential.
 """
 
 from __future__ import annotations
 
-import hmac
-import re
 import threading
 from typing import TYPE_CHECKING
 
@@ -28,6 +26,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from ..substrate import export_jobs, open_db
 from . import export_job
 from .cors import cors_headers
+from .internal_auth import authorize_internal
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -37,21 +36,6 @@ if TYPE_CHECKING:
     from starlette.responses import Response
 
 log = structlog.get_logger(__name__)
-
-_BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
-
-
-def _check_master(request: Request) -> bool:
-    """Only the static master bearer may request/inspect exports — minted
-    sub-tokens cannot dump the whole vault."""
-    settings = request.app.state.settings
-    expected = settings.auth_token
-    if expected is None:
-        return False
-    m = _BEARER_RE.match(request.headers.get("authorization", ""))
-    if m is None:
-        return False
-    return hmac.compare_digest(m.group(1).strip(), expected.get_secret_value())
 
 
 def _job_view(job: export_jobs.ExportJob | None) -> dict[str, object]:
@@ -68,7 +52,7 @@ def _job_view(job: export_jobs.ExportJob | None) -> dict[str, object]:
 
 
 async def export_request_endpoint(request: Request) -> Response:
-    if not _check_master(request):
+    if not authorize_internal(request):
         return JSONResponse(
             {"error": "unauthorized"}, status_code=401, headers=cors_headers(request)
         )
@@ -114,7 +98,7 @@ async def export_request_endpoint(request: Request) -> Response:
 
 
 async def export_status_endpoint(request: Request) -> Response:
-    if not _check_master(request):
+    if not authorize_internal(request):
         return JSONResponse(
             {"error": "unauthorized"}, status_code=401, headers=cors_headers(request)
         )
