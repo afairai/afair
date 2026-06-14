@@ -11,7 +11,7 @@ type: software
 authors:
   - family-names: Sivaganeshamoorthy
     given-names: Gowrynath
-repository-code: "https://github.com/gowry/afair"
+repository-code: "https://github.com/afairai/afair"
 url: "https://afair.ai"
 license: AGPL-3.0-or-later
 version: "0.0.1"

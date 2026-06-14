@@ -15,4 +15,4 @@ frozen and additive per Invariant I1; everything behind it can still move.
   issue and pull-request templates, and a full configuration reference in
   `.env.example`.
 
-[Unreleased]: https://github.com/gowry/afair/commits/main
+[Unreleased]: https://github.com/afairai/afair/commits/main

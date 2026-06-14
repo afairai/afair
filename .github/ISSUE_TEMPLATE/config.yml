@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/gowry/afair/security/advisories/new
+    url: https://github.com/afairai/afair/security/advisories/new
     about: Report security issues privately, never in a public issue. See SECURITY.md.
   - name: Hosted afair.ai
     url: https://afair.ai
     about: Want it run for you, with backups and export handled? Use the hosted product.
   - name: Connection guides
-    url: https://github.com/gowry/afair/tree/main/docs/clients
+    url: https://github.com/afairai/afair/tree/main/docs/clients
     about: How to connect Claude, ChatGPT, Cursor, and other MCP clients.
