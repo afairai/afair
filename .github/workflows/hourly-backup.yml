@@ -32,8 +32,8 @@ jobs:
     timeout-minutes: 5
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      VAULT_VOLUME_ID: vol_4qloyddzwwzzwlgr  # mcp.afair.ai — see ops §7
-      VAULT_APP: afair
+      VAULT_VOLUME_ID: vol_rkg63jm29n2jymk4  # solis-e03.mcp.afair.ai (migrated vault) — see ops §7
+      VAULT_APP: afair-solis-e03
     steps:
       - name: Install flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
