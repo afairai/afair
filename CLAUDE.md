@@ -54,15 +54,19 @@ all live and in daily real-world use.
   hysteresis prevents flapping. Transitions write a normal observe
   event (origin `agent:mode_switcher`) — current mode is recoverable
   from substrate at any time via `read_current_mode()`.
-- **Fly deployment live at https://afair.fly.dev** (MCP at `https://mcp.afair.ai`)
-  — single-tenant machine in `fra`, 1 GB volume `vault` with **14-day
-  auto-snapshots** (RPO ~24h, acceptable for Phase 0). Upgrade paths
-  to <1s RPO documented in `docs/operations.md` §7 (hourly cron, LiteFS
-  Cloud, Litestream — to be picked when invites force the question).
-  `strategy = "immediate"`, `min_machines_running = 1`
-- **GitHub Actions deploy pipeline** at `.github/workflows/deploy.yml` —
-  branch-based on `main`, runs ruff + mypy + pytest gates, then
-  `flyctl deploy --remote-only`, verifies `/health`
+- **Fly deployment live at https://afair-your-app.fly.dev** (MCP at
+  `https://mcp.afair.ai`) — single-tenant machine in `fra`, 1 GB volume
+  `vault` with **14-day auto-snapshots** (RPO ~24h, acceptable for Phase 0).
+  Upgrade paths to <1s RPO documented in `docs/operations.md` §7 (hourly
+  cron, LiteFS Cloud, Litestream — to be picked when invites force the
+  question). `strategy = "immediate"`, `min_machines_running = 1`
+- **CI + deploy (open-core split, 2026-06-14)** — this repo runs
+  `.github/workflows/ci.yml` (ruff + mypy + pytest on push + PR, **no
+  deploy, no secrets**). The fleet is deployed from the **private afair-web
+  repo** via `deploy-afair-fleet.yml` (checks out a pinned ref of this repo
+  through a read-only deploy key, gates, deploys). A `vX.Y.Z` tag here fires
+  `release.yml`, which dispatches that fleet deploy. The old `deploy.yml`
+  was removed — pushing to `main` no longer deploys.
 - `docs/operations.md` — runbooks for deploy, backup-to-laptop, snapshot
   restore, future RPO upgrade paths, permanent erasure, secret rotation
 - **Multi-modal content + streaming uploads + compound events
@@ -394,12 +398,13 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |
-| `.github/workflows/deploy.yml` | Branch-based CI deploy to Fly | When pipeline changes |
+| `.github/workflows/ci.yml` | Product CI — lint/type/test on push + PR. No deploy, no secrets | When the gate set changes |
+| `.github/workflows/release.yml` | A `vX.Y.Z` tag dispatches the afair-web fleet deploy at that tag | When the release flow changes |
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
-| `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Wired into deploy.yml | When a new ENVIRONMENT=fly boot validator is added |
+| `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
 | `scripts/retire_user.py` | Canonical per-user teardown (destroy app+volume+cert+CNAME, callback wipes escrow). Shared by grace cron + instant-delete | When the teardown contract changes |
 | `.github/workflows/retire.yml` | Dispatches retire_user.py (from afair-web grace cron + delete action) | When the retire inputs/secrets change |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |

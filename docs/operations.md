@@ -5,13 +5,13 @@
 
 ## 0. Current state
 
-- **App:** `afair` on Fly (personal org)
+- **App:** `afair-your-app` on Fly (the operator's per-user vault; every user gets one, single-tenant per I8)
 - **Region:** `fra` (EU residency by default)
 - **Volume:** `vault`, 1 GB
 - **Backup:** Fly automatic daily volume snapshots, **14-day retention** (bumped from 5d on 2026-05-30). RPO ~24h. Future RPO upgrades documented in §7.
 - **Strategy:** `immediate` — single-machine deploys with brief downtime
-- **URL:** `https://afair.fly.dev` (HTTPS auto-provisioned), MCP at `https://mcp.afair.ai`
-- **Deploy:** GitHub Actions on push to `main` (see `.github/workflows/deploy.yml`)
+- **URL:** `https://afair-your-app.fly.dev` (HTTPS auto-provisioned), MCP at `https://mcp.afair.ai`
+- **Deploy:** from the **private afair-web repo**, not this one. afair-web's `deploy-afair-fleet.yml` checks out a pinned ref of this repo and deploys the fleet (or a `vX.Y.Z` tag here triggers it). This repo's `.github/workflows/ci.yml` runs lint/type/test only — pushing here does **not** deploy.
 
 ---
 
@@ -39,63 +39,47 @@ primary still answers, then promote.
 
 ## 2. Routine deploy
 
-### Via GitHub Actions (the standard path)
+Deployment moved off this repo into the private **afair-web** control plane
+(open-core split). Pushing to `main` here runs **CI only** (`ci.yml`:
+lint/type/test). The fleet is deployed from afair-web.
+
+### Via afair-web (the standard path)
+
+Two ways, both in the afair-web repo:
+
+1. **Tag a release here.** A `vX.Y.Z` tag on this repo fires `release.yml`,
+   which dispatches afair-web's fleet deploy pinned to that tag.
+   ```bash
+   git tag v0.x.y && git push origin v0.x.y
+   ```
+2. **Manual dispatch.** From afair-web's Actions, run **Deploy afair fleet**
+   with `target=prod` (or `dev`) and the `ref` to deploy:
+   ```bash
+   gh workflow run deploy-afair-fleet.yml -R afairai/afair-web \
+     -f target=prod -f ref=main
+   gh run watch -R afairai/afair-web
+   ```
+
+The fleet workflow checks out this repo at the chosen ref, runs the gates +
+`scripts/check_secrets.py`, deploys to `afair-your-app`, and verifies
+`/health`.
+
+### Manual fallback (direct flyctl)
+
+If you need to deploy by hand (afair-web Actions unavailable, or a non-main
+ref), from a checkout of this repo:
 
 ```bash
-git push origin main
+flyctl deploy --app afair-your-app --config fly.toml --remote-only --wait-timeout 5m
 ```
 
-The workflow at `.github/workflows/deploy.yml`:
-
-1. Checks out the code
-2. Runs `ruff check` + `ruff format --check` + `mypy --strict` + `pytest`
-3. Builds the image via Fly's remote builder (`--remote-only`)
-4. Deploys with `--wait-timeout 5m`
-5. Verifies `/health` returns 200
-
-Watch progress: `gh run watch` or [github.com/afairai/afair/actions](https://github.com/afairai/afair/actions)
-
-### When push-to-main does NOT auto-trigger CI
-
-Observed 2026-05-26: GitHub Actions' push-event dispatcher silently
-dropped a string of consecutive pushes — workflow runs never enqueued
-even though the commits landed on `main`. Repo hooks are empty by
-design (Actions uses GitHub's internal dispatcher, not user-visible
-webhooks), so there's no way to verify delivery from the outside.
-
-**Recovery steps (in order):**
-
-1. Manual workflow dispatch — wakes the dispatcher up:
-   ```bash
-   gh workflow run deploy.yml --ref main
-   gh run watch
-   ```
-   If this fails with HTTP 500, retry — it's typically transient.
-
-2. If `gh workflow run` keeps failing, fall back to direct flyctl:
-   ```bash
-   flyctl deploy --app afair --remote-only --wait-timeout 300
-   ```
-   This bypasses CI entirely. Run the smoke against the deployed app
-   afterwards (see §9) to confirm the deploy went through:
-   ```bash
-   URL=https://afair.fly.dev TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-) \
-     uv run python scripts/smoke_mcp.py
-   ```
-
-3. Document the recovery in `analysis/phase-0-journal.md` so the next
-   pipeline incident has prior art.
-
-### Manual fallback
-
-If GH Actions is unavailable or you want to deploy from a non-main branch:
+`--remote-only` builds on Fly's builder, not your laptop. Afterwards, smoke
+the deployed app (see §9):
 
 ```bash
-fly deploy --remote-only --wait-timeout 5m
+URL=https://afair-your-app.fly.dev TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-) \
+  uv run python scripts/smoke_mcp.py
 ```
-
-`--remote-only` builds on Fly's builder, not your laptop. Faster, no local
-Docker daemon needed, deterministic builds.
 
 ---
 
@@ -103,12 +87,13 @@ Docker daemon needed, deterministic builds.
 
 | Scenario | Substrate outcome |
 |---|---|
-| `fly deploy` / `git push origin main` | ✅ Volume stays mounted on the same machine. Data intact. |
+| `fly deploy` (or the afair-web fleet deploy) | ✅ Volume stays mounted on the same machine. Data intact. |
+| `git push origin main` (this repo) | ✅ Runs CI only — no deploy, nothing touched. |
 | Machine restart / Fly host reboot | ✅ Volume reattaches automatically. |
 | `fly machine destroy <id>` then redeploy | ⚠️ Volume persists, reattach may need manual step. See §5. |
 | Fly host hardware failure | ⚠️ Volume is single-host NVMe. Recover via §6 snapshot restore. |
 | `fly volumes destroy <vol-id>` | ❌ Permanent deletion of that volume. |
-| `fly apps destroy afair` | ❌ Everything gone — app, machine, volume, snapshots. |
+| `fly apps destroy afair-your-app` | ❌ Everything gone — app, machine, volume, snapshots. |
 
 ---
 
@@ -122,7 +107,7 @@ to extract it.
 mkdir -p ~/afair-backups/$(date +%Y-%m-%d)
 cd ~/afair-backups/$(date +%Y-%m-%d)
 
-fly ssh sftp shell -a afair <<'EOF'
+fly ssh sftp shell -a afair-your-app <<'EOF'
 get /data/vault/substrate.db ./substrate.db
 get -r /data/vault/objects ./objects
 EOF
@@ -142,19 +127,19 @@ and it works without Fly.
 If a machine got destroyed and the volume is now unattached:
 
 ```bash
-fly volumes list -a afair
+fly volumes list -a afair-your-app
 # Note the volume id (vol_...).
 
-fly machine list -a afair
+fly machine list -a afair-your-app
 # If there's no machine, create one and attach the existing volume.
 
 fly machine create \
-  --app afair \
+  --app afair-your-app \
   --region fra \
   --vm-size shared-cpu-1x \
   --vm-memory 512 \
   --volume vol_xxxxx:/data \
-  --image registry.fly.io/afair:latest
+  --image registry.fly.io/afair-your-app:latest
 ```
 
 For routine use, just `fly deploy` again — Fly will spin up a machine
@@ -167,12 +152,12 @@ that reattaches the existing volume if config matches.
 Fly takes automatic daily snapshots (5-day retention).
 
 ```bash
-fly volumes snapshots list -a afair
+fly volumes snapshots list -a afair-your-app
 # Lists snapshots with ids, dates, sizes.
 
 # Create a NEW volume from a snapshot (does NOT overwrite the existing one)
 fly volumes create vault-restored \
-  --app afair \
+  --app afair-your-app \
   --region fra \
   --size 1 \
   --snapshot-id vs_xxxxx
@@ -185,18 +170,18 @@ For a quick "I broke the substrate, give me yesterday's" path:
 
 ```bash
 # 1. Stop the app to release the current volume
-fly scale count 0 -a afair
+fly scale count 0 -a afair-your-app
 
 # 2. List snapshots, pick one
-fly volumes snapshots list -a afair
+fly volumes snapshots list -a afair-your-app
 
 # 3. Destroy the current vault and create a new one from the snapshot
 #    (DESTRUCTIVE — make sure you've backed up to laptop per §4 first!)
-fly volumes destroy <current-vol-id> -a afair
+fly volumes destroy <current-vol-id> -a afair-your-app
 fly volumes create vault --region fra --size 1 --snapshot-id <snapshot-id>
 
 # 4. Scale back up
-fly scale count 1 -a afair
+fly scale count 1 -a afair-your-app
 ```
 
 ---
@@ -213,7 +198,7 @@ hourly cron uses the same volume snapshot mechanism as Fly's automatic
 daily — restore is identical (see §6).
 
 The hourly workflow needs `FLY_API_TOKEN` as a GitHub repo secret
-(already present for the deploy workflow). If you rebuild the volume
+(already on this repo for the hourly-backup workflow). If you rebuild the volume
 on a different ID, update `VAULT_VOLUME_ID` in the workflow env.
 
 When ~1 h RPO is no longer enough, the next upgrade path is **LiteFS
@@ -226,8 +211,8 @@ Default after `fly volumes create … --snapshot-retention 5` is 5 days.
 Bump to 14 with:
 
 ```bash
-fly volumes list -a afair                # note volume id
-fly volumes update <vol-id> -a afair --snapshot-retention 14
+fly volumes list -a afair-your-app                # note volume id
+fly volumes update <vol-id> -a afair-your-app --snapshot-retention 14
 ```
 
 ### List snapshots + restore
@@ -369,7 +354,7 @@ Single-tenant makes erasure physically obvious: one user = one app = one
 To rotate any of these:
 
 1. Create new value at the provider
-2. Update Fly: `fly secrets set ANTHROPIC_API_KEY=... -a afair`
+2. Update Fly: `fly secrets set ANTHROPIC_API_KEY=... -a afair-your-app`
 3. Update `.env.local` (your laptop)
 4. Update `.env.secrets.backup` (the annotated canonical record)
 5. If it's a CI token, update GH secret too: `gh secret set FLY_API_TOKEN`
@@ -378,7 +363,7 @@ To rotate any of these:
 ### Known gap: prod secrets not captured locally
 
 `AFAIR_AUTH_TOKEN`, `AFAIR_JWT_SECRET`, and `AFAIR_SIGNUP_TOKEN` are
-set in Fly (verified via `fly secrets list -a afair`) but their
+set in Fly (verified via `fly secrets list -a afair-your-app`) but their
 plaintext values aren't in `.env.secrets.backup` yet — Fly only
 stores digests after the initial set, so the values can't be read
 back from the platform.
@@ -388,7 +373,7 @@ one-time coordinated rotation:
 
 ```bash
 NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
-fly secrets set AFAIR_AUTH_TOKEN="$NEW" -a afair
+fly secrets set AFAIR_AUTH_TOKEN="$NEW" -a afair-your-app
 echo "AFAIR_AUTH_TOKEN=$NEW" >> .env.secrets.backup  # plus annotations
 ```
 
@@ -414,7 +399,7 @@ Per global `CLAUDE.md`: a secret must always be in `.env.secrets.backup`
 
 ```bash
 # Health endpoint (HTTP — quick liveness check)
-curl https://afair.fly.dev/health
+curl https://afair-your-app.fly.dev/health
 # Expected: {"status":"ok"}
 
 # MCP tool listing (proves the cross-vendor surface is alive)
@@ -424,7 +409,7 @@ curl -X POST https://mcp.afair.ai/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq
 
 # Inspect the substrate live (read-only is safe)
-fly ssh console -a afair -C "sqlite3 /data/vault/substrate.db 'SELECT COUNT(*) FROM events;'"
+fly ssh console -a afair-your-app -C "sqlite3 /data/vault/substrate.db 'SELECT COUNT(*) FROM events;'"
 ```
 
 ---
@@ -439,7 +424,7 @@ extractor interpretations. If you want to throw it away and rebuild
 
 ```bash
 # 1. SSH to the running Fly machine
-fly ssh console -a afair
+fly ssh console -a afair-your-app
 
 # 2. Drop the entity-graph tables (substrate events untouched)
 sqlite3 /data/vault/substrate.db <<'SQL'
@@ -452,10 +437,10 @@ SQL
 
 # 3. Restart the machine so the schema DDL re-runs and recreates the
 #    empty tables with their I2 triggers
-fly machine restart -a afair
+fly machine restart -a afair-your-app
 
 # 4. Run the backfill — populates the empty graph from existing events
-fly ssh console -a afair -C \
+fly ssh console -a afair-your-app -C \
   "uv run python /app/scripts/backfill_entities.py"
 ```
 
@@ -489,7 +474,7 @@ issue fixed in 749f5cb — `busy_timeout` now precedes `journal_mode`,
 so concurrent `open_db` calls wait the lock out instead of raising.)
 
 ### `/health` returns 503
-Run `fly logs -a afair`. Most common cause is the substrate DB being
+Run `fly logs -a afair-your-app`. Most common cause is the substrate DB being
 unreachable at boot — usually fixed by `fly machine restart`.
 
 ### Deploy times out
@@ -588,7 +573,7 @@ the server when `ENVIRONMENT=fly` and the key is missing.
 key=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
 
 # Set the Fly secret.
-fly secrets set AFAIR_VAULT_KEY="$key" -a afair
+fly secrets set AFAIR_VAULT_KEY="$key" -a afair-your-app
 
 # Persist to the backup file — same canonical-secret convention
 # every other afair token follows. Edit by hand; never commit.
@@ -617,10 +602,10 @@ Correct sequence (operator runs by hand, once per vault):
 ```bash
 # 1. Generate + persist the master key (see 14.1).
 # 2. Take a fresh Fly volume snapshot for rollback:
-fly volumes snapshots create <volume-id> -a afair
+fly volumes snapshots create <volume-id> -a afair-your-app
 
 # 3. Stage the secret BEFORE pushing the encryption-layer code:
-fly secrets set --stage AFAIR_VAULT_KEY=<value> -a afair
+fly secrets set --stage AFAIR_VAULT_KEY=<value> -a afair-your-app
 git push   # triggers deploy
 
 # 4. The new app boots, tries to open the still-plaintext file via
@@ -628,12 +613,12 @@ git push   # triggers deploy
 #    This is expected — the migration hasn't run yet.
 
 # 5. SSH in and run the migration on the production volume:
-fly ssh console -a afair -C \
+fly ssh console -a afair-your-app -C \
   "/usr/bin/env python /app/scripts/encrypt_existing_vault.py --skip-backup"
 
 # 6. Restart the machine so the running process re-opens the now-
 #    encrypted DB:
-fly machine restart <machine-id> -a afair
+fly machine restart <machine-id> -a afair-your-app
 
 # 7. Verify:
 curl -sS https://mcp.afair.ai/health   # expect {"status":"ok"}
