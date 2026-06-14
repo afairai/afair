@@ -79,6 +79,17 @@ jobs:
       - name: Set up flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # Fail fast + named if the target app is missing a boot-required secret.
+      # Without this, a missing AFAIR_VAULT_KEY (etc.) deploys "successfully"
+      # and only surfaces as an opaque 502 on /health below. This is how
+      # afair-dev silently drifted three weeks behind prod.
+      - name: Verify required secrets on target
+        env:
+          FLY_API_TOKEN: ${{ env.IS_DEV == 'true' && secrets.FLY_API_TOKEN_DEV || secrets.FLY_API_TOKEN }}
+        run: |
+          if [ "$IS_DEV" = "true" ]; then APP=afair-dev; else APP=afair-solis-e03; fi
+          uv run python scripts/check_secrets.py "$APP"
+
       - name: Deploy
         env:
           # Per-env Fly deploy token — different scope per app so a leaked
