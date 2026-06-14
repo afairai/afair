@@ -1,0 +1,45 @@
+name: CI
+
+# Product CI for afair: lint, types, tests. No deploy, no secrets, no Fly
+# tokens. The operator's fleet is deployed from the private afair-web repo
+# (deploy-afair-fleet.yml), which checks out a pinned ref of this repo. That
+# keeps the open-source product repo free of any path that touches the
+# operator's infrastructure — a fork's PR runs exactly this and nothing more.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy afair
+
+      - name: Tests
+        run: uv run pytest -q
