@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 
@@ -47,10 +48,16 @@ def name_diff(a: set[str], b: set[str]) -> tuple[set[str], set[str]]:
     return a - b, b - a
 
 
+def _fly_bin() -> str:
+    """Resolve the Fly CLI. CI's setup-flyctl installs `flyctl`; local dev
+    often has a `fly` symlink. Prefer whichever exists."""
+    return shutil.which("flyctl") or shutil.which("fly") or "flyctl"
+
+
 def fly_secret_names(app: str) -> set[str]:
     """The set of secret names configured on a Fly app (values never returned)."""
     out = subprocess.run(
-        ["fly", "secrets", "list", "--json", "--app", app],
+        [_fly_bin(), "secrets", "list", "--json", "--app", app],
         capture_output=True,
         text=True,
         check=True,
