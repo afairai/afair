@@ -84,6 +84,29 @@ or run a periodic copy off-box. The vault is a single SQLite file plus a blob
 directory, so any file-level backup tool works. Because the data is encrypted at
 rest with `AFAIR_VAULT_KEY`, a stolen snapshot is useless without the key.
 
+## Encryption and the vault key
+
+When `AFAIR_VAULT_KEY` is set, the whole vault is encrypted at rest: the SQLite
+database (including the FTS index) is opened through SQLCipher with a key derived
+via HKDF, and each filesystem blob is sealed with AES-256-GCM under a separate
+derived sub-key. Plaintext exists only in process memory and in what you send to
+your LLM provider over the wire.
+
+The key is **one-shot per vault**: once data has been written under it, that key
+is the only thing that can read the vault. There is no recovery path and no
+in-place re-keying, so:
+
+- Generate it with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+- Set it as a deployment secret (for example `fly secrets set AFAIR_VAULT_KEY=...`).
+- **Keep a copy somewhere safe and separate** from the server — a password
+  manager or an offline note. That copy is your only recovery path; lose the key
+  and the data is gone.
+
+To rotate the key there is no in-place re-key: provision a fresh vault under a
+new key and re-import through the MCP export surface. The current design encrypts
+the whole database file; finer-grained designs (per-event encryption, bring-your-
+own-key, TEE) are future work.
+
 ## Upgrading
 
 Pull, re-sync, redeploy. The substrate is append-only and forward-compatible by

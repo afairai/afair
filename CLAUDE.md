@@ -32,8 +32,8 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
   retired from afair-web; the operator's own vault runs at `mcp.afair.ai`.
 - **Deploy** — product CI in this repo (`.github/workflows/ci.yml`: lint/type/
   test, no deploy). The fleet deploys from the private **afair-web** repo
-  (`deploy-afair-fleet.yml`, pinned ref); a `vX.Y.Z` tag here triggers it. See
-  `docs/operations.md`.
+  (`deploy-afair-fleet.yml`, pinned ref); a `vX.Y.Z` tag here triggers it. The
+  operator runbook lives in afair-web; self-host docs are `docs/self-hosting.md`.
 
 ### 0.2 In flight / recent
 
@@ -95,9 +95,9 @@ The operational rule stands:
 
 Concretely:
 
-- No secrets, credentials, tokens, or API keys in committed files.
-  Use `.env.local` (gitignored) + `.env.secrets.backup` (also gitignored,
-  see global CLAUDE.md "Secrets-Backup-File Konvention").
+- No secrets, credentials, tokens, or API keys in committed files. Use
+  `.env.local` (gitignored) for local secrets; keep durable backups of any
+  keys outside the repo.
 - No internal jokes, no slurs against competitors, no offhand snark
   in code, comments, or commit messages.
 - No proprietary algorithmic tricks that depend on staying secret for
@@ -146,9 +146,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `CITATION.cff` | How to cite afair (research-grounded project) | On release / author change |
 | `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` | Structured bug/feature/PR forms | When the contribution flow changes |
 | `.env.example` | Full env-var reference (all 34 settings, hosted vars marked optional) | When env shape changes |
-| `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
+| `docs/self-hosting.md` | Self-host guide: local + prod, encryption + the vault key, backups, upgrades | When setup/encryption changes |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
-| `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |
 | `.github/workflows/ci.yml` | Product CI — lint/type/test on push + PR. No deploy, no secrets | When the gate set changes |
 | `.github/workflows/release.yml` | A `vX.Y.Z` tag dispatches the afair-web fleet deploy at that tag | When the release flow changes |
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
@@ -162,7 +161,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `analysis/2026-06-03-recursive-self-improvement.md` | Design of the tuner / judge / rollback self-improvement loop (referenced from `afair/agents/tuner.py`) | When the loop design changes |
 | `analysis/2026-05-28-observability-strategy.md` | Three-layer plan to make the designed flow visible — pipeline_events table, expectation checker, enriched /health. Triggered by heizzeit stall + consolidator silence | Refresh as drops 1–7 ship |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention — redirects to CLAUDE.md as canonical | When the read-order changes |
-| `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in `docs/operations.md §12` | When the source logo changes |
+| `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in the afair-web operator runbook | When the source logo changes |
 
 ## 5. Invariants — quick reference
 
