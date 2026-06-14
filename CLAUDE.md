@@ -382,9 +382,15 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 |---|---|---|
 | `VISION.md` | The constitution — vision, mission, invariants, architecture, competitive landscape, research grounding | Quarterly review; treat as zeitlos — no per-phase status updates |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
-| `README.md` | Public-facing setup + orientation | When setup steps change |
+| `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3 — the open-source core license (see VISION §12) | Only on a license change |
-| `.env.example` | Required env vars with comments | When env shape changes |
+| `CONTRIBUTING.md` | Contributor setup, the four checks, the invariants a change can't break | When dev workflow changes |
+| `CODE_OF_CONDUCT.md` | Contributor Covenant 2.1 (verbatim); contact hello@afair.ai | Rare |
+| `SECURITY.md` | How to report vulnerabilities + the security model to hold afair against | When the security model changes |
+| `CHANGELOG.md` | Keep-a-Changelog history; `[Unreleased]` until first tag | Per notable user-facing change |
+| `CITATION.cff` | How to cite afair (research-grounded project) | On release / author change |
+| `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` | Structured bug/feature/PR forms | When the contribution flow changes |
+| `.env.example` | Full env-var reference (all 34 settings, hosted vars marked optional) | When env shape changes |
 | `.env.secrets.backup` | Canonical secrets backup (gitignored) | Whenever a secret is created/rotated |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `docs/operations.md` | Deploy, backup, restore, erasure runbooks | When ops procedures change |

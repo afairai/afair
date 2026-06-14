@@ -1,0 +1,58 @@
+name: Bug report
+description: Something is not working the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. For security problems, do not
+        use this form. See SECURITY.md and report it privately.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what did you see instead of what you expected?
+      placeholder: I called recall(...) and the server returned ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The shortest path to trigger it. A minimal request or snippet helps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: afair version / commit
+      description: Output of `git rev-parse --short HEAD`, or the release tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How are you running it?
+      options:
+        - Self-hosted (local)
+        - Self-hosted (server / Fly / other)
+        - Hosted afair.ai
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: Claude Code, Claude.ai, ChatGPT, Cursor, Codex CLI, etc.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any error output. Redact tokens and personal data first.
+      render: shell

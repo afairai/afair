@@ -8,6 +8,13 @@
   <em>Your memory across every AI you use.</em>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+" /></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Model_Context_Protocol-7c3aed.svg" alt="MCP" /></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/lint-ruff-261230.svg" alt="Ruff" /></a>
+</p>
+
 ---
 
 afair is a memory vault for AI assistants. Connect it once, and the tools you
@@ -16,13 +23,22 @@ remember what matters to you: your decisions, your projects, the context you are
 tired of repeating at the start of every session.
 
 It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), so
-any MCP client reaches the same vault. The data is append-only and yours. Export
-all of it whenever you want, and run the whole thing yourself if you would rather.
+any MCP client reaches the same vault. The data is append-only and yours, and you
+can export all of it whenever you want.
 
-## Works with
+## Two ways to use it
 
-Claude Code, Claude.ai, ChatGPT, Codex CLI, Cursor, Windsurf, Copilot, and
-anything else that speaks MCP over Streamable HTTP.
+**Let afair.ai run it for you.** Sign up at **[afair.ai](https://afair.ai)** and
+you get your own isolated instance, hosted in the EU, with backups, one-click
+export, and updates handled for you. Nothing to install, no database to operate,
+no keys to babysit. This is the right choice for most people.
+
+**Or run it yourself.** This repository is the whole thing, AGPLv3. Self-host it
+on your own machine or server and you own every layer end to end. The quickstart
+is below.
+
+Same code either way. The hosted product is one deployment of this repo, not a
+separate proprietary fork.
 
 ## The three commands
 
@@ -48,12 +64,12 @@ uv run python -m afair
 
 The server comes up on `http://127.0.0.1:8765`. Point your MCP client at it,
 connect, and you are done. Every environment variable is documented inline in
-`.env.example`.
+`.env.example`. Per-client connection guides live in [docs/clients](docs/clients).
 
-## Hosted option
+## Works with
 
-Prefer not to run anything? [afair.ai](https://afair.ai) hosts it for you: your
-own isolated instance, operated for you, with your data in the EU.
+Claude Code, Claude.ai, ChatGPT, Codex CLI, Cursor, Windsurf, Copilot, and
+anything else that speaks MCP over Streamable HTTP.
 
 ## Architecture
 
@@ -71,13 +87,19 @@ Four layers, one source of truth:
 The complete design, and the eight invariants that hold it together, live in
 [VISION.md](VISION.md). Start there if you want the why.
 
+## Contributing
+
+Pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the
+checks that must pass, and the invariants a change cannot break. Found a security
+issue? See [SECURITY.md](SECURITY.md), and please report it privately.
+
 ## License
 
 afair is released under the GNU Affero General Public License v3.0
 ([LICENSE](LICENSE)). You can self-host it, fork it, and modify it freely. If you
 run a modified version as a network service for others, you publish your changes
-under the same license. The hosted offering at afair.ai is one deployment of this
-code, not a separate proprietary fork.
+under the same license. The hosted offering at [afair.ai](https://afair.ai) is one
+deployment of this code, not a separate proprietary fork.
 
 In one line: free to use, free to host yourself, share back if you run it as a
 service for others.
