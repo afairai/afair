@@ -89,6 +89,35 @@ def test_export_cors_on_allowed_origin(vault_dir) -> None:
     assert "Content-Disposition" in r.headers.get("Access-Control-Expose-Headers", "")
 
 
+def test_export_cors_localhost_rejected_in_prod(vault_dir) -> None:
+    """In prod (environment=fly) the localhost dev origin is NOT reflected —
+    only https://afair.ai. Guards against a future refactor re-admitting
+    http://localhost:3000 on the production server."""
+    settings = Settings(
+        vault_dir=vault_dir,
+        afair_auth_token=SecretStr("master"),
+        export_token=SecretStr("test-token"),
+        environment="fly",
+        oauth_issuer="https://solis-e03.mcp.afair.ai",
+        vault_key=SecretStr("k" * 64),
+    )
+    app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])
+    app.state.settings = settings
+    client = TestClient(app)
+    r = client.get(
+        "/internal/export",
+        headers={"Authorization": "Bearer test-token", "Origin": "http://localhost:3000"},
+    )
+    assert r.status_code == 200
+    assert "Access-Control-Allow-Origin" not in r.headers
+    # afair.ai is still allowed in prod.
+    r2 = client.get(
+        "/internal/export",
+        headers={"Authorization": "Bearer test-token", "Origin": "https://afair.ai"},
+    )
+    assert r2.headers.get("Access-Control-Allow-Origin") == "https://afair.ai"
+
+
 def test_export_cors_absent_for_unknown_origin(vault_dir) -> None:
     """A non-allow-listed origin gets no CORS headers — the browser blocks
     the read, so the master bearer can't be exfiltrated to arbitrary sites."""
