@@ -282,34 +282,67 @@ the avoided path.
 
 ---
 
-## 8. Permanent erasure (the I2 right-to-erasure path)
+## 8. Permanent erasure / user retirement (the I2 right-to-erasure path)
 
-When the user invokes their right to be forgotten and wants the data
-**gone**:
+Teardown is productized in **one canonical script**, `scripts/retire_user.py`,
+so the destroy logic lives in exactly one place (symmetric to
+`provision_user.py`). It is never invoked by hand for routine retirement —
+two callers dispatch it through `.github/workflows/retire.yml`:
+
+| Trigger | Reason | Path |
+|---|---|---|
+| 30 days after a canceled sub's period ends | `canceled-grace` | afair-web cron `grace-period-cleanup.mjs` → dispatch `retire.yml` |
+| User clicks "Delete my account" (after export) | `user-requested` | afair-web `deleteAccount` server action → cancel Stripe → dispatch `retire.yml` |
+
+`retire_user.py <clerk_user_id> --reason <r>` does, idempotently:
+
+1. `fly apps destroy <app> --yes` — machine + volume + cert in one call.
+2. Remove the vanity CNAME from the afair.ai Cloudflare zone.
+3. Callback `POST /api/internal/retired` → afair-web sets `deleted_at`,
+   `status='deleted'`, and **wipes the secrets escrow** (dead ciphertext
+   once the volume is gone).
+
+**Important:** a *canceled* subscription is NEVER paused — the user paid
+for the period and keeps full use until it ends; only `period_end + 30d`
+(grace) or an explicit user delete triggers teardown.
+
+### Manual run (break-glass / abuse / test cleanup)
 
 ```bash
-# 1. Last-chance backup if they want a personal copy (see §4)
+# Dry-run first — prints the plan, touches nothing.
+RETIRE_CALLBACK_SECRET=... CLOUDFLARE_API_TOKEN=... \
+  uv run python scripts/retire_user.py <clerk_user_id> --reason manual --dry-run
 
-# 2. Stop the app
-fly scale count 0 -a afair
+# Real run. App + DNS + control-plane row all handled.
+uv run python scripts/retire_user.py <clerk_user_id> --reason manual
 
-# 3. Destroy the volume (this deletes all data, irreversible)
-fly volumes list -a afair
-fly volumes destroy <vol-id> -a afair
-
-# 4. Destroy snapshots too (they retain data for 5 days otherwise)
-fly volumes snapshots list -a afair
-fly volumes snapshots destroy <snap-id> -a afair
-# Repeat for each snapshot.
-
-# 5. Destroy the app itself
-fly apps destroy afair
+# Destroy the app but keep the CNAME (e.g. re-provisioning under same host):
+uv run python scripts/retire_user.py <clerk_user_id> --keep-dns
 ```
 
-Per Phase 9 work, the long-term answer for compliance-grade erasure is:
-the orchestration layer can `fly apps destroy <user-app>` programmatically
-on a right-to-erasure request. Single-tenant makes erasure physically
-obvious.
+Snapshots: `fly apps destroy` removes the volume; its snapshots age out on
+Fly's retention (then gone). For compliance-grade *immediate* snapshot
+erasure, also `fly volumes snapshots destroy <id>` before the retention
+window — rarely needed, but documented.
+
+### Go-live checklist for the retire flow
+
+The teardown code ships dormant until these secrets are wired (all
+additive — nothing breaks before they exist):
+
+- [ ] `gh secret set RETIRE_CALLBACK_SECRET -R gowry/afair` (value in
+      `.env.secrets.backup`) — retire.yml → callback.
+- [ ] `fly secrets set RETIRE_CALLBACK_SECRET=... -a afair-web` — the
+      `/api/internal/retired` route reads it at runtime.
+- [ ] `gh secret set DATABASE_URL -R gowry/afair-web` — the grace cron
+      selects candidates (was referencing a non-existent Actions secret
+      before this refactor).
+- [ ] `gh secret set GH_DISPATCH_TOKEN -R gowry/afair-web` — the grace
+      cron dispatches retire.yml (same token the webhook uses at runtime
+      on Fly; needed here as an Actions secret too).
+
+Single-tenant makes erasure physically obvious: one user = one app = one
+`fly apps destroy`.
 
 ---
 
@@ -325,6 +358,7 @@ obvious.
 | `AFAIR_JWT_SECRET` | Fly secret | `.env.secrets.backup` | `afair.mcp.oauth.jwt.generate_secret()` |
 | `GITHUB_OAUTH_CLIENT_ID` / `SECRET` | Fly secret | `.env.secrets.backup` | github.com/settings/developers |
 | `OAUTH_ISSUER` | Fly secret (not secret-secret, just config — required in prod) | `.env.secrets.backup` | n/a (URL doesn't rotate) |
+| `RETIRE_CALLBACK_SECRET` | GH secret (afair, retire.yml) + Fly secret (afair-web, /api/internal/retired) | `.env.secrets.backup` (both repos) | regenerate via `token_urlsafe(32)`, update both destinations |
 
 To rotate any of these:
 

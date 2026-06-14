@@ -196,7 +196,26 @@ all live and in daily real-world use.
 
 ### 0.2 What's in flight
 
-- _(nothing — the Phase 0 threads below are resolved)_
+- **Retire flow + dashboards — code-complete, awaiting go-live secrets
+  (2026-06-14).** Built the symmetric teardown counterpart to
+  `provision_user.py`: `scripts/retire_user.py` is the SINGLE canonical
+  teardown (destroy Fly app+volume+cert, remove vanity CNAME, callback
+  `/api/internal/retired` → `deleted_at` + `status='deleted'` + escrow
+  wipe), dispatched by `.github/workflows/retire.yml`. Two callers go
+  through it: the afair-web grace cron (`grace-period-cleanup.mjs`
+  refactored from inline-destroy to dispatch, reason `canceled-grace`)
+  and the new account-page **Delete account** flow (export-first +
+  typed confirm → `deleteAccount` server action cancels Stripe →
+  dispatch, reason `user-requested`). Cancellation never pauses the
+  paid machine; teardown only on grace-expiry or explicit user request.
+  Both afair-web dashboards (admin fleet + customer account) rebuilt on
+  a shared dashboard vocabulary (`app/globals.css` dashboard layer +
+  `components/dashboard.tsx` + `lib/format.ts`); impeccable detector
+  clean. 9 new pytest tests (`test_retire_user.py`), full suite 624
+  green, afair-web tsc + build green. **Go-live:** set the 4 secrets in
+  `docs/operations.md §8` (RETIRE_CALLBACK_SECRET on afair Actions +
+  afair-web Fly; DATABASE_URL + GH_DISPATCH_TOKEN on afair-web Actions),
+  then commit + deploy both repos.
 
 ### 0.2-resolved (was in flight, now done)
 
@@ -365,6 +384,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
+| `scripts/retire_user.py` | Canonical per-user teardown (destroy app+volume+cert+CNAME, callback wipes escrow). Shared by grace cron + instant-delete | When the teardown contract changes |
+| `.github/workflows/retire.yml` | Dispatches retire_user.py (from afair-web grace cron + delete action) | When the retire inputs/secrets change |
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-05-27-dashboard-concept.md` | Vault Dashboard design + React-framework selection (read-only insight surface on control plane; not active build) | Frozen — update only if architecture changes |
 | `analysis/2026-05-27-funding-stance.md` | Bootstrap-default-VC-conditional funding decision + EU non-dilutive options + hard-reject criteria | Re-evaluate at ≥500 paying users or when a closing competitive window demands defense capital |
