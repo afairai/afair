@@ -42,7 +42,7 @@ _POINTER = {
     "description": "User-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents.",
     "mcp_endpoint": "/mcp",
     "marketing": "https://afair.ai",
-    "source": "https://github.com/gowry/afair",
+    "source": "https://github.com/afairai/afair",
 }
 
 
