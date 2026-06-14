@@ -38,7 +38,6 @@ _BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 _MAX_LABEL = 80
 
 
-
 def _unauthorized(request: Request) -> Response:
     return JSONResponse(
         {"error": "unauthorized"},
