@@ -429,47 +429,39 @@ def cloudflare_create_cname(
 # ── secrets backup write ──────────────────────────────────────────────────
 
 
-def append_secrets_backup(*, app: str, identity: str, s: UserSecrets) -> None:
-    """Append the per-user secrets block to .env.secrets.backup.
+def encrypt_escrow(s: UserSecrets) -> str | None:
+    """Encrypt the per-user secret bundle for the afair-web DB escrow.
 
-    Format follows the global CLAUDE.md secrets-backup convention:
-    each secret is annotated with where it's placed, when it was
-    created, and how to rotate.
+    The bundle (vault key + bearer + jwt + signup) is the only durable copy
+    of a user's secrets outside their own Fly app. Encrypted with the
+    operator-held PLATFORM_ESCROW_KEY so the afair-web DB stores ONLY
+    ciphertext — a DB compromise alone cannot read any user's vault key.
+    Recovery (scripts/recover_user.py) decrypts with the same key and
+    re-sets the Fly secrets if a machine is ever lost.
+
+    Per-user secrets are NEVER written to the operator's .env.secrets.backup;
+    only this encrypted escrow leaves the provisioning process.
     """
-    from datetime import UTC, datetime
+    import os
 
-    today = datetime.now(UTC).date().isoformat()
-    block = f"""
+    key = os.environ.get("PLATFORM_ESCROW_KEY")
+    if not key:
+        print(
+            "encrypt_escrow: PLATFORM_ESCROW_KEY not set — escrow skipped "
+            "(NO durable recovery for this user!)"
+        )
+        return None
+    from cryptography.fernet import Fernet
 
-# ───── PER-USER PROVISIONING — {app} ({identity}) ─────
-# Created by scripts/provision_user.py on {today}.
-# These secrets gate ONLY the user's own app — never reuse across users.
-
-AFAIR_AUTH_TOKEN_{app.upper().replace("-", "_")}={s.auth_token}
-# placed: Fly secret on {app}
-# created: {today}, expires: no expiry
-# rotate: python3 -c 'import secrets; print(secrets.token_urlsafe(32))' \\
-#         + flyctl secrets set AFAIR_AUTH_TOKEN=<new> -a {app}
-
-AFAIR_JWT_SECRET_{app.upper().replace("-", "_")}={s.jwt_secret}
-# placed: Fly secret on {app}
-# created: {today}, expires: no expiry
-# rotate: same as AFAIR_AUTH_TOKEN; existing JWTs invalidate immediately
-
-AFAIR_SIGNUP_TOKEN_{app.upper().replace("-", "_")}={s.signup_token}
-# placed: Fly secret on {app}
-# created: {today}, expires: no expiry
-# rotate: same as above; afair-web also needs the new value if it
-#         posts signups to this user's app
-
-AFAIR_VAULT_KEY_{app.upper().replace("-", "_")}={s.vault_key}
-# placed: Fly secret on {app}. SQLCipher master key — the vault is
-#         UNRECOVERABLE without it. Back this up; never rotate casually
-#         (re-keying requires full vault re-encryption).
-# created: {today}, expires: no expiry
-"""
-    with ENV_SECRETS_BACKUP.open("a", encoding="utf-8") as fh:
-        fh.write(block)
+    bundle = json.dumps(
+        {
+            "vault_key": s.vault_key,
+            "auth_token": s.auth_token,
+            "jwt_secret": s.jwt_secret,
+            "signup_token": s.signup_token,
+        }
+    ).encode("utf-8")
+    return Fernet(key.encode()).encrypt(bundle).decode()
 
 
 # ── orchestration ─────────────────────────────────────────────────────────
@@ -741,7 +733,9 @@ def migrate(
     return app, vanity
 
 
-def notify_provisioned(*, identity: str, app: str, vanity: str) -> bool:
+def notify_provisioned(
+    *, identity: str, app: str, vanity: str, secrets_escrow: str | None = None
+) -> bool:
     """Tell afair-web the machine is up so it fills fly_app/vanity_host and
     the /welcome poll flips from in_flight to complete.
 
@@ -757,9 +751,14 @@ def notify_provisioned(*, identity: str, app: str, vanity: str) -> bool:
     if not secret:
         print("notify_provisioned: PROVISION_CALLBACK_SECRET not set — skipping callback")
         return False
-    body = json.dumps({"clerk_user_id": identity, "fly_app": app, "vanity_host": vanity}).encode(
-        "utf-8"
-    )
+    payload: dict[str, str] = {
+        "clerk_user_id": identity,
+        "fly_app": app,
+        "vanity_host": vanity,
+    }
+    if secrets_escrow:
+        payload["secrets_escrow"] = secrets_escrow
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -885,8 +884,11 @@ def provision(
     #    live as soon as cert + DNS both ready.
     fly_add_cert(app, vanity, dry=dry)
 
-    if not dry:
-        append_secrets_backup(app=app, identity=identity, s=s)
+    # NB: per-user secrets are NEVER written to the operator's
+    # .env.secrets.backup (that file holds only the operator's own
+    # secrets). Durable recovery for other users goes through the
+    # encrypted DB escrow (see encrypt_escrow + the /internal/provisioned
+    # callback), not this file.
 
     return app, vanity, s
 
@@ -990,8 +992,12 @@ def main() -> None:
 
         sent = send_onboarding_email(email=args.email, vanity_host=vanity, auth_token=s.auth_token)
         print(f"  Onboarding email: {'sent' if sent else 'FAILED (see log)'} -> {args.email}")
-        notified = notify_provisioned(identity=args.identity, app=app, vanity=vanity)
+        escrow = encrypt_escrow(s)
+        notified = notify_provisioned(
+            identity=args.identity, app=app, vanity=vanity, secrets_escrow=escrow
+        )
         print(f"  afair-web callback: {'ok' if notified else 'FAILED (fly_app not recorded)'}")
+        print(f"  secrets escrow: {'stored' if escrow else 'SKIPPED (set PLATFORM_ESCROW_KEY)'}")
     else:
         print("  Tokens (also persisted in .env.secrets.backup):")
         print(f"    AFAIR_AUTH_TOKEN   = {s.auth_token}")
