@@ -49,7 +49,7 @@ dependencies = [
     # loop='uvloop'. Linux-only (Fly runs Linux); harmless on dev macOS.
     "uvloop>=0.20.0; sys_platform != 'win32'",
     # Structured logging
-    "structlog>=24.4.0",
+    "structlog>=26.1.0",
     # HTTP client
     "httpx>=0.27.0",
     # Binary content extraction (multi-modal Phase 1 — PDF text, audio
