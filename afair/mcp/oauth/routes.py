@@ -42,6 +42,8 @@ from . import jwt as jwt_mod
 from .identity import GitHubIdentityBackend, IdentityBackend
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from starlette.requests import Request
 
     from ...settings import Settings
@@ -124,7 +126,7 @@ def _validate_redirect_uri(uri: str) -> str | None:
     return None
 
 
-def _redirect_uri_registered(presented: str, registered: list[str]) -> bool:
+def _redirect_uri_registered(presented: str, registered: Sequence[str]) -> bool:
     """Whether ``presented`` matches one of the client's registered URIs.
 
     Exact match for everything — PLUS RFC 8252 §7.3: a native client (Claude
