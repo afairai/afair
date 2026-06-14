@@ -53,7 +53,7 @@ The workflow at `.github/workflows/deploy.yml`:
 4. Deploys with `--wait-timeout 5m`
 5. Verifies `/health` returns 200
 
-Watch progress: `gh run watch` or [github.com/gowry/afair/actions](https://github.com/gowry/afair/actions)
+Watch progress: `gh run watch` or [github.com/afairai/afair/actions](https://github.com/afairai/afair/actions)
 
 ### When push-to-main does NOT auto-trigger CI
 
@@ -335,12 +335,12 @@ window — rarely needed, but documented.
 The teardown code ships dormant until these secrets are wired (all
 additive — nothing breaks before they exist):
 
-- [x] `gh secret set RETIRE_CALLBACK_SECRET -R gowry/afair` — retire.yml → callback. **(done 2026-06-14)**
+- [x] `gh secret set RETIRE_CALLBACK_SECRET -R afairai/afair` — retire.yml → callback. **(done 2026-06-14)**
 - [x] `fly secrets set RETIRE_CALLBACK_SECRET=... -a afair-web` — the
       `/api/internal/retired` route reads it at runtime. **(done)**
 - [x] `fly secrets set GRACE_SWEEP_SECRET=... -a afair-web` — the
       `/api/internal/grace-sweep` endpoint reads it. **(done)**
-- [x] `gh secret set GRACE_SWEEP_SECRET -R gowry/afair-web` — the daily
+- [x] `gh secret set GRACE_SWEEP_SECRET -R afairai/afair-web` — the daily
       cron curls the endpoint with it. **(done)**
 
 `GH_DISPATCH_TOKEN` and `DATABASE_URL` stay **Fly secrets on afair-web
@@ -393,7 +393,7 @@ echo "AFAIR_AUTH_TOKEN=$NEW" >> .env.secrets.backup  # plus annotations
 ```
 
 `AFAIR_SIGNUP_TOKEN` rotation must be paired with
-`gh secret set AFAIR_SIGNUP_TOKEN -R gowry/afair-web --body <new>`
+`gh secret set AFAIR_SIGNUP_TOKEN -R afairai/afair-web --body <new>`
 so the landing-page form keeps working.
 
 ### Production boot requires these to be set
@@ -517,7 +517,7 @@ derived via the recipe documented inline at the top of the directory.
 
 `gh` CLI does not expose this. Manual UI step:
 
-1. Open <https://github.com/gowry/afair/settings>
+1. Open <https://github.com/afairai/afair/settings>
 2. Under **Social preview**, click **Edit**
 3. Upload `assets/logo/social-preview.png`
 4. Save

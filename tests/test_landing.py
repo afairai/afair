@@ -30,10 +30,10 @@ def test_pointer_payload_includes_mcp_endpoint_path() -> None:
 def test_pointer_payload_includes_marketing_and_source() -> None:
     """Two outbound pointers: where to learn about the product
     (afair.ai), and where to read the source / self-host
-    (gowry/afair). Keeps the substrate machine itself OUT of any
+    (afairai/afair). Keeps the substrate machine itself OUT of any
     marketing role."""
     assert landing._POINTER["marketing"] == "https://afair.ai"
-    assert landing._POINTER["source"] == "https://github.com/gowry/afair"
+    assert landing._POINTER["source"] == "https://github.com/afairai/afair"
 
 
 @pytest.mark.asyncio

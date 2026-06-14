@@ -34,7 +34,7 @@ The full set, with reasoning, is in VISION.md §4.
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/gowry/afair.git
+git clone https://github.com/afairai/afair.git
 cd afair
 uv sync
 cp .env.example .env
