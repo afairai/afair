@@ -26,6 +26,8 @@ import hashlib
 from typing import TYPE_CHECKING
 
 from .encryption import (
+    BLOB_ENVELOPE_OVERHEAD,
+    BLOB_MAGIC_LEN,
     decrypt_blob,
     derive_blob_aesgcm_key,
     encrypt_blob,
@@ -135,10 +137,43 @@ def object_exists(vault_dir: Path, blob_hash: str) -> bool:
 def object_size(vault_dir: Path, blob_hash: str) -> int:
     """Return the on-disk size for an existing blob.
 
+    This is the size of the bytes ACTUALLY on disk — the AES-GCM envelope
+    (magic + nonce + ciphertext + tag) when encryption is active, or the raw
+    bytes in plaintext mode. For disk accounting. For the logical size of the
+    user's content, use :func:`object_plaintext_size`.
+
     Raises ``FileNotFoundError`` if missing — caller's responsibility
     to gate with :func:`object_exists` first.
     """
     return object_path(vault_dir, blob_hash).stat().st_size
+
+
+def object_plaintext_size(vault_dir: Path, blob_hash: str) -> int:
+    """Return the PLAINTEXT byte length of a stored blob, without decrypting.
+
+    An encrypted blob is stored as ``magic | nonce | ciphertext+tag``; AES-GCM
+    ciphertext is byte-for-byte the same length as the plaintext, so the
+    plaintext size is exactly the on-disk size minus the fixed envelope
+    overhead (:data:`~afair.substrate.encryption.BLOB_ENVELOPE_OVERHEAD`).
+    Unencrypted (local-dev) blobs are stored verbatim, so on-disk ==
+    plaintext. Reads only the magic header, not the whole file.
+
+    This is what an event row's ``size_bytes`` must reflect, so that one blob
+    reports the same logical size no matter how it entered the store — inline
+    binary (``len(data)``), streamed blob-ref, or compound part. Reporting the
+    on-disk size on some paths and the plaintext size on others makes
+    size_bytes mean two different things, which breaks any consumer that sums
+    or displays it (quota, "you've stored X MB", the export manifest).
+
+    Raises ``FileNotFoundError`` if missing — gate with :func:`object_exists`.
+    """
+    path = object_path(vault_dir, blob_hash)
+    on_disk = path.stat().st_size
+    with path.open("rb") as fh:
+        head = fh.read(BLOB_MAGIC_LEN)
+    if looks_encrypted(head):
+        return on_disk - BLOB_ENVELOPE_OVERHEAD
+    return on_disk
 
 
 # ── streaming writer ─────────────────────────────────────────────────────
