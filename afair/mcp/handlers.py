@@ -759,6 +759,14 @@ def remember(
     ctx = get_context()
     db = connect_for_thread()
 
+    # When text spills to the object store (text-large), the canonical payload
+    # holds only a blob_hash, so the FTS index would miss the body. Carry the
+    # full text as the searchable body so a large paste stays findable by its
+    # contents from the moment it's written (the Extractor enriches further,
+    # but the keyword index must not wait on the cold path). None for every
+    # other content shape — the body is already in the payload or is binary.
+    searchable_body: str | None = None
+
     if isinstance(content, TextContent):
         encoded = content.text.encode("utf-8")
         if len(encoded) > MAX_REMEMBER_BYTES:
@@ -771,6 +779,8 @@ def remember(
             vault_dir=ctx.vault_dir,
             inline_text_max_bytes=ctx.inline_text_max_bytes,
         )
+        if payload.get("content_type") == "text-large":
+            searchable_body = content.text
     elif isinstance(content, BinaryContent):
         try:
             raw = base64.b64decode(content.data_b64, validate=True)
@@ -852,6 +862,7 @@ def remember(
         kind="remember",
         payload=payload,
         parent_hashes=parent_hashes,
+        searchable_body=searchable_body,
     )
     if was_inserted:
         pe.record(

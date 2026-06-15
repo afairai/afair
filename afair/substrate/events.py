@@ -60,6 +60,7 @@ def write_event(
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
     created_at: str | None = None,
+    searchable_body: str | None = None,
 ) -> Event:
     """Insert one event, idempotent on its content hash. Returns the Event.
 
@@ -73,6 +74,7 @@ def write_event(
         payload=payload,
         parent_hashes=parent_hashes,
         created_at=created_at,
+        searchable_body=searchable_body,
     )
     return event
 
@@ -85,9 +87,16 @@ def write_event_with_status(
     payload: dict[str, Any],
     parent_hashes: list[str] | None = None,
     created_at: str | None = None,
+    searchable_body: str | None = None,
 ) -> tuple[Event, bool]:
     """Insert-or-return-existing variant that also reports whether a fresh
     INSERT happened.
+
+    ``searchable_body`` overrides the primary text that goes into the FTS5
+    index — used when the body spilled to the object store (``text-large``)
+    so the index still covers it even though the canonical payload only holds
+    a ``blob_hash``. It does not affect the content hash (identity is
+    payload-only), so two writes of the same payload still dedupe regardless.
 
     Returns ``(event, was_inserted)``. ``was_inserted=True`` means this call
     actually wrote the row; ``False`` means the content_hash already existed
@@ -110,7 +119,7 @@ def write_event_with_status(
     created_at = created_at or _now_iso()
     payload_json = canonical_json(payload)
     parents_json = canonical_json(sorted_parents) if sorted_parents else None
-    searchable = derive_searchable_text(payload)
+    searchable = derive_searchable_text(payload, body_override=searchable_body)
 
     # Atomic insert-or-return-existing: the previous pattern of
     # ``read_event_by_hash → INSERT`` had a TOCTOU race — two concurrent
