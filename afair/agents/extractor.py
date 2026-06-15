@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ..substrate import object_path, open_db
+from ..substrate import object_path, open_db, read_object
 from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_id
 from .binary_extractors import (
@@ -312,6 +312,46 @@ def _run_extraction(
                     version=EXTRACTOR_SCHEMA_VERSION,
                     produced_by=f"extractor:audio:{transcription_model}",
                     error_type="audio_transcription_error",
+                    error_message=str(e),
+                )
+                return
+
+    # text-large: the body spilled to the object store, so the payload the
+    # LLM would otherwise see carries only a blob_hash. Rehydrate it the same
+    # way PDF/audio yield text — read the blob back as the extracted_text. One
+    # read closes three holes at once: the extraction now runs on the real
+    # body, _embedding_text_for_event embeds it, and _enrich_fts_after_extraction
+    # indexes it. Without this, a >inline-threshold paste is invisible to the
+    # entire intelligence layer.
+    if content_type == "text-large" and extracted_text is None:
+        blob_hash = payload.get("blob_hash") if isinstance(payload, dict) else None
+        if isinstance(blob_hash, str):
+            try:
+                extracted_text = read_object(vault_dir, blob_hash).decode("utf-8")
+                extractor_subtag = "text-large"
+                log.info(
+                    "extractor.text_large_rehydrated",
+                    event_id=event_id,
+                    chars=len(extracted_text),
+                )
+            except (OSError, ValueError, UnicodeDecodeError) as e:
+                # Blob unreadable (missing / corrupt / not UTF-8). Record the
+                # failure and return, like the PDF/audio paths: extracting from
+                # metadata only would also make _enrich_fts_after_extraction
+                # rewrite the FTS row WITHOUT the body, discarding the full text
+                # the write path already indexed via searchable_body. Returning
+                # leaves that write-time row intact, so the paste stays findable.
+                log.warning(
+                    "extractor.text_large_failed",
+                    event_id=event_id,
+                    error=str(e),
+                )
+                write_failed_interpretation(
+                    db,
+                    event=event,
+                    version=EXTRACTOR_SCHEMA_VERSION,
+                    produced_by=f"extractor:text-large:{model}",
+                    error_type="text_large_read_error",
                     error_message=str(e),
                 )
                 return

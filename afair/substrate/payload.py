@@ -50,7 +50,7 @@ def content_hash(
     return f"sha256:{hashlib.sha256(serialized).hexdigest()}"
 
 
-def derive_searchable_text(payload: dict[str, Any]) -> str:
+def derive_searchable_text(payload: dict[str, Any], *, body_override: str | None = None) -> str:
     """Compose the text body that FTS5 indexes for an event.
 
     Permissive by design (Invariant I3): unknown content types still get a
@@ -62,11 +62,18 @@ def derive_searchable_text(payload: dict[str, Any]) -> str:
     For object-store payloads: the metadata fields (mime, filename_hint, etc.).
     For observe-event payloads: action/subject/result.
     For compound events: each part's text + label, concatenated.
-    The blob bytes themselves are not searchable from here; a future
-    Extractor may produce searchable summaries via the Interpretation layer.
+
+    ``body_override`` supplies the primary text when it does not live in the
+    payload. A ``text-large`` payload carries only a ``blob_hash`` (the body
+    spilled to the object store), so without the override its body would never
+    reach FTS — a >inline-threshold paste would be unfindable by its contents.
+    The caller that spilled the text passes it here so the index covers the
+    body, while the canonical (hashed) payload stays small. The binary bytes
+    of a true binary blob are still not searchable from here; the Extractor
+    produces searchable summaries for those via the Interpretation layer.
     """
     parts: list[str] = []
-    text = payload.get("text")
+    text = body_override if body_override is not None else payload.get("text")
     if isinstance(text, str):
         parts.append(text)
     for key in (
