@@ -61,7 +61,7 @@ from ..substrate import (
     build_text_payload,
     iter_events,
     object_exists,
-    object_size,
+    object_plaintext_size,
     read_edges_by_source_event_ids,
     read_entities_batch,
     read_event_by_hash,
@@ -815,7 +815,7 @@ def remember(
                     {
                         "type": "blob-ref",
                         "blob_hash": part.blob_hash,
-                        "size_bytes": object_size(ctx.vault_dir, part.blob_hash),
+                        "size_bytes": object_plaintext_size(ctx.vault_dir, part.blob_hash),
                         "mime": part.mime,
                         "filename_hint": part.filename_hint,
                         "label": part.label,
@@ -832,7 +832,7 @@ def remember(
         if not object_exists(ctx.vault_dir, content.blob_hash):
             msg = f"blob_hash {content.blob_hash!r} not found in object store"
             raise InvalidateTargetError(msg)
-        size_bytes = object_size(ctx.vault_dir, content.blob_hash)
+        size_bytes = object_plaintext_size(ctx.vault_dir, content.blob_hash)
         payload = build_blob_ref_payload(
             blob_hash=content.blob_hash,
             size_bytes=size_bytes,

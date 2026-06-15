@@ -50,7 +50,11 @@ import structlog
 from starlette.responses import StreamingResponse
 
 from ..substrate import open_db
-from ..substrate.objects import object_exists, object_size, read_object
+from ..substrate.objects import (
+    object_exists,
+    object_plaintext_size,
+    read_object,
+)
 from .cors import cors_headers
 
 if TYPE_CHECKING:
@@ -220,7 +224,10 @@ def _iter_export(
                 seen_hashes.add(h)
                 if not object_exists(vault_dir, h):
                     continue
-                size = object_size(vault_dir, h)
+                # Plaintext size so it matches the decrypted bytes in
+                # content_b64 below — a consumer that base64-decodes and
+                # length-checks must not see a 32-byte envelope discrepancy.
+                size = object_plaintext_size(vault_dir, h)
                 rec: dict[str, Any] = {
                     "kind": "blob",
                     "blob_hash": h,

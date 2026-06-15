@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 from afair.substrate import open_db
 from afair.substrate.db import set_vault_key
 from afair.substrate.encryption import (
+    BLOB_ENVELOPE_OVERHEAD,
     decrypt_blob,
     derive_blob_aesgcm_key,
     derive_sqlcipher_key,
@@ -36,6 +37,8 @@ from afair.substrate.encryption import (
 )
 from afair.substrate.objects import (
     StreamingObjectWriter,
+    object_plaintext_size,
+    object_size,
     read_object,
     write_object,
 )
@@ -330,3 +333,54 @@ def test_streaming_writer_hash_is_on_plaintext(tmp_path: Path):
     h_enc = writer.finalize()
 
     assert h_plain == h_enc
+
+
+# ── plaintext-size accounting ─────────────────────────────────────────────
+#
+# size_bytes on an event row must mean PLAINTEXT bytes no matter how the blob
+# entered the store (inline binary, streamed blob-ref, compound part). The bug
+# this guards: object_size returns the on-disk ENCRYPTED envelope length, so a
+# blob-ref / compound path that reported object_size disagreed with the direct
+# binary path (which reports len(plaintext)) by exactly the 32-byte envelope.
+
+
+def test_object_plaintext_size_encrypted_strips_envelope(tmp_path: Path):
+    """Encrypted: plaintext size = on-disk size - fixed envelope overhead,
+    computed without decrypting."""
+    set_vault_key(_new_key())
+    plaintext = b"some blob content of a known length" * 100
+    blob_hash = write_object(tmp_path, plaintext)
+
+    assert object_plaintext_size(tmp_path, blob_hash) == len(plaintext)
+    # On-disk is larger by exactly the envelope overhead (magic+nonce+tag).
+    assert object_size(tmp_path, blob_hash) == len(plaintext) + BLOB_ENVELOPE_OVERHEAD
+    assert BLOB_ENVELOPE_OVERHEAD == 32
+
+
+def test_object_plaintext_size_plaintext_mode_equals_on_disk(tmp_path: Path):
+    """No key: nothing to strip, plaintext size == on-disk size."""
+    set_vault_key(None)
+    plaintext = b"unencrypted blob bytes"
+    blob_hash = write_object(tmp_path, plaintext)
+
+    assert object_plaintext_size(tmp_path, blob_hash) == len(plaintext)
+    assert object_size(tmp_path, blob_hash) == len(plaintext)
+
+
+def test_object_plaintext_size_consistent_across_entry_paths(tmp_path: Path):
+    """The regression: identical content reports the SAME plaintext size
+    whether it arrived via write_object (the inline-binary path) or via
+    StreamingObjectWriter (the blob-ref / streaming-upload path)."""
+    content = b"identical payload, two doors" * 500
+
+    set_vault_key(_new_key())
+    h_direct = write_object(tmp_path / "direct", content)
+
+    writer = StreamingObjectWriter(tmp_path / "streamed")
+    for i in range(0, len(content), 7919):  # odd chunking, crosses buffers
+        writer.feed(content[i : i + 7919])
+    h_streamed = writer.finalize()
+
+    size_direct = object_plaintext_size(tmp_path / "direct", h_direct)
+    size_streamed = object_plaintext_size(tmp_path / "streamed", h_streamed)
+    assert size_direct == size_streamed == len(content)
