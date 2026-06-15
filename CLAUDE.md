@@ -149,7 +149,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/self-hosting.md` | Self-host guide: local + prod, encryption + the vault key, backups, upgrades | When setup/encryption changes |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `.github/workflows/ci.yml` | Product CI — lint/type/test on push + PR. No deploy, no secrets | When the gate set changes |
-| `.github/workflows/release.yml` | A `vX.Y.Z` tag publishes a GitHub Release (notes from the CHANGELOG section) and dispatches the afair-web fleet deploy at that tag | When the release flow changes |
+| `.github/workflows/release.yml` | A `vX.Y.Z` tag publishes a GitHub Release (notes from the CHANGELOG section) and dispatches the afair-web fleet deploy at that tag (manual-tag fallback path) | When the release flow changes |
+| `.github/workflows/release-please.yml` + `release-please-config.json` + `.release-please-manifest.json` | Default automated release flow: a standing release PR bumps the version + CHANGELOG from Conventional Commits; merging it tags, publishes the GitHub Release, and deploys the fleet (uv.lock synced on the PR) | When the release flow changes |
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare — when transport changes |
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare — when canonicalizer interface changes |
