@@ -69,6 +69,8 @@ The system may revise its own extraction rules, retrieval strategies, and agent 
 ### I8. Single-Tenant by Design
 Every deployed instance — self-hosted or managed — belongs to exactly one user. No shared database, no shared application server, no row-level user separation. The hosted offering provisions a dedicated machine per paying user. Multi-tenancy is forbidden architecturally, not just practically. The orchestration layer that manages billing and provisioning may be shared; user data and application state never are.
 
+> **Why these eight, and where their real risks are:** the reasoning behind the invariants — each as the negation of a specific failure mode, how they reinforce one another, and the accepted long-term bets they carry — is recorded in [ADR-0001](docs/adr/ADR-0001-constitutional-invariants.md). This text stays authoritative; the ADR explains it.
+
 ---
 
 ## 5. Core Thesis

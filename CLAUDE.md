@@ -136,6 +136,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | File | Purpose | Update cadence |
 |---|---|---|
 | `VISION.md` | The constitution — vision, mission, invariants, architecture, competitive landscape, research grounding | Quarterly review; treat as zeitlos — no per-phase status updates |
+| `docs/adr/ADR-0001-constitutional-invariants.md` | Why the eight invariants exist + why drawn this way: each negates a failure mode, the three reinforcing chains, the I2-erasure clarification, and the accepted bets (I8 economics, I3 projection discipline, I7 aspirational). Has re-examination triggers | When an invariant is re-examined or a bet resolves |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3 — the open-source core license (see VISION §12) | Only on a license change |
