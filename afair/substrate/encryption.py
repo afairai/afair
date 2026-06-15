@@ -53,7 +53,17 @@ _BLOB_AESGCM_CONTEXT = b"afair.vault.v1.blob.aesgcm"
 # = 32 bytes per blob.
 _BLOB_MAGIC = b"AF01"
 _BLOB_NONCE_LEN = 12
+_BLOB_GCM_TAG_LEN = 16  # AES-GCM authentication tag, appended after the ciphertext
 _BLOB_AESGCM_KEY_LEN = 32  # AES-256
+
+# Public envelope geometry. AES-GCM ciphertext is byte-for-byte the same
+# length as the plaintext, so an encrypted blob's plaintext size is exactly
+# its on-disk size minus this fixed overhead — no decryption needed to know
+# the original length. Used by objects.object_plaintext_size so the event
+# row's size_bytes always reflects PLAINTEXT bytes, regardless of how the
+# blob entered the store.
+BLOB_MAGIC_LEN = len(_BLOB_MAGIC)
+BLOB_ENVELOPE_OVERHEAD = BLOB_MAGIC_LEN + _BLOB_NONCE_LEN + _BLOB_GCM_TAG_LEN
 
 
 class _NoKeyError(RuntimeError):
@@ -136,7 +146,7 @@ def decrypt_blob(envelope: bytes, blob_key: bytes) -> bytes:
         cryptography.exceptions.InvalidTag: wrong key or corrupted
             ciphertext.
     """
-    if len(envelope) < len(_BLOB_MAGIC) + _BLOB_NONCE_LEN + 16:
+    if len(envelope) < len(_BLOB_MAGIC) + _BLOB_NONCE_LEN + _BLOB_GCM_TAG_LEN:
         msg = (
             f"blob envelope is too short ({len(envelope)} bytes); "
             f"expected magic + nonce + ciphertext + tag"
