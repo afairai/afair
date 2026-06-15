@@ -82,6 +82,32 @@ uv run pytest              # tests
 Use the issue templates. For security problems, do **not** open a public issue;
 follow [SECURITY.md](SECURITY.md) instead.
 
+## Releasing
+
+Releases are cut by a maintainer with semantic versions (`vMAJOR.MINOR.PATCH`).
+afair is pre-1.0, so minor bumps may still carry behavioural change behind the
+frozen MCP surface; the surface itself never breaks (Invariant I1).
+
+The ritual, in one PR plus one tag:
+
+1. Move the `## [Unreleased]` entries in `CHANGELOG.md` into a new dated section
+   `## [X.Y.Z] - YYYY-MM-DD`, leave a fresh empty `## [Unreleased]` on top, and
+   add the two link references at the bottom (`compare/...HEAD` and the release
+   tag). Keep the notes hand-written and readable; this is what ships as the
+   GitHub Release body.
+2. Bump the version in `pyproject.toml` and `CITATION.cff` (`version` +
+   `date-released`).
+3. Merge that to `main`, then tag and push:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The `Release` workflow then publishes a GitHub Release with the CHANGELOG
+section as its notes, and signals the private control plane (afair-web) to
+deploy the fleet pinned to that tag. No manual release step in the GitHub UI.
+
 ## License
 
 afair is licensed under AGPLv3. By contributing, you agree that your

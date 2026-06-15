@@ -1,19 +1,50 @@
 name: Release
 
-# On a version tag (vX.Y.Z), trigger the fleet deploy in the private control
-# plane (afair-web) pinned to this exact tag. The product repo never deploys
-# the operator's infrastructure itself — it just signals "this ref is a release"
-# and afair-web rolls it out (gates, secret check, deploy, health).
+# On a version tag (vX.Y.Z):
+#   1. publish a GitHub Release whose notes come from the matching CHANGELOG.md
+#      section — afair keeps hand-written Keep-a-Changelog sections rather than
+#      auto-generated commit dumps, so the release reads well;
+#   2. trigger the fleet deploy in the private control plane (afair-web), pinned
+#      to this exact tag, so the product repo never deploys the operator's
+#      infrastructure itself.
 #
-# Requires the FLEET_DISPATCH_TOKEN secret: a fine-grained PAT with Actions:write
-# on afairai/afair-web.
+# trigger-fleet-deploy requires FLEET_DISPATCH_TOKEN (a fine-grained PAT with
+# Actions:write on afairai/afair-web).
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write # create the GitHub Release
+
 jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Extract this version's CHANGELOG section
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ ("^## \\[" v "\\]") { flag = 1; next }
+            flag && (/^## \[/ || /^\[[^]]+\]:/) { exit }
+            flag { print }
+          ' CHANGELOG.md | sed '/./,$!d' > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            printf 'Release %s. See CHANGELOG.md.\n' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          fi
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            --verify-tag
+
   trigger-fleet-deploy:
     runs-on: ubuntu-latest
     steps:
