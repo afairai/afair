@@ -1,6 +1,6 @@
 [project]
 name = "afair"
-version = "0.0.1"
+version = "0.1.0"
 description = "Your memory across every AI you use: a self-hostable, append-only memory vault for AI assistants, over MCP."
 readme = "README.md"
 requires-python = ">=3.12"
