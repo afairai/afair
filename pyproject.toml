@@ -13,7 +13,7 @@ dependencies = [
     # MCP server framework (Streamable HTTP transport)
     "fastmcp>=2.0.0",
     # HTTP framework under FastMCP
-    "fastapi>=0.115.0",
+    "fastapi>=0.137.0",
     "uvicorn[standard]>=0.32.0",
     # Validation
     "pydantic>=2.9.0",
@@ -37,7 +37,7 @@ dependencies = [
     "httpx-oauth>=0.15.0",
     # JWT signing/verification for the OAuth resource server (we issue +
     # verify HS256 tokens; PKCE/DCR are implemented directly, not via Authlib)
-    "pyjwt[crypto]>=2.10.0",
+    "pyjwt[crypto]>=2.13.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
     "litellm>=1.52.0",
     # Local ONNX embeddings — opt-in vendor for the embedding hot path.
@@ -49,7 +49,7 @@ dependencies = [
     # loop='uvloop'. Linux-only (Fly runs Linux); harmless on dev macOS.
     "uvloop>=0.20.0; sys_platform != 'win32'",
     # Structured logging
-    "structlog>=24.4.0",
+    "structlog>=26.1.0",
     # HTTP client
     "httpx>=0.27.0",
     # Binary content extraction (multi-modal Phase 1 — PDF text, audio
@@ -68,9 +68,9 @@ afair = "afair.__main__:main"
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=6.0.0",
-    "ruff>=0.7.0",
+    "ruff>=0.15.17",
     "mypy>=1.13.0",
 ]
 
