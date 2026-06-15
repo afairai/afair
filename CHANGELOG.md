@@ -5,12 +5,14 @@ All notable changes to afair are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0.
 
-afair is pre-1.0, so everything to date sits under Unreleased. The MCP surface
-(`remember`, `recall`, `observe`) is already frozen and additive per Invariant
-I1; everything behind it can still move. Per-feature detail and dates live in
+afair is pre-1.0. The MCP surface (`remember`, `recall`, `observe`) is already
+frozen and additive per Invariant I1; everything behind it can still move.
+Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-06-15
 
 ### Added
 
@@ -59,4 +61,5 @@ I1; everything behind it can still move. Per-feature detail and dates live in
   bearer tokens for the signup and export side-channels; rate limiting on
   authentication endpoints.
 
-[Unreleased]: https://github.com/afairai/afair/commits/main
+[Unreleased]: https://github.com/afairai/afair/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/afairai/afair/releases/tag/v0.1.0
