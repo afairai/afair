@@ -793,3 +793,88 @@ def test_live_extraction_against_anthropic(tmp_path: Path) -> None:
     finally:
         db.close()
         clear_context()
+
+
+# ── text-large lifecycle (>inline-threshold text that spills to a blob) ──────
+#
+# Regression guard for the spill gap: a text payload above
+# inline_text_max_bytes spills to the object store, so the canonical event
+# row carries only a blob_hash. Without explicit handling that body would be
+# invisible to FTS (write-time) and to the extractor + embedding (cold path).
+
+
+def _spilled_text_payload(ctx: ServerContext, body: str) -> dict[str, Any]:
+    from afair.substrate.payload import build_text_payload
+
+    payload = build_text_payload(
+        text=body,
+        context=None,
+        type_hint=None,
+        vault_dir=ctx.vault_dir,
+        inline_text_max_bytes=ctx.inline_text_max_bytes,
+    )
+    assert payload["content_type"] == "text-large"  # actually spilled
+    assert "text" not in payload  # body is NOT inline in the canonical row
+    return payload
+
+
+def test_text_large_body_indexed_in_fts_at_write_time(ctx: ServerContext) -> None:
+    """The spilled body reaches FTS immediately via searchable_body — no
+    dependency on the cold path. A large paste is findable the moment it's
+    written."""
+    from afair.substrate import write_event
+
+    marker = "zylophthalmic"  # distinctive token that only the body contains
+    body = ("filler sentence for bulk. " * 5000) + marker
+    assert len(body.encode("utf-8")) > ctx.inline_text_max_bytes
+
+    payload = _spilled_text_payload(ctx, body)
+    write_event(ctx.db, origin="user", kind="remember", payload=payload, searchable_body=body)
+
+    hits = ctx.db.execute(
+        "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH ?", (marker,)
+    ).fetchone()[0]
+    assert hits == 1
+
+
+def test_text_large_without_searchable_body_is_invisible_to_fts(ctx: ServerContext) -> None:
+    """Documents the bug the override fixes: a spilled body written WITHOUT
+    searchable_body is unfindable by its contents — proving the override is
+    load-bearing, not cosmetic."""
+    from afair.substrate import write_event
+
+    marker = "phlogisticum"
+    body = ("filler sentence for bulk. " * 5000) + marker
+    payload = _spilled_text_payload(ctx, body)
+    write_event(ctx.db, origin="user", kind="remember", payload=payload)  # no override
+
+    hits = ctx.db.execute(
+        "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH ?", (marker,)
+    ).fetchone()[0]
+    assert hits == 0
+
+
+def test_extractor_rehydrates_text_large_body(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extractor reads the spilled blob back, so the body reaches the
+    interpretation (hence embedding) and survives the FTS enrich step."""
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+    from afair.substrate import write_event
+
+    marker = "qwizzlefemt"
+    body = ("lorem ipsum dolor sit amet. " * 6000) + marker
+    payload = _spilled_text_payload(ctx, body)
+    e = write_event(ctx.db, origin="user", kind="remember", payload=payload, searchable_body=body)
+
+    extractor.extract_sync(e.id)
+
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "success"
+    # Rehydrated body was stashed on the interpretation → embedding + enrich saw it.
+    assert marker in extraction["extracted_text"]
+    # And the enrich step (DELETE+INSERT on events_fts) preserved the body.
+    hits = ctx.db.execute(
+        "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH ?", (marker,)
+    ).fetchone()[0]
+    assert hits == 1
