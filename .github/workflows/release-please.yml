@@ -42,9 +42,14 @@ jobs:
     if: ${{ needs.release-please.outputs.pr }}
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve the release PR branch
+        id: br
+        run: |
+          branch=$(printf '%s' '${{ needs.release-please.outputs.pr }}' | jq -r '.headBranchName')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
-          ref: release-please--branches--main
+          ref: ${{ steps.br.outputs.branch }}
       - uses: astral-sh/setup-uv@v7
       - run: uv lock
       - name: Commit the lockfile if it drifted
