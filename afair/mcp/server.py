@@ -25,6 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from ..agents.blob_sweeper import OrphanBlobSweeper
 from ..agents.cold_path import ColdPathScheduler
 from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
@@ -120,6 +121,7 @@ def build_server(settings: Settings) -> FastMCP:
             settings=settings,
             workers=[
                 Pruner(),
+                OrphanBlobSweeper(),
                 ConflictResolver(),
                 Consolidator(),
                 EntityCanonicalizer(),

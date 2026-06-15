@@ -50,6 +50,7 @@ import structlog
 from starlette.responses import StreamingResponse
 
 from ..substrate import open_db
+from ..substrate.blob_gc import blob_hashes_in_payload
 from ..substrate.objects import (
     object_exists,
     object_plaintext_size,
@@ -218,7 +219,7 @@ def _iter_export(
                 payload = json.loads(row["payload"])
             except json.JSONDecodeError:
                 continue
-            for h in _extract_blob_hashes(payload):
+            for h in blob_hashes_in_payload(payload):
                 if h in seen_hashes:
                     continue
                 seen_hashes.add(h)
@@ -260,19 +261,6 @@ def _iter_export(
         )
     finally:
         conn.close()
-
-
-def _extract_blob_hashes(payload: Any) -> Iterator[str]:
-    """Walk a payload structure yielding blob_hash strings encountered."""
-    if isinstance(payload, dict):
-        h = payload.get("blob_hash")
-        if isinstance(h, str) and h.startswith("sha256:"):
-            yield h
-        for v in payload.values():
-            yield from _extract_blob_hashes(v)
-    elif isinstance(payload, list):
-        for v in payload:
-            yield from _extract_blob_hashes(v)
 
 
 async def export_endpoint(request: Request) -> Response:
