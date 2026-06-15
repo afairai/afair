@@ -1,3 +1,3 @@
-"""User-owned, vendor-neutral, self-organizing cognitive memory layer for AI agents."""
+"""afair: a user-owned, vendor-neutral memory vault for AI assistants, over MCP."""
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
