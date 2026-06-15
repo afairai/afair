@@ -84,11 +84,18 @@ follow [SECURITY.md](SECURITY.md) instead.
 
 ## Releasing
 
-Releases are cut by a maintainer with semantic versions (`vMAJOR.MINOR.PATCH`).
-afair is pre-1.0, so minor bumps may still carry behavioural change behind the
-frozen MCP surface; the surface itself never breaks (Invariant I1).
+Releases use semantic versions (`vMAJOR.MINOR.PATCH`). afair is pre-1.0, so
+minor bumps may still carry behavioural change behind the frozen MCP surface;
+the surface itself never breaks (Invariant I1).
 
-The ritual, in one PR plus one tag:
+**Default (automated): release-please.** Conventional Commits on `main` are
+gathered into a standing "release PR" that bumps the version (`pyproject.toml`,
+`afair/__init__.py`, `CITATION.cff`) and writes the CHANGELOG. Merge that PR and
+the rest is automatic: the tag, the GitHub Release, and the fleet deploy. Edit
+the PR's CHANGELOG before merging if you want hand-written notes over the
+commit-derived ones.
+
+**Manual (fallback): tag it yourself.** The same outcome, in one PR plus one tag:
 
 1. Move the `## [Unreleased]` entries in `CHANGELOG.md` into a new dated section
    `## [X.Y.Z] - YYYY-MM-DD`, leave a fresh empty `## [Unreleased]` on top, and
