@@ -1,0 +1,78 @@
+name: Release Please
+
+# Automated release flow for afair (the low-friction default; manual tags still
+# work via release.yml).
+#   - On every push to main, release-please maintains a release PR that bumps the
+#     version (pyproject.toml via the python release-type; afair/__init__.py and
+#     CITATION.cff via x-release-please-version annotations) and updates
+#     CHANGELOG.md from the Conventional Commits since the last release.
+#   - While that PR is open, sync-lockfile keeps uv.lock's project version in step
+#     so the PR's `uv sync --locked` CI stays green (release-please bumps
+#     pyproject but not the lockfile).
+#   - When the PR is merged, release-please tags + publishes the GitHub Release,
+#     and fleet-deploy signals the private control plane (afair-web) to roll the
+#     fleet to that tag — the same dispatch the manual release.yml performs.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      pr: ${{ steps.rp.outputs.pr }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # release-please bumps pyproject.toml but not uv.lock, so the open release PR
+  # would fail `uv sync --locked` in CI. Reconcile the lockfile on the PR branch.
+  sync-lockfile:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: release-please--branches--main
+      - uses: astral-sh/setup-uv@v7
+      - run: uv lock
+      - name: Commit the lockfile if it drifted
+        run: |
+          if ! git diff --quiet uv.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add uv.lock
+            git commit -m "chore: sync uv.lock to the release version"
+            git push
+          fi
+
+  # On a real release (the PR was merged), roll the fleet to the new tag.
+  fleet-deploy:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch afair-web fleet deploy (prod) at the new tag
+        env:
+          TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          echo "Releasing $TAG → afair-web fleet deploy (prod)"
+          http=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/afairai/afair-web/actions/workflows/deploy-afair-fleet.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"target\":\"prod\",\"ref\":\"$TAG\"}}")
+          echo "dispatch HTTP $http"
+          [ "$http" = "204" ] || { echo "dispatch failed"; exit 1; }
