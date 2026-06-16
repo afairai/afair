@@ -11,9 +11,9 @@ authors = [
 
 dependencies = [
     # MCP server framework (Streamable HTTP transport)
-    "fastmcp>=2.0.0",
+    "fastmcp>=3.4.2",
     # HTTP framework under FastMCP
-    "fastapi>=0.137.0",
+    "fastapi>=0.137.1",
     "uvicorn[standard]>=0.32.0",
     # Validation
     "pydantic>=2.9.0",
@@ -39,7 +39,7 @@ dependencies = [
     # verify HS256 tokens; PKCE/DCR are implemented directly, not via Authlib)
     "pyjwt[crypto]>=2.13.0",
     # LLM provider abstraction (Invariant I5 — vendor neutrality)
-    "litellm>=1.52.0",
+    "litellm>=1.89.1",
     # Local ONNX embeddings — opt-in vendor for the embedding hot path.
     # Switching to fastembed/* eliminates the 150-300ms OpenAI roundtrip
     # on every recall. Uses ~150MB resident; first run downloads the model
@@ -58,7 +58,7 @@ dependencies = [
     # PDF that has a text layer. Scanned (image-only) PDFs fall through
     # to the image-vision path automatically because their text extract
     # comes back empty and the page-renders are sent to a vision model.
-    "pypdf>=4.0.0",
+    "pypdf>=6.13.2",
     "sentry-sdk[fastapi,starlette]>=2.61.1",
 ]
 
@@ -67,7 +67,7 @@ afair = "afair.__main__:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3.0",
+    "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.15.17",
