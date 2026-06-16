@@ -49,7 +49,7 @@ jobs:
         run: |
           branch=$(printf '%s' "$PR" | jq -r '.headBranchName')
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           ref: ${{ steps.br.outputs.branch }}
       - uses: astral-sh/setup-uv@v7
