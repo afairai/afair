@@ -1,19 +1,36 @@
 version: 2
 updates:
   # Python deps (reads pyproject.toml + uv.lock).
+  #
+  # Note: CVE-driven updates do NOT wait for this weekly cadence. Dependabot
+  # *security updates* (a repo setting, enabled separately) open a PR the
+  # moment an advisory is published — that's what keeps the Security workflow
+  # from going red on a newly-disclosed CVE. This schedule is for routine
+  # version drift; minor+patch are grouped into one PR to keep the noise down,
+  # majors come individually so they get a deliberate look.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    labels: ["dependencies"]
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
 
-  # Keep the GitHub Actions pinned versions current.
+  # Keep the GitHub Actions pinned versions current (and patched).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(ci)"
+    labels: ["dependencies", "ci"]
+    groups:
+      actions-all:
+        update-types: ["minor", "patch"]
