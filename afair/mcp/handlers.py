@@ -60,6 +60,7 @@ from ..substrate import (
     build_compound_payload,
     build_text_payload,
     iter_events,
+    latest_edge_reviews_batch,
     object_exists,
     object_plaintext_size,
     read_edges_by_source_event_ids,
@@ -75,6 +76,7 @@ from ..substrate import (
     write_event_with_status,
 )
 from ..substrate import pipeline_events as pe
+from ..substrate.belief import Entrenchment, auto_confirm, resolve_trust
 from ..substrate.events import row_to_event
 from ..substrate.search import FTS5_SPECIALS_RE
 from . import schemas
@@ -589,7 +591,13 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                     "window_size": surprise_window,
                 }
 
-    # Attach edges keyed by content_hash via event_id reverse-map.
+    # Attach edges keyed by content_hash via event_id reverse-map. Each edge
+    # is a defeasible belief (ADR-0002): mark its trust state so recall never
+    # serves a `proposed` edge as hard fact. Invalidated/rejected edges are
+    # already filtered out upstream, so these resolve to confirmed /
+    # auto_confirmed / proposed. Reviews fetched in one batched query.
+    all_edge_ids = [edge.id for edges in edges_by_event_id.values() for edge in edges]
+    review_verdicts = latest_edge_reviews_batch(db, all_edge_ids)
     event_id_to_hash = {e.id: e.content_hash for e in events}
     for source_event_id, edges in edges_by_event_id.items():
         edge_content_hash = event_id_to_hash.get(source_event_id)
@@ -603,6 +611,18 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             obj_canonical = canonical_entities.get(resolved_map.get(edge.object_id, edge.object_id))
             if subj_canonical is None or obj_canonical is None:
                 continue
+            # has_evidence=True: post-evidence-gate, every edge that exists was
+            # grounded in a verbatim quote. source_entrenchment defaults to
+            # AGENT_DERIVED; foreign-import downgrading is a later slice.
+            trust = resolve_trust(
+                latest_verdict=review_verdicts.get(edge.id),
+                is_invalidated=False,
+                auto_confirmed=auto_confirm(
+                    confidence=edge.confidence,
+                    predicate=edge.predicate,
+                    source_entrenchment=Entrenchment.AGENT_DERIVED,
+                ),
+            )
             edge_views.append(
                 {
                     "subject": subj_canonical.canonical_name,
@@ -610,6 +630,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                     "object": obj_canonical.canonical_name,
                     "valid_from": edge.valid_from,
                     "valid_to": edge.valid_to,
+                    "trust": trust.value,
                 }
             )
         if edge_views:
