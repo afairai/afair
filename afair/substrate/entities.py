@@ -119,6 +119,18 @@ class EdgeInvalidation(BaseModel):
     source_event_id: str | None = None
 
 
+class EdgeReview(BaseModel):
+    """An operator verdict on a derived edge (ADR-0002). Append-only; the
+    edge's current trust state is its latest review."""
+
+    id: str
+    edge_id: str
+    verdict: str  # "confirm" | "reject"
+    reason: str | None
+    reviewed_by: str
+    reviewed_at: str
+
+
 # ── writes ────────────────────────────────────────────────────────────────
 
 
@@ -384,7 +396,93 @@ def write_edge_invalidation(
     )
 
 
+def record_edge_review(
+    conn: sqlite3.Connection,
+    *,
+    edge_id: str,
+    verdict: str,
+    reviewed_by: str,
+    reason: str | None = None,
+    source_event_id: str | None = None,
+) -> EdgeReview:
+    """Append an operator verdict on a derived edge (ADR-0002).
+
+    A ``reject`` verdict also writes an ``edge_invalidation`` so the edge drops
+    out of the live graph through the existing defeasible-retraction path; the
+    review row additionally records the verdict as ground truth (the signal the
+    self-improvement tuner lacks). ``confirm`` only records the verdict.
+    """
+    if verdict not in ("confirm", "reject"):
+        msg = f"verdict must be 'confirm' or 'reject', got {verdict!r}"
+        raise ValueError(msg)
+    # Fail with a clean domain error rather than a raw FK IntegrityError from
+    # deep in the insert — the next slice resolves edge_ids from recall hits,
+    # where a stale id (e.g. after a merge) is realistic input.
+    if conn.execute("SELECT 1 FROM entity_edges WHERE id = ?", (edge_id,)).fetchone() is None:
+        msg = f"entity_edge not found: {edge_id!r}"
+        raise ValueError(msg)
+    row_id = _new_row_id()
+    reviewed_at = _now_iso()
+    inv_id = _new_row_id() if verdict == "reject" else None
+    # Both rows in ONE transaction: a reject must never half-commit a verdict
+    # without its invalidation, which would leave the edge live in the graph
+    # reads while latest_edge_review reports 'reject'. Raw inserts inside a
+    # single `with conn:` — nesting write_edge_invalidation's own `with conn:`
+    # would commit the verdict early (SQLite has no true nested transactions).
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO edge_reviews (id, edge_id, verdict, reason, reviewed_by, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (row_id, edge_id, verdict, reason, reviewed_by, reviewed_at),
+        )
+        if verdict == "reject":
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO edge_invalidations (
+                    id, edge_id, invalidated_at, invalidated_by, reason, source_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    inv_id,
+                    edge_id,
+                    reviewed_at,
+                    reviewed_by,
+                    reason or "operator rejected",
+                    source_event_id,
+                ),
+            )
+    return EdgeReview(
+        id=row_id,
+        edge_id=edge_id,
+        verdict=verdict,
+        reason=reason,
+        reviewed_by=reviewed_by,
+        reviewed_at=reviewed_at,
+    )
+
+
 # ── reads ─────────────────────────────────────────────────────────────────
+
+
+def latest_edge_review(conn: sqlite3.Connection, edge_id: str) -> str | None:
+    """The most recent verdict ('confirm'|'reject') for an edge, or None if it
+    has never been reviewed.
+
+    Ordered by ``reviewed_at`` (microsecond ISO) — the meaningful key. ``id``
+    is a deterministic but otherwise arbitrary tie-break for the rare case of
+    two reviews sharing the same microsecond; it is NOT a guaranteed
+    write-order encoding (plain ULIDs aren't monotonic within a millisecond).
+    Each ``record_edge_review`` is its own committed transaction, so in
+    practice the timestamps differ.
+    """
+    row = conn.execute(
+        "SELECT verdict FROM edge_reviews WHERE edge_id = ? "
+        "ORDER BY reviewed_at DESC, id DESC LIMIT 1",
+        (edge_id,),
+    ).fetchone()
+    return row["verdict"] if row is not None else None
 
 
 def read_entity_by_id(conn: sqlite3.Connection, eid: str) -> Entity | None:
