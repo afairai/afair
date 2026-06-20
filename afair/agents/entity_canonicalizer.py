@@ -628,6 +628,7 @@ def _canonicalize_one_event(
     raw_relations = extraction.get("relations") or []
     if not isinstance(raw_relations, list):
         raw_relations = []
+    grounding_text = _event_grounding_text(event, extraction) if raw_relations else ""
     for relation_dict in raw_relations:
         if not isinstance(relation_dict, dict):
             continue
@@ -636,12 +637,23 @@ def _canonicalize_one_event(
         obj = str(relation_dict.get("object") or "").strip()
         if not (subj and pred and obj):
             continue
-        # Resolve subject + object against the entities we just canonicalized.
-        # If either side wasn't extracted as an entity, fall back to a name
-        # lookup across the substrate. Predicate stays emergent per
-        # decision #2 — no canonical predicate vocabulary.
-        subj_entity = resolved.get(subj) or _lookup_any_kind(conn, subj)
-        obj_entity = resolved.get(obj) or _lookup_any_kind(conn, obj)
+        # Confabulation guard. The extractor must ground each relation in a
+        # verbatim quote from the event; if that quote isn't actually in the
+        # text, the relation was inferred from mere co-occurrence (the bug that
+        # linked unrelated people/projects). Reject it. This is the
+        # deterministic backstop behind the prompt — it does not trust the
+        # LLM's restraint alone.
+        evidence = str(relation_dict.get("evidence") or "").strip()
+        if not _evidence_in_text(evidence, grounding_text):
+            stats["edges_skipped_no_evidence"] = stats.get("edges_skipped_no_evidence", 0) + 1
+            continue
+        # Resolve both ends ONLY against entities surfaced in THIS event. No
+        # vault-wide name fallback: a loose mention of a name must never link
+        # two global entities. A real relation names both ends in the event
+        # that states it; cross-event identity is handled by the canonical-name
+        # match in Stage 1 (same name → same entity_id).
+        subj_entity = resolved.get(subj)
+        obj_entity = resolved.get(obj)
         if subj_entity is None or obj_entity is None:
             stats["edges_skipped"] += 1
             continue
@@ -815,12 +827,53 @@ def _event_surrounding_text(event: Event, extraction: dict[str, Any]) -> str:
     return "\n".join(parts) or "(no text content)"
 
 
-def _lookup_any_kind(conn: sqlite3.Connection, name: str) -> Entity | None:
-    """Find ANY existing entity with this canonical name, prefer highest confidence."""
-    hits = find_entity_by_name(conn, canonical_name=name)
-    if not hits:
-        return None
-    return max(hits, key=lambda e: e.confidence)
+def _event_grounding_text(event: Event, extraction: dict[str, Any]) -> str:
+    """The raw text a relation's evidence quote must be found in.
+
+    Unlike :func:`_event_surrounding_text` (which prefers the distilled summary
+    as LLM context), this returns the ORIGINAL text the extractor read, so a
+    verbatim evidence quote can be verified against it: the extractor's
+    ``extracted_text`` for spilled/binary events (PDF body, transcript,
+    rehydrated text-large), else the inline payload text, else the observe
+    fields.
+    """
+    extracted = extraction.get("extracted_text")
+    if isinstance(extracted, str) and extracted.strip():
+        return extracted
+    text = event.payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    parts: list[str] = []
+    for key in ("action", "subject", "result", "context"):
+        v = event.payload.get(key)
+        if isinstance(v, str) and v.strip():
+            parts.append(v)
+    return "\n".join(parts)
+
+
+def _normalize_for_match(s: str) -> str:
+    """Lowercase + collapse whitespace, for forgiving verbatim matching."""
+    return " ".join(s.lower().split())
+
+
+# An evidence quote shorter than this is too generic to ground a relation
+# (a single common word would trivially substring-match). Real assertions
+# ("Maya leads it", "X owns Y") clear it comfortably.
+_MIN_EVIDENCE_CHARS = 10
+
+
+def _evidence_in_text(evidence: str, text: str) -> bool:
+    """True when the evidence quote actually appears in the source text.
+
+    Normalizes whitespace + case so trivial formatting differences don't
+    false-reject, but still requires the quoted words to be present: a
+    paraphrase or an invented quote will not match. Empty/too-short evidence
+    or empty text fails closed — no grounding, no edge.
+    """
+    norm = _normalize_for_match(evidence)
+    if len(norm) < _MIN_EVIDENCE_CHARS or not text:
+        return False
+    return norm in _normalize_for_match(text)
 
 
 # ── Phase B: cascade invalidations ────────────────────────────────────────

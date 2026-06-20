@@ -79,6 +79,9 @@ def _seed(
     event = write_event(
         ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": text}
     )
+    # Ground each relation's evidence in the event text so the canonicalizer's
+    # evidence gate (a verbatim quote must be present in the source) passes.
+    grounded = [{**r, "evidence": r.get("evidence", text)} for r in (relations or [])]
     write_interpretation(
         ctx.db,
         event=event,
@@ -89,7 +92,7 @@ def _seed(
             "best_guess_kind": "fact",
             "summary": text[:200],
             "entities": entities,
-            "relations": relations or [],
+            "relations": grounded,
         },
     )
     return event.id
