@@ -83,12 +83,22 @@ def _write_event_with_extraction(
         kind="remember",
         payload={"content_type": "text", "text": text},
     )
+    # Default each relation's evidence to the event text (which states the
+    # relation in these fixtures), so the canonicalizer's evidence gate — it
+    # requires a verbatim quote present in the source text — passes. A test
+    # that wants to exercise the gate's rejection passes explicit evidence
+    # that is absent from the text.
+    grounded_relations = []
+    for relation in relations or []:
+        relation = dict(relation)
+        relation.setdefault("evidence", text)
+        grounded_relations.append(relation)
     extraction: dict[str, Any] = {
         "status": "success",
         "best_guess_kind": "fact",
         "summary": summary or text[:200],
         "entities": entities,
-        "relations": relations or [],
+        "relations": grounded_relations,
     }
     write_interpretation(
         conn,
@@ -892,3 +902,90 @@ def test_edges_hidden_after_cascade(
     assert len(iter_edges_for_entity(db, sajinth_id)) == 0
     # Historical view still surfaces them.
     assert len(iter_edges_for_entity(db, sajinth_id, include_invalidated=True)) == 1
+
+
+# ── evidence gate: the confabulation backstop ───────────────────────────────
+#
+# Regression for the false-edge bug: the extractor used to infer relations from
+# mere co-occurrence ("Sajinth" and "Clario" in the same note → "Sajinth works
+# on Clario"), and the canonicalizer trusted them. Now a relation must carry a
+# verbatim evidence quote that is actually present in the event text.
+
+
+def test_relation_with_evidence_absent_from_text_is_skipped(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Co-occurrence is not a relation: an invented triple whose evidence quote
+    is NOT in the text creates no edge."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    # Seed both so resolution is not the reason it's skipped.
+    _write_event_with_extraction(
+        db, text="Sajinth is on the team", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _write_event_with_extraction(
+        db, text="Clario is a project", entities=[{"name": "Clario", "type": "project"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    # A note that merely co-mentions both, with a fabricated relation whose
+    # evidence is a paraphrase, not a quote from the text.
+    _write_event_with_extraction(
+        db,
+        text="Standup notes. Sajinth gave an update, and the Clario demo went well.",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Clario", "type": "project"},
+        ],
+        relations=[
+            {
+                "subject": "Sajinth",
+                "predicate": "works on",
+                "object": "Clario",
+                "evidence": "Sajinth works on Clario",  # never appears in the text
+            }
+        ],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    edges = db.execute("SELECT * FROM entity_edges").fetchall()
+    assert edges == []
+
+
+def test_relation_with_grounded_evidence_creates_edge(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate does not block a real relation: evidence quoted from the text
+    is accepted."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    _write_event_with_extraction(
+        db, text="Maya is here", entities=[{"name": "Maya", "type": "person"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    _write_event_with_extraction(
+        db,
+        text="Maya leads the Helios rewrite, kicked off this week.",
+        entities=[
+            {"name": "Maya", "type": "person"},
+            {"name": "Helios", "type": "project"},
+        ],
+        relations=[
+            {
+                "subject": "Maya",
+                "predicate": "leads",
+                "object": "Helios",
+                "evidence": "Maya leads the Helios rewrite",  # verbatim from text
+            }
+        ],
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    edges = db.execute("SELECT predicate FROM entity_edges").fetchall()
+    assert len(edges) == 1
+    assert edges[0]["predicate"] == "leads"
