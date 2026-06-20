@@ -310,6 +310,39 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_invalidations is append-only (Invariant I2)');
     END
     """,
+    # ── edge_reviews: the operator's confirm/reject verdicts (ADR-0002) ──────
+    # A derived edge is a defeasible belief, not silent truth. The operator
+    # (directly, or an AI on their behalf with confirmation) reviews edges; each
+    # verdict is an append-only row. The CURRENT trust state of an edge is its
+    # latest review, else the auto-confirm policy (see substrate/belief.py).
+    # A 'reject' verdict also writes an edge_invalidation (the existing
+    # defeasible-retraction path); 'confirm' is the new signal — and the
+    # ground-truth the self-improvement tuner lacks.
+    """
+    CREATE TABLE IF NOT EXISTS edge_reviews (
+        id           TEXT PRIMARY KEY,
+        edge_id      TEXT NOT NULL REFERENCES entity_edges(id),
+        verdict      TEXT NOT NULL CHECK (verdict IN ('confirm', 'reject')),
+        reason       TEXT,
+        reviewed_by  TEXT NOT NULL,
+        reviewed_at  TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS edge_reviews_edge_idx ON edge_reviews(edge_id, reviewed_at)",
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_reviews_no_update
+    BEFORE UPDATE ON edge_reviews
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_reviews is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_reviews_no_delete
+    BEFORE DELETE ON edge_reviews
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_reviews is append-only (Invariant I2)');
+    END
+    """,
     # ── pipeline_events: end-to-end lifecycle tracing (Phase 0.5 obs) ───────
     # Every step in an event's journey gets a row:
     #   event.written            — write_event_with_status returned ok
