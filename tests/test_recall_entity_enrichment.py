@@ -24,7 +24,7 @@ from afair.mcp import handlers
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.mcp.schemas import TextContent
 from afair.settings import Settings
-from afair.substrate import open_db, write_event
+from afair.substrate import open_db, record_edge_review, write_event
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -168,6 +168,8 @@ def test_recall_surfaces_entity_edges_for_relations(ctx: ServerContext, settings
     assert edges[0]["subject"] == "Sajinth"
     assert edges[0]["predicate"] == "runs"
     assert edges[0]["object"] == "Athara"
+    # A crisp, confident, grounded edge is auto-trusted (ADR-0002).
+    assert edges[0]["trust"] == "auto_confirmed"
 
 
 def test_recall_dedupes_canonical_entities_when_same_entity_mentioned_twice(
@@ -447,3 +449,51 @@ def test_remember_then_recall_still_works_when_canonicalizer_idle(
     result = handlers.recall(query="hello", depth="shallow")
     assert len(result.hits) == 1
     assert "hello world" in (result.hits[0].payload.get("text") or "")
+
+
+def _seed_edge(ctx: ServerContext, settings: Settings, *, predicate: str) -> None:
+    """Seed Sajinth, then an edge 'Sajinth <predicate> Athara'."""
+    _seed_event_with_entities(
+        ctx, text="Sajinth introduced himself", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+    _seed_event_with_entities(
+        ctx,
+        text=f"Sajinth {predicate} Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": predicate, "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
+
+def _recalled_edge(result: object) -> dict:
+    hit = next(
+        (h for h in result.hits if h.interpretation and h.interpretation.get("entity_edges")),  # type: ignore[attr-defined]
+        None,
+    )
+    assert hit is not None and hit.interpretation is not None
+    edges = hit.interpretation.get("entity_edges") or []
+    assert len(edges) == 1
+    return edges[0]
+
+
+def test_recall_marks_vague_predicate_edge_as_proposed(
+    ctx: ServerContext, settings: Settings
+) -> None:
+    """A verbose profile-language predicate fails the auto-confirm policy, so
+    recall surfaces it as `proposed` — never as hard fact."""
+    _seed_edge(ctx, settings, predicate="is tech person in circle of")
+    edge = _recalled_edge(handlers.recall(query="Sajinth", depth="shallow"))
+    assert edge["trust"] == "proposed"
+
+
+def test_recall_marks_confirmed_edge_as_confirmed(ctx: ServerContext, settings: Settings) -> None:
+    """An operator confirm elevates the edge to `confirmed` in recall."""
+    _seed_edge(ctx, settings, predicate="is tech person in circle of")
+    edge_id = ctx.db.execute("SELECT id FROM entity_edges LIMIT 1").fetchone()["id"]
+    record_edge_review(ctx.db, edge_id=edge_id, verdict="confirm", reviewed_by="operator")
+    edge = _recalled_edge(handlers.recall(query="Sajinth", depth="shallow"))
+    assert edge["trust"] == "confirmed"
