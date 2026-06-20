@@ -104,7 +104,12 @@ _TOOL_SCHEMA: dict[str, Any] = {
                 "Coherent prose, 2-6 sentences, describing what this entity "
                 "is and what is currently known about it across all the "
                 "events that mention it. Present tense, plain language. "
-                "Synthesize — do not just list the events."
+                "Synthesize — do not just list the events. Do NOT assert a "
+                "relationship (works with, leads, is part of, collaborates on) "
+                "unless the provided records or relationship triples explicitly "
+                "state it. Two entities appearing in the same records is not a "
+                "relationship; if you cannot point to a record that states the "
+                "connection, do not claim one."
             ),
         },
         "aliases": {

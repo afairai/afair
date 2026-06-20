@@ -21,8 +21,15 @@ if TYPE_CHECKING:
     from ..substrate.events import Event
 
 
-EXTRACTOR_SCHEMA_VERSION = 1
-"""Bumped only when the extraction JSON shape changes (additive only)."""
+EXTRACTOR_SCHEMA_VERSION = 2
+"""Bumped only when the extraction JSON shape changes (additive only).
+
+v2 (2026-06-20): relations[] gained a required ``evidence`` field (a verbatim
+quote grounding each triple) and the prompt now forbids inferring relations
+from co-occurrence. The canonicalizer rejects any relation whose evidence is
+not found in the source text, killing the confabulated edges that v1's
+"extracted from the text" phrasing invited.
+"""
 
 
 # Hard cap on the user-message length we hand to the LLM. Above this the
@@ -93,15 +100,31 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
         },
         "relations": {
             "type": "array",
-            "description": "Subject-predicate-object triples extracted from the text.",
+            "description": (
+                "Subject-predicate-object triples that the text EXPLICITLY states. "
+                "A relation is NOT two names appearing in the same note: the text "
+                "must actually assert that the subject stands in the predicate to "
+                "the object. If you cannot quote the exact words that say so, do "
+                "not emit the triple. Prefer a few well-grounded relations over "
+                "many speculative ones. When in doubt, omit."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
                     "subject": {"type": "string"},
                     "predicate": {"type": "string", "description": "Short verb-phrase."},
                     "object": {"type": "string"},
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "A short VERBATIM quote, copied word-for-word from the "
+                            "input, that explicitly states this relation. Not a "
+                            "paraphrase. If you cannot quote it from the text, omit "
+                            "the whole triple."
+                        ),
+                    },
                 },
-                "required": ["subject", "predicate", "object"],
+                "required": ["subject", "predicate", "object", "evidence"],
             },
         },
         "time_references": {
@@ -153,6 +176,12 @@ a structured description of its content.
 Guidance:
 - Never invent information not present in the input.
 - Use empty arrays or null for fields without information; never guess.
+- A relation belongs in ``relations`` ONLY when the text explicitly states it.
+  Two entities appearing in the same note is not a relation. For each relation,
+  ``evidence`` must be a verbatim quote from the input that asserts it; if you
+  cannot quote it, leave the relation out. An empty ``relations`` array is the
+  correct answer for a note that merely lists or co-mentions people, projects,
+  or companies without stating how they connect.
 - Resolve relative dates ("yesterday", "next Tuesday") to ISO 8601 if you
   can compute them from the event's ``event_created_at``; otherwise leave
   ``iso`` as null.
