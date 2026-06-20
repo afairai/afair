@@ -485,6 +485,24 @@ def latest_edge_review(conn: sqlite3.Connection, edge_id: str) -> str | None:
     return row["verdict"] if row is not None else None
 
 
+def latest_edge_reviews_batch(conn: sqlite3.Connection, edge_ids: list[str]) -> dict[str, str]:
+    """The latest verdict per edge for a batch of edges, in one query — avoids
+    an N+1 when recall marks the trust state of every surfaced edge. Edges with
+    no review are absent from the result (caller treats absence as unreviewed).
+    """
+    if not edge_ids:
+        return {}
+    placeholders = ",".join("?" * len(edge_ids))
+    rows = conn.execute(
+        f"SELECT edge_id, verdict FROM edge_reviews WHERE edge_id IN ({placeholders}) "
+        "ORDER BY reviewed_at ASC, id ASC",
+        edge_ids,
+    ).fetchall()
+    # Ascending order means a later row overwrites an earlier one, so the dict
+    # ends up holding each edge's most recent verdict.
+    return {row["edge_id"]: row["verdict"] for row in rows}
+
+
 def read_entity_by_id(conn: sqlite3.Connection, eid: str) -> Entity | None:
     row = conn.execute("SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
     return _row_to_entity(row) if row is not None else None
