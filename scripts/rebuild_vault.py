@@ -55,6 +55,7 @@ from afair.agents.entity_canonicalizer import EntityCanonicalizer
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.settings import Settings
 from afair.substrate import open_db, write_event
+from afair.substrate.db import set_vault_key
 from afair.substrate.events import iter_events
 
 if TYPE_CHECKING:
@@ -255,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings()
+    # Unlock the encrypted vault before opening it. Tests call rebuild()
+    # directly against a plaintext vault and set no key; production goes
+    # through here, where the SQLCipher key must be installed first or open_db
+    # sees the encrypted file as "not a database".
+    if settings.vault_key is not None:
+        set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
     start = time.monotonic()
     summary = rebuild(
         args.source,
