@@ -33,32 +33,6 @@ database plus a filesystem object store for large/binary content. Back up that
 one directory and you have backed up the whole vault. There is no external
 database, queue, or cache to operate.
 
-## Sovereign inference (bring your own model)
-
-afair uses an LLM for its background work — extracting entities, writing
-summaries, embedding for semantic recall. None of that is hardcoded to one
-vendor (Invariant I5): the model is an env var, resolved through litellm, so
-you choose who does the thinking. Set `EXTRACTOR_MODEL` and `EMBEDDING_MODEL`
-to any litellm-supported target:
-
-```bash
-# A cloud provider you trust:
-EXTRACTOR_MODEL=anthropic/claude-haiku-4-5      # or openai/…, gemini/…, mistral/…
-
-# Or keep inference on your own hardware — nothing leaves the machine:
-EXTRACTOR_MODEL=ollama/llama3.1
-EMBEDDING_MODEL=fastembed/BAAI/bge-small-en-v1.5   # local ONNX, no network
-
-# Or point it at any OpenAI-compatible endpoint, including a decentralized one:
-EXTRACTOR_MODEL=openai/<model>
-OPENAI_API_BASE=https://your-endpoint/v1
-```
-
-Self-hosted vault plus local or decentralized inference is the fully sovereign
-setup: your memory lives on a machine you control, and the AI that reads it
-runs somewhere you chose, not on a server that can read, retain, or train on
-your most private context. The substrate is yours; so is the thinking.
-
 ## Production checklist
 
 When you expose afair on the public internet, two settings become mandatory and
