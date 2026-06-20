@@ -68,26 +68,41 @@ SOURCE_KINDS = frozenset({"remember", "observe"})
 INVALIDATE_KIND = "invalidate"
 
 
-def select_source_events(events: list[Event]) -> list[Event]:
+def select_source_events(events: list[Event], *, drop_superseded: bool = False) -> list[Event]:
     """The irreplaceable subset to copy verbatim, in original order.
 
     remember + observe, plus invalidate events that target one of those (a
     supersession the user issued). Invalidations targeting a derived event
     (an article the agent superseded) are dropped — the replay produces its
     own article supersessions.
+
+    With ``drop_superseded`` the replay reflects CURRENT truth only: a
+    remember/observe that the user has invalidated (corrected) is left out
+    entirely, and so are the invalidate events themselves. The fresh graph is
+    then built from the corrected record alone — the superseded one never
+    re-seeds an entity or edge. Use this to clean confirmed-garbage records
+    (e.g. a bad memory migration) out of the rebuild rather than faithfully
+    reproducing their supersession history.
     """
+    superseded: set[str] = set()
+    if drop_superseded:
+        for ev in events:
+            if ev.kind == INVALIDATE_KIND:
+                superseded.update(ev.parent_hashes or [])
+
     kept: list[Event] = []
     source_hashes: set[str] = set()
     for ev in events:
-        if ev.kind in SOURCE_KINDS:
+        if ev.kind in SOURCE_KINDS and ev.content_hash not in superseded:
             kept.append(ev)
             source_hashes.add(ev.content_hash)
-    for ev in events:
-        if ev.kind != INVALIDATE_KIND:
-            continue
-        targets = ev.parent_hashes or []
-        if any(t in source_hashes for t in targets):
-            kept.append(ev)
+    if not drop_superseded:
+        for ev in events:
+            if ev.kind != INVALIDATE_KIND:
+                continue
+            targets = ev.parent_hashes or []
+            if any(t in source_hashes for t in targets):
+                kept.append(ev)
     # Preserve original chronology so created_at ordering and invalidation
     # targets line up the way they did the first time.
     kept.sort(key=lambda e: e.created_at)
@@ -150,6 +165,7 @@ def rebuild(
     settings: Settings,
     max_cycles: int,
     dry_run: bool,
+    drop_superseded: bool = False,
 ) -> dict[str, Any]:
     """Replay source_dir → dest_dir with the current (fixed) pipeline."""
     src_db = open_db(source_dir, embedding_dim=settings.embedding_dim)
@@ -157,7 +173,7 @@ def rebuild(
         all_events = list(iter_events(src_db))
     finally:
         src_db.close()
-    sources = select_source_events(all_events)
+    sources = select_source_events(all_events, drop_superseded=drop_superseded)
 
     summary: dict[str, Any] = {
         "total_events_in_source": len(all_events),
@@ -229,6 +245,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report the source-event selection and exit — no LLM, no writes.",
     )
+    parser.add_argument(
+        "--drop-superseded",
+        action="store_true",
+        help="Rebuild CURRENT truth only: leave out remember/observe events the "
+        "user has invalidated (corrected), so a confirmed-garbage record never "
+        "re-seeds an entity or edge.",
+    )
     args = parser.parse_args(argv)
 
     settings = Settings()
@@ -239,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         settings=settings,
         max_cycles=args.max_cycles,
         dry_run=args.dry_run,
+        drop_superseded=args.drop_superseded,
     )
     summary["duration_seconds"] = round(time.monotonic() - start, 1)
     print(json.dumps(summary, indent=2, sort_keys=True))

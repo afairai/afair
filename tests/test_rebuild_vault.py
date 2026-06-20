@@ -100,3 +100,34 @@ def test_selection_is_chronological(tmp_path: Path) -> None:
     selected = select_source_events(events)
     created = [e.created_at for e in selected]
     assert created == sorted(created)
+
+
+def test_drop_superseded_excludes_invalidated_records(tmp_path: Path) -> None:
+    """With drop_superseded, a corrected (invalidated) remember and the
+    invalidate event are both left out; the correction record stays."""
+    db = open_db(tmp_path)
+    try:
+        garbage = write_event(
+            db, origin="user", kind="remember", payload={"content_type": "text", "text": "wrong"}
+        )
+        write_event(
+            db,
+            origin="user",
+            kind="remember",
+            payload={"content_type": "text", "text": "correction"},
+        )
+        write_invalidation(db, target_hash=garbage.content_hash, reason="corrected", origin="user")
+        events = list(iter_events(db))
+    finally:
+        db.close()
+
+    # Default: faithful — keeps the garbage record + its invalidation.
+    faithful = {e.kind for e in select_source_events(events)}
+    assert "invalidate" in faithful
+
+    # drop_superseded: current truth only.
+    current = select_source_events(events, drop_superseded=True)
+    texts = [e.payload.get("text") for e in current if e.kind == "remember"]
+    kinds = {e.kind for e in current}
+    assert texts == ["correction"]  # garbage dropped, correction kept
+    assert "invalidate" not in kinds  # supersession bookkeeping dropped too
