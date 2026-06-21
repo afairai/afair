@@ -443,6 +443,52 @@ def write_edge_invalidation(
     )
 
 
+def find_live_merge_from(conn: sqlite3.Connection, from_entity_id: str) -> str | None:
+    """The id of the live (not-invalidated) merge out of ``from_entity_id``,
+    or None. Used to reverse a merge: find it, then invalidate it."""
+    row = conn.execute(
+        """
+        SELECT em.id FROM entity_merges em
+        WHERE em.from_entity_id = ?
+          AND NOT EXISTS (SELECT 1 FROM merge_invalidations mi WHERE mi.merge_id = em.id)
+        ORDER BY em.merged_at DESC LIMIT 1
+        """,
+        (from_entity_id,),
+    ).fetchone()
+    return row["id"] if row is not None else None
+
+
+def write_merge_invalidation(
+    conn: sqlite3.Connection,
+    *,
+    merge_id: str,
+    invalidated_by: str,
+    reason: str,
+    source_event_id: str | None = None,
+) -> bool:
+    """Mark an entity_merge as undone so ``resolve_canonical`` skips it.
+
+    Append-only: the merge row stays as history. Idempotent on the UNIQUE
+    ``merge_id`` — invalidating an already-invalidated merge returns False.
+    Returns True when a new invalidation row landed.
+    """
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO merge_invalidations (
+                    id, merge_id, invalidated_at, invalidated_by, reason, source_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (_new_row_id(), merge_id, _now_iso(), invalidated_by, reason, source_event_id),
+            )
+    except Exception as exc:
+        if "UNIQUE constraint" in str(exc):
+            return False
+        raise
+    return True
+
+
 def record_edge_review(
     conn: sqlite3.Connection,
     *,
@@ -656,11 +702,16 @@ def resolve_canonical(conn: sqlite3.Connection, eid: str) -> str:
     current = eid
     seen: set[str] = {current}
     for _ in range(16):
+        # Skip merges the operator later invalidated (a rejected auto-merge or a
+        # reverted kind) — those edges are no longer part of the live graph.
         row = conn.execute(
             """
-            SELECT into_entity_id FROM entity_merges
-            WHERE from_entity_id = ?
-            ORDER BY merged_at DESC LIMIT 1
+            SELECT into_entity_id FROM entity_merges em
+            WHERE em.from_entity_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM merge_invalidations mi WHERE mi.merge_id = em.id
+              )
+            ORDER BY em.merged_at DESC LIMIT 1
             """,
             (current,),
         ).fetchone()

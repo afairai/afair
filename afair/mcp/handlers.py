@@ -1160,7 +1160,12 @@ def recall(
     # combined recall(decide=..., query=...) call.
     decide_note: str | None = None
     if decide is not None:
-        outcome = decide_correction(db, proposal_id=decide.proposal_id, verdict=decide.verdict)
+        outcome = decide_correction(
+            db,
+            proposal_id=decide.proposal_id,
+            verdict=decide.verdict,
+            to_kind=decide.to_kind,
+        )
         decide_note = f"correction {decide.verdict}: {outcome.note}"
 
     summary: ContextSummary | None = None

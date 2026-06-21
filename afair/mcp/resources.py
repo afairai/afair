@@ -139,11 +139,15 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     if pending:
         instructions += (
             " pending_corrections lists entity-graph fixes the audit "
-            "proposed (e.g. a name filed under the wrong type, or two "
-            "names that are one entity). Each has a ready-to-ask prompt. "
-            "When it fits the conversation, ask the user, then apply their "
-            'answer with afair.recall(decide={"proposal_id":"<id>",'
-            '"verdict":"confirm"|"reject"}). Never apply without asking.'
+            "proposed — most are cross-kind auto-merges where the system "
+            "picked a kind for an entity (e.g. 'Clario' filed as product when "
+            "it's your project). Each has a ready-to-ask prompt. When it fits "
+            "the conversation, ask the user, then apply their answer with "
+            'afair.recall(decide={"proposal_id":"<id>","verdict":"confirm"|'
+            '"reject"}). If they say the kind is wrong, pass the corrected one '
+            'as to_kind (one of person/organization/place/project/product/'
+            'concept/other), e.g. verdict="reject", to_kind="project". Never '
+            "apply without asking."
         )
 
     return {

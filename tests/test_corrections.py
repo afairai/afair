@@ -23,6 +23,7 @@ from afair.substrate import (
     read_pending_corrections,
     resolve_canonical,
     write_entity,
+    write_entity_merge,
     write_event,
 )
 
@@ -64,10 +65,20 @@ def _entity(conn: sqlite3.Connection, name: str, kind: str) -> str:
 
 
 def _seed_proposals(conn: sqlite3.Connection, settings: Settings) -> None:
-    """Realistic seed: the same three error shapes the audit catches."""
+    """Realistic seed: a person type-mismatch (retype) + a cross-kind auto-merge
+    (merge_review) — the two shapes the audit catches on the live vault."""
     _entity(conn, "maxime.team", "person")  # → propose retype to product
-    _entity(conn, "Bräuer", "person")  # ⊂ Dr. Gregor Bräuer → propose merge
-    _entity(conn, "Dr. Gregor Bräuer", "person")
+    # Clario: project merged into product by the deduplicator → merge_review.
+    from_id = _entity(conn, "Clario", "project")
+    into_id = _entity(conn, "Clario", "product")
+    write_entity_merge(
+        conn,
+        from_entity_id=from_id,
+        into_entity_id=into_id,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.95,
+    )
     EntityAuditWorker().run(conn, settings)
 
 
@@ -78,21 +89,17 @@ def test_read_pending_surfaces_open_proposals(db: sqlite3.Connection, settings: 
     _seed_proposals(db, settings)
     pending = read_pending_corrections(db)
     kinds = sorted(p.kind for p in pending)
-    assert kinds == ["merge", "retype"]
-    # Most-confident first (retype domain = 0.9 outranks merge = 0.85).
-    assert pending[0].kind == "retype"
-    assert pending[0].entity_name == "maxime.team"
-    assert "re-type" in pending[0].prompt
+    assert kinds == ["merge_review", "retype"]
 
 
-def test_pending_prompt_for_merge_names_both_sides(
+def test_pending_prompt_for_merge_review_describes_the_auto_merge(
     db: sqlite3.Connection, settings: Settings
 ) -> None:
     _seed_proposals(db, settings)
-    merge = next(p for p in read_pending_corrections(db) if p.kind == "merge")
-    assert "Bräuer" in merge.prompt
-    assert "Dr. Gregor Bräuer" in merge.prompt
-    assert "merge" in merge.prompt
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    assert "Clario" in mr.prompt
+    assert "product" in mr.prompt  # the kind the merge picked
+    assert "project" in mr.prompt  # the kind it came from
 
 
 # ── decide: confirm applies through the append-only path ─────────────────────
@@ -115,15 +122,72 @@ def test_confirm_retype_retypes_the_entity(db: sqlite3.Connection, settings: Set
     assert all(p.id != retype.id for p in read_pending_corrections(db))
 
 
-def test_confirm_merge_merges_the_entities(db: sqlite3.Connection, settings: Settings) -> None:
-    _seed_proposals(db, settings)
-    merge = next(p for p in read_pending_corrections(db) if p.kind == "merge")
-    braeuer_id = entity_id("Bräuer", "person")
-    gregor_id = entity_id("Dr. Gregor Bräuer", "person")
+# ── decide: merge_review confirm keeps, reject+to_kind re-types ──────────────
 
-    out = decide_correction(db, proposal_id=merge.id, verdict="confirm")
+
+def test_merge_review_confirm_keeps_the_kind(db: sqlite3.Connection, settings: Settings) -> None:
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = entity_id("Clario", "product")
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="confirm")
+    assert out.status == "confirmed"
+    # Nothing applied — the merged canonical stays the product it was.
+    assert resolve_canonical(db, product_id) == product_id
+    assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 0
+    assert all(p.id != mr.id for p in read_pending_corrections(db))
+
+
+def test_merge_review_reject_with_to_kind_retypes(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = entity_id("Clario", "product")
+    project_id = entity_id("Clario", "project")
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="project")
     assert out.status == "applied"
-    assert resolve_canonical(db, braeuer_id) == gregor_id
+    # Reverting to the origin kind must NOT create a merge cycle: BOTH sides
+    # resolve to the SAME project canonical, not to each other (split-brain).
+    assert resolve_canonical(db, product_id) == project_id
+    assert resolve_canonical(db, project_id) == project_id
+
+
+def test_merge_review_reject_to_third_kind_retypes_cleanly(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Correcting to a kind that isn't the origin needs no merge-invalidation —
+    the fresh target entity can't cycle. Everything resolves to it."""
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = entity_id("Clario", "product")
+    project_id = entity_id("Clario", "project")
+    concept_id = entity_id("Clario", "concept")
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="concept")
+    assert out.status == "applied"
+    assert resolve_canonical(db, product_id) == concept_id
+    assert resolve_canonical(db, project_id) == concept_id
+
+
+def test_merge_review_reject_without_to_kind_only_flags(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = entity_id("Clario", "product")
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="reject")
+    assert out.status == "rejected"
+    assert resolve_canonical(db, product_id) == product_id  # untouched
+
+
+def test_decide_rejects_bad_to_kind(db: sqlite3.Connection, settings: Settings) -> None:
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    with pytest.raises(ValueError, match="to_kind must be one of"):
+        decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="banana")
 
 
 # ── decide: reject closes untouched ──────────────────────────────────────────
@@ -152,11 +216,12 @@ def test_decide_twice_is_a_no_op(db: sqlite3.Connection, settings: Settings) -> 
 
     first = decide_correction(db, proposal_id=retype.id, verdict="confirm")
     assert first.status == "applied"
+    merges_after_first = db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0]
     second = decide_correction(db, proposal_id=retype.id, verdict="confirm")
     assert second.status == "already_decided"
-    # Only one merge from the re-type — no double-apply.
-    n_merges = db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0]
-    assert n_merges == 1
+    # The second confirm applies nothing — no extra merge from a re-run.
+    merges_after_second = db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0]
+    assert merges_after_second == merges_after_first
 
 
 def test_decide_unknown_proposal_reports_not_found(db: sqlite3.Connection) -> None:
@@ -208,7 +273,7 @@ def test_recall_stats_surfaces_pending_corrections(ctx: object) -> None:
     from afair.mcp import handlers
 
     result = handlers.recall(stats=True)
-    assert {p.kind for p in result.pending_corrections} == {"retype", "merge"}
+    assert {p.kind for p in result.pending_corrections} == {"retype", "merge_review"}
 
 
 def test_recall_without_stats_omits_pending(ctx: object) -> None:

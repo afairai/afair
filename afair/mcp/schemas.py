@@ -443,6 +443,10 @@ class CorrectionDecision(BaseModel):
     proposal_id: str
     """``ProposedCorrectionView.id`` from a prior recall."""
     verdict: Literal["confirm", "reject"]
+    to_kind: str | None = None
+    """For a ``merge_review`` reject: the corrected entity kind ("no, Clario is
+    a project, not a product"). The assisting AI maps the user's natural-language
+    answer to one of the known kinds. Ignored for other proposal kinds."""
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
