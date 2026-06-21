@@ -1,9 +1,11 @@
 """Entity-audit worker — proposes corrections, never applies them (ADR-0002).
 
-Covers the deterministic detectors (the same patterns behind the real errors:
-a domain filed as a person, a citation filed as a person, a surface-form
-duplicate) and the worker that queues them into proposed_corrections
-idempotently.
+Covers the two detectors chosen after the live dry-run:
+  * deterministic person type-mismatch (domain / citation-year), and
+  * cross-kind auto-merge review (the deduplicator picked a kind across a
+    boundary) — the main signal, surfaced for confirm/correct.
+
+And the worker that queues them into proposed_corrections idempotently.
 """
 
 from __future__ import annotations
@@ -16,10 +18,10 @@ import pytest
 from afair.agents.entity_audit import (
     EntityAuditWorker,
     detect_type_mismatch,
-    find_merge_candidates,
+    find_cross_kind_auto_merges,
 )
 from afair.settings import Settings
-from afair.substrate import open_db, write_entity, write_event
+from afair.substrate import open_db, write_entity, write_entity_merge, write_event
 
 if TYPE_CHECKING:
     import sqlite3
@@ -27,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-# ── pure detectors ───────────────────────────────────────────────────────────
+# ── pure type detectors ──────────────────────────────────────────────────────
 
 
 def test_detect_domain_person_as_product() -> None:
@@ -50,25 +52,7 @@ def test_detect_leaves_real_person_and_nonperson_alone() -> None:
     assert detect_type_mismatch("maxime.team", "product") is None
 
 
-def test_find_merge_candidates_shorter_into_fuller() -> None:
-    ents = [
-        ("e:braeuer", "Bräuer", "person"),
-        ("e:gregor", "Dr. Gregor Bräuer", "person"),
-        ("e:sajinth", "Sajinth", "person"),
-    ]
-    cands = find_merge_candidates(ents)
-    assert len(cands) == 1
-    from_id, into_id, _evidence, _conf = cands[0]
-    assert from_id == "e:braeuer"  # the shorter form merges INTO the fuller name
-    assert into_id == "e:gregor"
-
-
-def test_merge_candidates_ignore_different_kinds() -> None:
-    ents = [("e:a", "Apple", "organization"), ("e:b", "Apple Pie", "product")]
-    assert find_merge_candidates(ents) == []
-
-
-# ── the worker ───────────────────────────────────────────────────────────────
+# ── fixtures + helpers ───────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -99,48 +83,100 @@ def _entity(db: sqlite3.Connection, name: str, kind: str) -> str:
     ).id
 
 
-def test_worker_queues_the_three_error_shapes(db: sqlite3.Connection, settings: Settings) -> None:
-    maxime = _entity(db, "maxime.team", "person")
-    _entity(db, "Menon 2011", "person")
-    braeuer = _entity(db, "Bräuer", "person")
-    _entity(db, "Dr. Gregor Bräuer", "person")
+def _auto_merge_across_kinds(
+    db: sqlite3.Connection, name: str, from_kind: str, to_kind: str, *, by: str
+) -> tuple[str, str]:
+    """Same name split across two kinds, merged by ``by`` — mirrors what the
+    deduplicator does on the real vault (Clario project -> product)."""
+    from_id = _entity(db, name, from_kind)
+    into_id = _entity(db, name, to_kind)
+    write_entity_merge(
+        db, from_entity_id=from_id, into_entity_id=into_id, merged_by=by, reason="t", confidence=0.9
+    )
+    return from_id, into_id
+
+
+# ── cross-kind auto-merge detector ───────────────────────────────────────────
+
+
+def test_finds_automatic_cross_kind_merge(db: sqlite3.Connection) -> None:
+    _auto_merge_across_kinds(db, "Clario", "project", "product", by="entity_deduplicator:v0")
+    found = find_cross_kind_auto_merges(db)
+    assert len(found) == 1
+    _from_id, detail, _evidence, _conf = found[0]
+    assert detail["from_kind"] == "project"
+    assert detail["merged_kind"] == "product"
+    assert detail["into_name"] == "Clario"
+
+
+def test_ignores_operator_and_manual_merges(db: sqlite3.Connection) -> None:
+    _auto_merge_across_kinds(db, "Maxime", "person", "product", by="operator")
+    _auto_merge_across_kinds(db, "afair", "project", "product", by="manual:rename-x")
+    assert find_cross_kind_auto_merges(db) == []
+
+
+def test_ignores_same_kind_merge(db: sqlite3.Connection) -> None:
+    # Two products merged into one product — no kind crossed, nothing to review.
+    a = _entity(db, "bind agent", "product")
+    b = _entity(db, "bind agent v0", "product")
+    write_entity_merge(
+        db,
+        from_entity_id=a,
+        into_entity_id=b,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    assert find_cross_kind_auto_merges(db) == []
+
+
+# ── the worker ───────────────────────────────────────────────────────────────
+
+
+def test_worker_queues_retypes_and_merge_reviews(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    _entity(db, "maxime.team", "person")  # retype -> product
+    _entity(db, "Menon 2011", "person")  # retype -> concept
     _entity(db, "Sajinth", "person")  # real — no proposal
+    _auto_merge_across_kinds(db, "Clario", "project", "product", by="entity_deduplicator:v0")
+    _auto_merge_across_kinds(db, "Maxime", "person", "product", by="operator")  # ignored
 
     stats = EntityAuditWorker().run(db, settings)
-    assert stats["retype_proposals"] == 2  # maxime.team, Menon 2011
-    assert stats["merge_proposals"] == 1  # Bräuer → Dr. Gregor Bräuer
+    assert stats["retype_proposals"] == 2
+    assert stats["merge_review_proposals"] == 1
 
     rows = db.execute(
-        "SELECT kind, entity_id, detail, status FROM proposed_corrections ORDER BY kind"
+        "SELECT kind, detail, status FROM proposed_corrections ORDER BY kind"
     ).fetchall()
-    assert len(rows) == 3
-    # The Maxime retype proposes product.
-    retypes = {r["entity_id"]: json.loads(r["detail"]) for r in rows if r["kind"] == "retype"}
-    assert retypes[maxime]["to_kind"] == "product"
-    # The merge points the shorter form at the fuller name.
-    merge = next(r for r in rows if r["kind"] == "merge")
-    assert merge["entity_id"] == braeuer
+    kinds = sorted(r["kind"] for r in rows)
+    assert kinds == ["merge_review", "retype", "retype"]
+    mr = next(r for r in rows if r["kind"] == "merge_review")
+    assert json.loads(mr["detail"])["into_name"] == "Clario"
     assert all(r["status"] == "proposed" for r in rows)
 
 
 def test_worker_is_idempotent(db: sqlite3.Connection, settings: Settings) -> None:
-    _entity(db, "maxime.team", "person")
+    _auto_merge_across_kinds(db, "Clario", "project", "product", by="entity_deduplicator:v0")
     first = EntityAuditWorker().run(db, settings)
-    assert first["retype_proposals"] == 1
+    assert first["merge_review_proposals"] == 1
     second = EntityAuditWorker().run(db, settings)
-    assert second["retype_proposals"] == 0  # already proposed; not re-queued
+    assert second["merge_review_proposals"] == 0  # already proposed; not re-queued
     assert db.execute("SELECT COUNT(*) FROM proposed_corrections").fetchone()[0] == 1
 
 
 def test_worker_skips_already_decided_proposal(db: sqlite3.Connection, settings: Settings) -> None:
-    eid = _entity(db, "maxime.team", "person")
+    from_id, _into = _auto_merge_across_kinds(
+        db, "Clario", "project", "product", by="entity_deduplicator:v0"
+    )
     EntityAuditWorker().run(db, settings)
-    # Operator rejected it — the audit must not re-open it.
-    db.execute("UPDATE proposed_corrections SET status = 'rejected' WHERE entity_id = ?", (eid,))
+    db.execute(
+        "UPDATE proposed_corrections SET status = 'confirmed' WHERE entity_id = ?", (from_id,)
+    )
     db.commit()
     EntityAuditWorker().run(db, settings)
     rows = db.execute(
-        "SELECT status FROM proposed_corrections WHERE entity_id = ?", (eid,)
+        "SELECT status FROM proposed_corrections WHERE entity_id = ?", (from_id,)
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["status"] == "rejected"  # untouched
+    assert rows[0]["status"] == "confirmed"  # untouched

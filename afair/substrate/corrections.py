@@ -31,7 +31,13 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from .entities import retype_entity, write_entity_merge
+from .entities import (
+    entity_id,
+    find_live_merge_from,
+    retype_entity,
+    write_entity_merge,
+    write_merge_invalidation,
+)
 from .events import write_event
 
 if TYPE_CHECKING:
@@ -76,6 +82,13 @@ def _entity_name(conn: sqlite3.Connection, entity_id: str) -> str:
     return row["canonical_name"] if row is not None else entity_id
 
 
+# The emergent kinds the extractor assigns (relations.type enum). A reject
+# correction's target kind must be one of these — parse, don't cast.
+ENTITY_KINDS = frozenset(
+    {"person", "organization", "place", "project", "product", "concept", "other"}
+)
+
+
 def _prompt_for(conn: sqlite3.Connection, kind: str, name: str, detail: dict[str, Any]) -> str:
     if kind == "retype":
         return (
@@ -85,6 +98,13 @@ def _prompt_for(conn: sqlite3.Connection, kind: str, name: str, detail: dict[str
     if kind == "merge":
         into_name = _entity_name(conn, detail["into_entity_id"])
         return f"'{name}' looks like the same entity as '{into_name}' — merge them?"
+    if kind == "merge_review":
+        return (
+            f"The deduplicator auto-merged '{detail['from_name']}' "
+            f"({detail['from_kind']}) into '{detail['into_name']}' as a "
+            f"{detail['merged_kind']}. Is {detail['merged_kind']} the right kind, "
+            f"or should it be something else?"
+        )
     return f"Review the proposed correction for '{name}'."
 
 
@@ -186,21 +206,131 @@ def _apply_correction(
     return f"unknown correction kind {kind!r}"
 
 
+def _retype_merged_entity(
+    conn: sqlite3.Connection,
+    *,
+    detail: dict[str, Any],
+    to_kind: str,
+    decided_by: str,
+    proposal_id: str,
+) -> str:
+    """Correct the kind an auto-merge picked: re-type the canonical (``into``)
+    entity from the merged kind to the operator's chosen kind."""
+    into_name = detail["into_name"]
+    merged_kind = detail["merged_kind"]
+    ev = write_event(
+        conn,
+        origin="user",
+        kind="observe",
+        payload={
+            "action": "correct_merge_review",
+            "subject": proposal_id,
+            "result": f"retype {merged_kind} -> {to_kind}",
+            "name": into_name,
+        },
+    )
+    # Reverting to the kind the merge came FROM: the (name, to_kind) entity
+    # already exists and still merges INTO the current canonical, so a plain
+    # re-type would close a cycle (project→product→project) and split the
+    # canonical. Invalidate that original merge first so resolve_canonical drops
+    # the back-edge — then the re-type's product→project becomes the only live
+    # direction and (name, to_kind) is cleanly canonical.
+    if to_kind == detail.get("from_kind"):
+        original = find_live_merge_from(conn, entity_id(into_name, to_kind))
+        if original is not None:
+            write_merge_invalidation(
+                conn,
+                merge_id=original,
+                invalidated_by=decided_by,
+                reason=f"merge-review revert to {to_kind} (proposal {proposal_id})",
+                source_event_id=ev.id,
+            )
+    merge = retype_entity(
+        conn,
+        canonical_name=into_name,
+        from_kind=merged_kind,
+        to_kind=to_kind,
+        reviewed_by=decided_by,
+        source_event_id=ev.id,
+        reason=f"operator-corrected merge-review proposal {proposal_id}",
+    )
+    if merge is None:
+        return f"no-op ('{into_name}' not found or already {to_kind})"
+    return f"re-typed '{into_name}': {merged_kind} → {to_kind}"
+
+
+def _set_status(
+    conn: sqlite3.Connection, proposal_id: str, status: str, now: str, decided_by: str
+) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE proposed_corrections "
+            "SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+            (status, now, decided_by, proposal_id),
+        )
+
+
+def _decide_merge_review(
+    conn: sqlite3.Connection,
+    *,
+    proposal_id: str,
+    verdict: str,
+    detail: dict[str, Any],
+    to_kind: str | None,
+    decided_by: str,
+    now: str,
+) -> CorrectionOutcome:
+    """A cross-kind auto-merge review. ``confirm`` keeps the picked kind (no
+    change); ``reject`` with a ``to_kind`` re-types the merged entity to the
+    correct kind; ``reject`` without one just flags it."""
+    merged_kind = detail["merged_kind"]
+    into_name = detail["into_name"]
+    if verdict == "confirm":
+        _set_status(conn, proposal_id, "confirmed", now, decided_by)
+        return CorrectionOutcome(
+            proposal_id=proposal_id,
+            status="confirmed",
+            note=f"kept '{into_name}' as {merged_kind}",
+        )
+    # reject — the auto-picked kind is wrong.
+    if to_kind is not None and to_kind != merged_kind:
+        note = _retype_merged_entity(
+            conn, detail=detail, to_kind=to_kind, decided_by=decided_by, proposal_id=proposal_id
+        )
+        _set_status(conn, proposal_id, "applied", now, decided_by)
+        return CorrectionOutcome(proposal_id=proposal_id, status="applied", note=note)
+    _set_status(conn, proposal_id, "rejected", now, decided_by)
+    return CorrectionOutcome(
+        proposal_id=proposal_id,
+        status="rejected",
+        note="flagged as wrong kind; no target kind given, left as-is",
+    )
+
+
 def decide_correction(
     conn: sqlite3.Connection,
     *,
     proposal_id: str,
     verdict: str,
+    to_kind: str | None = None,
     decided_by: str = DECIDED_BY_OPERATOR,
 ) -> CorrectionOutcome:
-    """Record the operator's decision on one proposal; apply it on confirm.
+    """Record the operator's decision on one proposal; apply it where a confirm
+    (or a corrective reject) implies a change.
+
+    ``to_kind`` carries the corrected kind for a ``merge_review`` reject ("no,
+    Clario is a project, not a product"). It's validated against the known
+    entity kinds — a bad value is a ValueError, not a silently-stored cast.
 
     Idempotent against a decided proposal: a second decision on an
-    already-confirmed/rejected row is a no-op that reports the prior status,
-    so a double-click or a retry never double-applies.
+    already-decided row reports the prior status, so a double-click or retry
+    never double-applies.
     """
     if verdict not in ("confirm", "reject"):
         msg = f"verdict must be 'confirm' or 'reject', got {verdict!r}"
+        raise ValueError(msg)
+    if to_kind is not None and to_kind not in ENTITY_KINDS:
+        msg = f"to_kind must be one of {sorted(ENTITY_KINDS)}, got {to_kind!r}"
         raise ValueError(msg)
 
     row = conn.execute(
@@ -218,28 +348,32 @@ def decide_correction(
             note=f"proposal already {row['status']}",
         )
 
+    detail = json.loads(row["detail"])
     now = _now_iso()
+
+    if row["kind"] == "merge_review":
+        return _decide_merge_review(
+            conn,
+            proposal_id=proposal_id,
+            verdict=verdict,
+            detail=detail,
+            to_kind=to_kind,
+            decided_by=decided_by,
+            now=now,
+        )
+
+    # retype / merge: confirm applies, reject dismisses.
     if verdict == "reject":
-        with conn:
-            conn.execute(
-                "UPDATE proposed_corrections "
-                "SET status = 'rejected', decided_at = ?, decided_by = ? WHERE id = ?",
-                (now, decided_by, proposal_id),
-            )
+        _set_status(conn, proposal_id, "rejected", now, decided_by)
         return CorrectionOutcome(proposal_id=proposal_id, status="rejected", note="left as-is")
 
     applied_note = _apply_correction(
         conn,
         kind=row["kind"],
         entity_id=row["entity_id"],
-        detail=json.loads(row["detail"]),
+        detail=detail,
         decided_by=decided_by,
         proposal_id=proposal_id,
     )
-    with conn:
-        conn.execute(
-            "UPDATE proposed_corrections "
-            "SET status = 'applied', decided_at = ?, decided_by = ? WHERE id = ?",
-            (now, decided_by, proposal_id),
-        )
+    _set_status(conn, proposal_id, "applied", now, decided_by)
     return CorrectionOutcome(proposal_id=proposal_id, status="applied", note=applied_note)

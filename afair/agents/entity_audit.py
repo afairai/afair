@@ -8,26 +8,32 @@ applies anything — a proposal is a suggestion the operator confirms (or an
 LLM-free surface shows them). The applied correction (retype / merge) is the
 append-only part; this worker only detects.
 
-Detection is deliberately deterministic and high-precision for v0 — the same
-patterns that produced the real errors we fixed by hand:
+Two detectors, both high-precision and chosen from what a dry-run against the
+real vault actually showed (the noisy ideas were dropped after they failed it):
 
-- a ``person`` whose name is a domain (``maxime.team``) → propose retype to
-  ``product``;
-- a ``person`` whose name carries a citation year (``Menon 2011``) → propose
-  retype to ``concept``;
-- two same-kind entities where one name is a shorter form of the other
-  (``Bräuer`` ⊂ ``Dr. Gregor Bräuer``) → propose a merge.
+- **Cross-kind auto-merge review** (the main signal). The entity-deduplicator
+  merges same-name entities split across kinds (``Clario`` project →
+  ``Clario`` product, ``VISION.md`` product → ``other``, ...). Those merges
+  are automatic and *pick a kind for you* — exactly the "automatic cluster,
+  whatever it is, we must check" case. Each such merge becomes a
+  ``merge_review`` proposal: confirm the picked kind, or correct it.
+- **Deterministic person type-mismatch** (cheap, future-proofing). A
+  ``person`` whose name is a domain (``maxime.team`` → ``product``) or carries
+  a citation year (``Menon 2011`` → ``concept``) → a ``retype`` proposal. These
+  found nothing on the live vault (already fixed by hand), but stay as a cheap
+  guard against the same error re-entering.
 
-An LLM judge for subtler type mismatches is a later addition — and it must
-carry the same evidence discipline as the extractor (quote the mention that
-justifies the call), or the detector confabulates the very thing it audits.
+Dropped after the dry-run: a surface-form subset merger (``"Claude"`` ⊂
+``"Claude Code"``) — it proposed mostly *wrong* merges (distinct things), and
+fuzzy LLM name-matches (10 on the vault, almost all correct) — low signal. The
+right merge signal is the kind the system *already* picked, not a re-derived
+guess.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from itertools import combinations
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -54,7 +60,6 @@ _DOMAIN_RE = re.compile(
 )
 # A 4-digit 19xx/20xx year in a name reads as a citation/reference.
 _CITATION_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def detect_type_mismatch(canonical_name: str, kind: str) -> tuple[str, str, float] | None:
@@ -81,34 +86,60 @@ def detect_type_mismatch(canonical_name: str, kind: str) -> tuple[str, str, floa
     return None
 
 
-def _name_tokens(name: str) -> frozenset[str]:
-    return frozenset(t.lower() for t in _TOKEN_RE.findall(name))
+# Merges by these authors are operator-made (or operator-directed renames), so
+# they're already decided — only AUTOMATIC merges go to review.
+_OPERATOR_AUTHORS = ("operator",)
+_OPERATOR_AUTHOR_PREFIXES = ("manual:",)
 
 
-def find_merge_candidates(
-    entities: list[tuple[str, str, str]],
-) -> list[tuple[str, str, str, float]]:
-    """Surface-form duplicates: same kind, and one name's tokens are a strict
-    subset of the other's (so the shorter is a short form of the longer).
+def _is_auto_merge(merged_by: str) -> bool:
+    if merged_by in _OPERATOR_AUTHORS:
+        return False
+    return not any(merged_by.startswith(p) for p in _OPERATOR_AUTHOR_PREFIXES)
 
-    ``entities`` is ``(entity_id, canonical_name, kind)``. Returns
-    ``(from_entity_id, into_entity_id, evidence, confidence)`` — always merging
-    the shorter form INTO the fuller name. A heuristic, hence a *proposal*:
-    "Marc" ⊂ "Marc Andreessen" might be two different Marcs, so the operator
-    confirms.
+
+def find_cross_kind_auto_merges(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, dict[str, Any], str, float]]:
+    """Automatic merges that crossed a kind boundary — the cluster decisions
+    the system made *for* the operator and never asked about.
+
+    Returns ``(from_entity_id, detail, evidence, confidence)`` for each
+    ``entity_merges`` row where the two entities have different kinds and the
+    merge was made by an automatic agent (not the operator, not a manual
+    rename). ``from_entity_id`` keys the proposal — each auto-merge is reviewed
+    once. ``detail`` carries everything the surface needs to ask the question
+    and apply a correction (the canonical ``into`` entity + the kind it picked).
     """
-    out: list[tuple[str, str, str, float]] = []
-    by_kind: dict[str, list[tuple[str, str, frozenset[str]]]] = {}
-    for eid, name, kind in entities:
-        by_kind.setdefault(kind, []).append((eid, name, _name_tokens(name)))
-    for group in by_kind.values():
-        for (id_a, name_a, ta), (id_b, name_b, tb) in combinations(group, 2):
-            if not ta or not tb or ta == tb:
-                continue
-            if ta < tb:
-                out.append((id_a, id_b, f"'{name_a}' is a shorter form of '{name_b}'", 0.85))
-            elif tb < ta:
-                out.append((id_b, id_a, f"'{name_b}' is a shorter form of '{name_a}'", 0.85))
+    rows = conn.execute(
+        """
+        SELECT mg.from_entity_id, mg.into_entity_id, mg.merged_by, mg.confidence,
+               a.canonical_name AS from_name, a.kind AS from_kind,
+               b.canonical_name AS into_name, b.kind AS into_kind
+        FROM entity_merges mg
+        JOIN entities a ON a.id = mg.from_entity_id
+        JOIN entities b ON b.id = mg.into_entity_id
+        WHERE a.kind != b.kind
+        """
+    ).fetchall()
+    out: list[tuple[str, dict[str, Any], str, float]] = []
+    for r in rows:
+        if not _is_auto_merge(r["merged_by"]):
+            continue
+        detail = {
+            "from_name": r["from_name"],
+            "from_kind": r["from_kind"],
+            "into_entity_id": r["into_entity_id"],
+            "into_name": r["into_name"],
+            "merged_kind": r["into_kind"],
+            "merged_by": r["merged_by"],
+        }
+        evidence = (
+            f"'{r['merged_by']}' auto-merged '{r['from_name']}' ({r['from_kind']}) "
+            f"into '{r['into_name']}' ({r['into_kind']}) — kind chosen without review"
+        )
+        conf = r["confidence"] if r["confidence"] is not None else 0.5
+        out.append((r["from_entity_id"], detail, evidence, conf))
     return out
 
 
@@ -171,7 +202,7 @@ class EntityAuditWorker(ColdPathWorker):
         stats: dict[str, Any] = {
             "scanned": len(entities),
             "retype_proposals": 0,
-            "merge_proposals": 0,
+            "merge_review_proposals": 0,
         }
         with conn:
             for eid, name, kind in entities:
@@ -188,18 +219,18 @@ class EntityAuditWorker(ColdPathWorker):
                         now=now,
                     ):
                         stats["retype_proposals"] += 1
-            for from_id, into_id, evidence, conf in find_merge_candidates(entities):
+            for from_id, detail, evidence, conf in find_cross_kind_auto_merges(conn):
                 if _insert_proposal(
                     conn,
-                    kind="merge",
+                    kind="merge_review",
                     entity_id=from_id,
-                    detail={"into_entity_id": into_id},
+                    detail=detail,
                     evidence=evidence,
                     confidence=conf,
                     now=now,
                 ):
-                    stats["merge_proposals"] += 1
+                    stats["merge_review_proposals"] += 1
 
-        if stats["retype_proposals"] or stats["merge_proposals"]:
+        if stats["retype_proposals"] or stats["merge_review_proposals"]:
             log.info("entity_audit.proposals", **stats)
         return stats
