@@ -13,6 +13,12 @@ from __future__ import annotations
 
 from . import pipeline_events
 from .checkpoint import start_checkpoint_loop
+from .corrections import (
+    CorrectionOutcome,
+    PendingCorrection,
+    decide_correction,
+    read_pending_corrections,
+)
 from .db import init_db, open_db
 from .entities import (
     EdgeInvalidation,
@@ -74,6 +80,7 @@ from .search import hybrid_search, rrf_merge, search_fts, search_vec
 
 __all__ = [
     "SCHEMA_VERSION",
+    "CorrectionOutcome",
     "EdgeInvalidation",
     "EdgeReview",
     "Entity",
@@ -81,6 +88,7 @@ __all__ = [
     "EntityMention",
     "EntityMerge",
     "Event",
+    "PendingCorrection",
     "StreamingObjectWriter",
     "build_binary_payload",
     "build_blob_ref_payload",
@@ -88,6 +96,7 @@ __all__ = [
     "build_text_payload",
     "canonical_json",
     "content_hash",
+    "decide_correction",
     "derive_searchable_text",
     "entity_id",
     "find_edges_for_source_event",
@@ -113,6 +122,7 @@ __all__ = [
     "read_event_by_id",
     "read_mentions_batch",
     "read_object",
+    "read_pending_corrections",
     "record_edge_review",
     "resolve_canonical",
     "resolve_canonical_batch",

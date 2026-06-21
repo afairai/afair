@@ -59,7 +59,37 @@ def test_empty_vault_yields_default_payload(db: sqlite3.Connection) -> None:
     assert payload["open_threads"] == []
     assert payload["vault_size"] == {"total": 0, "remembers": 0, "observes": 0}
     assert payload["cumulative_salience"] == 0.0
+    assert payload["pending_corrections"] == []
     assert "instructions" in payload
+
+
+def test_pending_corrections_surface_with_prompt(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """An open audit proposal shows up at session start with a yes/no prompt
+    and decide-instructions, so the AI can raise it proactively."""
+    from afair.agents.entity_audit import EntityAuditWorker
+    from afair.substrate import write_entity
+
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "maxime.team"}
+    )
+    write_entity(
+        db,
+        canonical_name="maxime.team",
+        kind="person",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.8,
+    )
+    EntityAuditWorker().run(db, settings)
+
+    payload = resources.build_session_start_payload(db)
+    pending = payload["pending_corrections"]
+    assert len(pending) == 1
+    assert pending[0]["kind"] == "retype"
+    assert "re-type" in pending[0]["prompt"]
+    assert "afair.recall(decide=" in payload["instructions"]
 
 
 def test_salient_events_surface_top_n_by_score(db: sqlite3.Connection, settings: Settings) -> None:
