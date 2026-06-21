@@ -295,6 +295,7 @@ def _candidate_keys(conn: sqlite3.Connection) -> list[str]:
                COUNT(m.id) AS mentions
         FROM entities e
         LEFT JOIN entity_mentions m ON m.entity_id = e.id
+        WHERE e.id NOT IN (SELECT entity_id FROM entity_retractions)
         GROUP BY LOWER(e.canonical_name)
         HAVING variants > 1
         ORDER BY mentions DESC
@@ -311,6 +312,7 @@ def _load_members(conn: sqlite3.Connection, key: str) -> list[_Member]:
         FROM entities e
         LEFT JOIN entity_mentions m ON m.entity_id = e.id
         WHERE LOWER(e.canonical_name) = ?
+          AND e.id NOT IN (SELECT entity_id FROM entity_retractions)
         GROUP BY e.id
         ORDER BY mention_count DESC
         """,

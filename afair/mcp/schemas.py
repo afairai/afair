@@ -442,7 +442,10 @@ class CorrectionDecision(BaseModel):
 
     proposal_id: str
     """``ProposedCorrectionView.id`` from a prior recall."""
-    verdict: Literal["confirm", "reject"]
+    verdict: Literal["confirm", "reject", "retract"]
+    """``confirm`` keeps the proposed/auto state; ``reject`` corrects it;
+    ``retract`` withdraws the entity entirely (it's noise — a file path, a test
+    fixture — not a real entity)."""
     to_kind: str | None = None
     """For a ``merge_review`` reject: the corrected entity kind ("no, Clario is
     a project, not a product"). The assisting AI maps the user's natural-language
