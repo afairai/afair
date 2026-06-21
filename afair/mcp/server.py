@@ -31,6 +31,7 @@ from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
 from ..agents.embedding import embed_text
 from ..agents.entity_articles import EntityArticleWorker
+from ..agents.entity_audit import EntityAuditWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.mode_switcher import ModeSwitcher
@@ -122,6 +123,7 @@ def build_server(settings: Settings) -> FastMCP:
             workers=[
                 Pruner(),
                 OrphanBlobSweeper(),
+                EntityAuditWorker(),
                 ConflictResolver(),
                 Consolidator(),
                 EntityCanonicalizer(),
