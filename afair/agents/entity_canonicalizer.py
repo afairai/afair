@@ -733,6 +733,7 @@ def _candidate_pool(
         "SELECT id, canonical_name, kind, created_at, created_by, "
         "confidence, source_event_id "
         "FROM entities WHERE kind = ? "
+        "AND id NOT IN (SELECT entity_id FROM entity_retractions) "
         "ORDER BY ABS(LENGTH(canonical_name) - ?) "
         "LIMIT ?",
         (kind, target_len, _CANDIDATE_POOL_MAX_ROWS),

@@ -120,6 +120,7 @@ def find_cross_kind_auto_merges(
         JOIN entities a ON a.id = mg.from_entity_id
         JOIN entities b ON b.id = mg.into_entity_id
         WHERE a.kind != b.kind
+          AND b.id NOT IN (SELECT entity_id FROM entity_retractions)
         """
     ).fetchall()
     out: list[tuple[str, dict[str, Any], str, float]] = []
@@ -195,6 +196,7 @@ class EntityAuditWorker(ColdPathWorker):
             FROM entities e
             LEFT JOIN entity_merges m ON m.from_entity_id = e.id
             WHERE m.id IS NULL
+              AND e.id NOT IN (SELECT entity_id FROM entity_retractions)
             """,
         ).fetchall()
         entities = [(r["id"], r["canonical_name"], r["kind"]) for r in rows]

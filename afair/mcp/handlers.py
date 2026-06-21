@@ -71,6 +71,7 @@ from ..substrate import (
     read_object,
     read_pending_corrections,
     resolve_canonical_batch,
+    retracted_entity_ids,
     rrf_merge,
     search_fts,
     search_vec,
@@ -528,6 +529,10 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
 
     resolved_map = resolve_canonical_batch(db, list(raw_ids))
     canonical_entities = read_entities_batch(db, resolved_map.values())
+    # Retracted (noise) entities are withdrawn from the live graph — never
+    # surface them, nor edges that touch them, even though their rows + mentions
+    # remain as history (I2).
+    retracted = retracted_entity_ids(db)
 
     # Phase 4 Track 2 — recent context for the per-hit surprise score.
     # Computed once per recall and applied to every hit.
@@ -562,7 +567,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
         ents: list[dict[str, Any]] = []
         for m in mentions:
             canonical_id = resolved_map.get(m.entity_id, m.entity_id)
-            if canonical_id in seen:
+            if canonical_id in seen or canonical_id in retracted:
                 continue
             seen.add(canonical_id)
             entity = canonical_entities.get(canonical_id)
@@ -609,10 +614,12 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             continue
         edge_views: list[dict[str, Any]] = []
         for edge in edges:
-            subj_canonical = canonical_entities.get(
-                resolved_map.get(edge.subject_id, edge.subject_id)
-            )
-            obj_canonical = canonical_entities.get(resolved_map.get(edge.object_id, edge.object_id))
+            subj_id = resolved_map.get(edge.subject_id, edge.subject_id)
+            obj_id = resolved_map.get(edge.object_id, edge.object_id)
+            if subj_id in retracted or obj_id in retracted:
+                continue
+            subj_canonical = canonical_entities.get(subj_id)
+            obj_canonical = canonical_entities.get(obj_id)
             if subj_canonical is None or obj_canonical is None:
                 continue
             # has_evidence=True: post-evidence-gate, every edge that exists was
