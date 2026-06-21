@@ -103,6 +103,20 @@ only the uncertain are queued (so review effort stays small). afair adopts:
 (KG quality + HITL: triple-trustworthiness scoring; LLM+human KG validation,
 2025.)
 
+**As built — entity-level corrections.** The same quarantine shape is now live
+for *entity* errors (a name filed under the wrong type, two names that are one
+entity), which the edge-level `edge_reviews` path did not cover. A cold-path
+`EntityAuditWorker` (`agents/entity_audit.py`) scans the graph and writes
+**proposals** into a `proposed_corrections` table — deterministic,
+high-precision detectors for v0 (a `person` whose name is a domain → retype to
+`product`; a `person` whose name carries a citation year → retype to `concept`;
+a surface-form subset like `Bräuer ⊂ Dr. Gregor Bräuer` → merge). The table is
+deliberately **non-substrate** (mutable, no I2 trigger): it is a regenerable
+queue, not a belief. `UNIQUE(kind, entity_id)` + `INSERT OR IGNORE` keeps the
+audit idempotent and stops it re-opening a decided proposal. The *applied*
+correction stays append-only (a retype is a merge into a freshly-typed entity;
+a merge is an `entity_merges` row), anchored to an `observe` event (I7).
+
 ### 5. Memory reconsolidation → correction-on-recall (the UX)
 
 Neuroscience: a memory becomes **labile (editable) when recalled**, then
@@ -112,6 +126,16 @@ primary correction surface is therefore conversational — when recall surfaces 
 belief and the operator reacts ("that's wrong"), the assisting AI proposes the
 correction and the operator confirms, applied through `remember(invalidates=)`
 (I1-safe; no new verb). A dashboard review queue is the batch surface.
+
+**As built — the decide loop.** For the entity-audit proposals above, the
+conversational surface is wired on the frozen `recall` verb (additive args, no
+new verb, like the `feedback` channel): `recall(stats=True)` and the
+`afair://session-start` resource carry `pending_corrections` (each with a
+ready-to-ask prompt), and `recall(decide={proposal_id, verdict})` records the
+operator's confirm/reject — a confirm applies the retype/merge synchronously so
+the same turn reports "done". This complements (does not replace)
+`remember(invalidates=)`, which remains the surface for correcting a *source
+fact*; `recall(decide=)` corrects a *derived entity*.
 
 Crucially, reconsolidation in the brain **distorts** (false updates are
 well-documented); afair appends, so the original always survives. afair is
