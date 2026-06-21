@@ -343,6 +343,32 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_reviews is append-only (Invariant I2)');
     END
     """,
+    # ── proposed_corrections: the entity-audit review queue (ADR-0002) ───────
+    # MUTABLE derived state, not substrate — the audit worker regenerates it, a
+    # decision updates its status, the pruner can clear applied rows. The
+    # *applied* correction (retype / merge) is the append-only part; this table
+    # is just the suggestion the operator confirms. One open proposal per
+    # (kind, entity) — re-running the audit won't duplicate or overwrite a
+    # decided one (INSERT OR IGNORE on the UNIQUE).
+    """
+    CREATE TABLE IF NOT EXISTS proposed_corrections (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge')),
+        entity_id     TEXT NOT NULL REFERENCES entities(id),
+        detail        TEXT NOT NULL,
+        evidence      TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        tier          TEXT NOT NULL CHECK (tier IN ('auto', 'review')),
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+        decided_at    TEXT,
+        decided_by    TEXT,
+        UNIQUE(kind, entity_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx ON proposed_corrections(status)",
     # ── pipeline_events: end-to-end lifecycle tracing (Phase 0.5 obs) ───────
     # Every step in an event's journey gets a row:
     #   event.written            — write_event_with_status returned ok
