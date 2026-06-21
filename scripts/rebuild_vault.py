@@ -131,31 +131,49 @@ def copy_source_events(dest: sqlite3.Connection, sources: list[Event]) -> int:
     return copied
 
 
-def _run_workers_to_convergence(
-    dest: sqlite3.Connection, settings: Settings, max_cycles: int
-) -> dict[str, int]:
-    """Drive canonicalizer → articles → consolidator until they stop changing.
+# Stats keys that don't count as "real work" — a cycle doing only these has
+# converged. Anything with a "skip"/"reject" in the name is a no-op outcome.
+_NON_WORK_STAT = {"llm_calls", "edges_skipped"}
 
-    Each worker is idempotent and bounded per cycle (the same cap the live
-    cold path uses), so a fixed number of cycles drains the backlog a vault of
-    this size accumulates. Counts are accumulated for the run summary.
+# The consolidator produces a daily rollup every pass (it never "converges"),
+# and its output mentions entities — re-canonicalizing it would re-trigger the
+# article worker in a feedback loop (the 251-article runaway). So it runs LAST,
+# a hard-bounded number of passes, and nothing re-canonicalizes after it.
+_CONSOLIDATOR_MAX_PASSES = 2
+
+
+def _stats_did_work(stats: dict[str, Any]) -> bool:
+    return any(
+        isinstance(v, int) and v > 0 and k not in _NON_WORK_STAT and "skip" not in k
+        for k, v in stats.items()
+    )
+
+
+def _run_cold_path(dest: sqlite3.Connection, settings: Settings, max_cycles: int) -> dict[str, int]:
+    """Materialize the derived layer once, without the feedback loop.
+
+    Phased, not "all workers per cycle until quiet": the canonicalizer must
+    process every source event (run to convergence), then the article worker
+    writes one article per entity (idempotent once done, so it converges too),
+    then the consolidator runs a small bounded number of passes LAST. Mixing
+    the consolidator into the loop is what ran away — each consolidation seeds
+    mentions that re-trigger articles forever.
     """
-    workers = [EntityCanonicalizer(), EntityArticleWorker(), Consolidator()]
     totals: dict[str, int] = {}
-    for cycle in range(max_cycles):
-        did_work = False
-        for worker in workers:
+
+    def drive(worker: Any, cap: int) -> int:
+        for cycle in range(cap):
             stats = worker.run(dest, settings)
             for k, v in stats.items():
                 if isinstance(v, int):
                     totals[f"{worker.name}.{k}"] = totals.get(f"{worker.name}.{k}", 0) + v
-                    if v > 0 and k not in {"llm_calls", "edges_skipped"}:
-                        did_work = True
-        if not did_work:
-            totals["_cycles_run"] = cycle + 1
-            break
-    else:
-        totals["_cycles_run"] = max_cycles
+            if not _stats_did_work(stats):
+                return cycle + 1
+        return cap
+
+    totals["canonicalizer_cycles"] = drive(EntityCanonicalizer(), max_cycles)
+    totals["article_cycles"] = drive(EntityArticleWorker(), max_cycles)
+    totals["consolidator_cycles"] = drive(Consolidator(), _CONSOLIDATOR_MAX_PASSES)
     return totals
 
 
@@ -222,7 +240,7 @@ def rebuild(
                 extractor.extract_sync(ev.id)
                 extracted += 1
         summary["re_extracted"] = extracted
-        summary["workers"] = _run_workers_to_convergence(dest_db, settings, max_cycles)
+        summary["workers"] = _run_cold_path(dest_db, settings, max_cycles)
     finally:
         dest_db.close()
         clear_context()
