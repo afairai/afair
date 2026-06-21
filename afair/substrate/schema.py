@@ -343,6 +343,40 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'merge_invalidations is append-only (Invariant I2)');
     END
     """,
+    # ── entity_retractions: take a non-entity out of the live graph (I2) ─────
+    # Some extractions are noise — a file path, a test fixture, a doc section
+    # (scripts/smoke_mcp.py, smoke-test-..., VISION.md §15) that should never
+    # have been an entity. Deleting the row is forbidden (I2), so retraction is
+    # append-only: a row here marks the entity withdrawn, and every live-graph
+    # read (recall overlay, audit, canonicalizer/dedup candidates, articles)
+    # filters it out. The entity + its mentions stay as history; they just stop
+    # being served as part of the user's current graph.
+    """
+    CREATE TABLE IF NOT EXISTS entity_retractions (
+        id              TEXT PRIMARY KEY,
+        entity_id       TEXT NOT NULL REFERENCES entities(id),
+        retracted_at    TEXT NOT NULL,
+        retracted_by    TEXT NOT NULL,
+        reason          TEXT NOT NULL,
+        source_event_id TEXT REFERENCES events(id),
+        UNIQUE(entity_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_retractions_entity_idx ON entity_retractions(entity_id)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_retractions_no_update
+    BEFORE UPDATE ON entity_retractions
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_retractions is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_retractions_no_delete
+    BEFORE DELETE ON entity_retractions
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_retractions is append-only (Invariant I2)');
+    END
+    """,
     # ── edge_reviews: the operator's confirm/reject verdicts (ADR-0002) ──────
     # A derived edge is a defeasible belief, not silent truth. The operator
     # (directly, or an AI on their behalf with confirmation) reviews edges; each

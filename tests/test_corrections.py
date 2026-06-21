@@ -190,6 +190,38 @@ def test_decide_rejects_bad_to_kind(db: sqlite3.Connection, settings: Settings) 
         decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="banana")
 
 
+def test_merge_review_retract_withdraws_the_entity(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """For a noise merge ("scripts/smoke_mcp.py"), retract withdraws the merged
+    canonical from the live graph instead of asking which kind."""
+    from afair.substrate import retracted_entity_ids
+
+    from_id = _entity(db, "scripts/smoke_mcp.py", "project")
+    into_id = _entity(db, "scripts/smoke_mcp.py", "product")
+    write_entity_merge(
+        db,
+        from_entity_id=from_id,
+        into_entity_id=into_id,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    EntityAuditWorker().run(db, settings)
+    mr = next(
+        p
+        for p in read_pending_corrections(db)
+        if p.kind == "merge_review" and p.entity_name == "scripts/smoke_mcp.py"
+    )
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="retract")
+    assert out.status == "applied"
+    assert "retracted" in out.note
+    assert into_id in retracted_entity_ids(db)
+    # The proposal is closed and no longer surfaces.
+    assert all(p.id != mr.id for p in read_pending_corrections(db))
+
+
 # ── decide: reject closes untouched ──────────────────────────────────────────
 
 
@@ -298,6 +330,53 @@ def test_recall_decide_applies_and_reports(ctx: object) -> None:
     assert resolve_canonical(db, person_id) == product_id
     # The decided proposal is gone from the remaining queue echoed back.
     assert all(p.id != retype.id for p in result.pending_corrections)
+
+
+def test_recall_overlay_drops_retracted_entity(ctx: object) -> None:
+    """A retracted entity disappears from the recall entity overlay even though
+    its row + mention remain (I2)."""
+    from afair.mcp import handlers
+    from afair.substrate import (
+        read_event_by_id,
+        retract_entity,
+        write_entity,
+        write_entity_mention,
+        write_event,
+    )
+
+    db = ctx.db  # type: ignore[attr-defined]
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "a note"}
+    )
+    e = write_entity(
+        db,
+        canonical_name="scripts/x.py",
+        kind="product",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.8,
+    )
+    write_entity_mention(
+        db,
+        entity_id=e.id,
+        event_id=ev.id,
+        event_hash=ev.content_hash,
+        surface_form="scripts/x.py",
+        canonicalized_by="t",
+        match_method="new",
+        confidence=0.8,
+    )
+    event = read_event_by_id(db, ev.id)
+    assert event is not None
+
+    before = handlers._build_entity_overlay([event], db)
+    names = [x["canonical_name"] for x in before[ev.content_hash]["canonical_entities"]]
+    assert "scripts/x.py" in names
+
+    retract_entity(db, entity_id=e.id, retracted_by="operator", reason="noise")
+    after = handlers._build_entity_overlay([event], db)
+    # The whole overlay entry is gone (it was the only entity on the event).
+    assert ev.content_hash not in after or not after[ev.content_hash].get("canonical_entities")
 
 
 def test_recall_decide_note_survives_a_combined_query(ctx: object) -> None:

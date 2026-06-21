@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from .entities import (
     entity_id,
     find_live_merge_from,
+    retract_entity,
     retype_entity,
     write_entity_merge,
     write_merge_invalidation,
@@ -259,6 +260,42 @@ def _retype_merged_entity(
     return f"re-typed '{into_name}': {merged_kind} → {to_kind}"
 
 
+def _retract_proposal_target(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    entity_id_: str,
+    detail: dict[str, Any],
+    decided_by: str,
+    proposal_id: str,
+) -> str:
+    """Withdraw the proposal's entity as noise (not a real entity). For a
+    merge_review that's the merged canonical (``into``); otherwise the
+    proposal's own entity."""
+    target = detail["into_entity_id"] if kind == "merge_review" else entity_id_
+    name = _entity_name(conn, target)
+    ev = write_event(
+        conn,
+        origin="user",
+        kind="observe",
+        payload={
+            "action": "retract_entity",
+            "subject": proposal_id,
+            "result": "retracted noise entity",
+            "entity_id": target,
+            "name": name,
+        },
+    )
+    did = retract_entity(
+        conn,
+        entity_id=target,
+        retracted_by=decided_by,
+        reason=f"operator-retracted noise (proposal {proposal_id})",
+        source_event_id=ev.id,
+    )
+    return f"retracted '{name}'" if did else f"'{name}' was already retracted"
+
+
 def _set_status(
     conn: sqlite3.Connection, proposal_id: str, status: str, now: str, decided_by: str
 ) -> None:
@@ -326,8 +363,8 @@ def decide_correction(
     already-decided row reports the prior status, so a double-click or retry
     never double-applies.
     """
-    if verdict not in ("confirm", "reject"):
-        msg = f"verdict must be 'confirm' or 'reject', got {verdict!r}"
+    if verdict not in ("confirm", "reject", "retract"):
+        msg = f"verdict must be 'confirm', 'reject' or 'retract', got {verdict!r}"
         raise ValueError(msg)
     if to_kind is not None and to_kind not in ENTITY_KINDS:
         msg = f"to_kind must be one of {sorted(ENTITY_KINDS)}, got {to_kind!r}"
@@ -350,6 +387,20 @@ def decide_correction(
 
     detail = json.loads(row["detail"])
     now = _now_iso()
+
+    # Retract: the proposal's entity is noise, not a real entity ("which kind?"
+    # is the wrong question). Withdraw it from the live graph (append-only).
+    if verdict == "retract":
+        note = _retract_proposal_target(
+            conn,
+            kind=row["kind"],
+            entity_id_=row["entity_id"],
+            detail=detail,
+            decided_by=decided_by,
+            proposal_id=proposal_id,
+        )
+        _set_status(conn, proposal_id, "applied", now, decided_by)
+        return CorrectionOutcome(proposal_id=proposal_id, status="applied", note=note)
 
     if row["kind"] == "merge_review":
         return _decide_merge_review(

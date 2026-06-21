@@ -297,6 +297,7 @@ def _article_worthy_groups(conn: sqlite3.Connection) -> list[_EntityGroup]:
             MAX(m.canonicalized_at) AS latest_mention_at
         FROM entities e
         JOIN entity_mentions m ON m.entity_id = e.id
+        WHERE e.id NOT IN (SELECT entity_id FROM entity_retractions)
         GROUP BY LOWER(e.canonical_name)
         HAVING mention_count >= ?
         ORDER BY mention_count DESC
@@ -313,6 +314,7 @@ def _article_worthy_groups(conn: sqlite3.Connection) -> list[_EntityGroup]:
             FROM entities e
             LEFT JOIN entity_mentions m ON m.entity_id = e.id
             WHERE LOWER(e.canonical_name) = ?
+              AND e.id NOT IN (SELECT entity_id FROM entity_retractions)
             GROUP BY e.id
             ORDER BY c DESC
             """,

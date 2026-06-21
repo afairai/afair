@@ -489,6 +489,48 @@ def write_merge_invalidation(
     return True
 
 
+def retract_entity(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    retracted_by: str,
+    reason: str,
+    source_event_id: str | None = None,
+) -> bool:
+    """Withdraw a non-entity (noise) from the live graph, append-only.
+
+    The entity row and its mentions stay as history (I2); a retraction row
+    makes every live-graph read filter it out. Idempotent on the UNIQUE
+    ``entity_id`` — retracting twice returns False. Returns True on a new row.
+    """
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO entity_retractions (
+                    id, entity_id, retracted_at, retracted_by, reason, source_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (_new_row_id(), entity_id, _now_iso(), retracted_by, reason, source_event_id),
+            )
+    except Exception as exc:
+        if "UNIQUE constraint" in str(exc):
+            return False
+        raise
+    return True
+
+
+def retracted_entity_ids(conn: sqlite3.Connection) -> set[str]:
+    """All withdrawn entity ids — the filter set every live-graph read applies.
+
+    Small by nature (noise is rare), so reading the whole set once per
+    cold-path cycle / recall and filtering in Python beats a correlated
+    subquery on every entity query.
+    """
+    rows = conn.execute("SELECT entity_id FROM entity_retractions").fetchall()
+    return {r["entity_id"] for r in rows}
+
+
 def record_edge_review(
     conn: sqlite3.Connection,
     *,
