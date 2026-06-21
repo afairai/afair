@@ -69,6 +69,10 @@ _SALIENT_LIMIT = 10
 # How many open threads to surface from the most-recent consolidation.
 _OPEN_THREADS_LIMIT = 8
 
+# How many open entity-audit proposals to surface. The graph changes
+# slowly; a handful is plenty to prompt the user without flooding.
+_PENDING_CORRECTIONS_LIMIT = 5
+
 
 class _Cache:
     """Tiny TTL+key cache for the session-start payload."""
@@ -109,12 +113,38 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     # Imported lazily to avoid the agents → mcp circular at import time.
     from ..agents.mode_switcher import read_current_mode
     from ..agents.salience import SALIENCE_PRODUCED_BY
+    from ..substrate import read_pending_corrections
 
     mode = read_current_mode(conn)
     salient = _read_top_salient(conn, limit=_SALIENT_LIMIT)
     open_threads = _read_open_threads(conn, limit=_OPEN_THREADS_LIMIT)
     vault_size = _read_vault_size(conn)
     cumulative_salience = sum(item["salience"] for item in salient)
+    pending = [
+        {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
+        for p in read_pending_corrections(conn, limit=_PENDING_CORRECTIONS_LIMIT)
+    ]
+
+    instructions = (
+        "These are the top recent salient events from the user's vault "
+        "plus any unresolved threads. Treat them as already-known "
+        "context for this session. For more specific questions, call "
+        "afair.recall(query=...). After a recall, the next time you "
+        'call recall or remember, include feedback={"useful_event_ids'
+        '":[...], "not_useful_event_ids":[...], "missing_topic":'
+        '"..."} referencing the hits from the prior recall. This '
+        "signal trains the self-improvement tuner. Empty payload is a "
+        "no-op."
+    )
+    if pending:
+        instructions += (
+            " pending_corrections lists entity-graph fixes the audit "
+            "proposed (e.g. a name filed under the wrong type, or two "
+            "names that are one entity). Each has a ready-to-ask prompt. "
+            "When it fits the conversation, ask the user, then apply their "
+            'answer with afair.recall(decide={"proposal_id":"<id>",'
+            '"verdict":"confirm"|"reject"}). Never apply without asking.'
+        )
 
     return {
         "mode": mode,
@@ -122,18 +152,9 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "vault_size": vault_size,
         "recent_salient_events": salient,
         "open_threads": open_threads,
+        "pending_corrections": pending,
         "salience_producer": SALIENCE_PRODUCED_BY,
-        "instructions": (
-            "These are the top recent salient events from the user's vault "
-            "plus any unresolved threads. Treat them as already-known "
-            "context for this session. For more specific questions, call "
-            "afair.recall(query=...). After a recall, the next time you "
-            'call recall or remember, include feedback={"useful_event_ids'
-            '":[...], "not_useful_event_ids":[...], "missing_topic":'
-            '"..."} referencing the hits from the prior recall. This '
-            "signal trains the self-improvement tuner. Empty payload is a "
-            "no-op."
-        ),
+        "instructions": instructions,
     }
 
 

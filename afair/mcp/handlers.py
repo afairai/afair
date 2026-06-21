@@ -69,6 +69,7 @@ from ..substrate import (
     read_event_by_id,
     read_mentions_batch,
     read_object,
+    read_pending_corrections,
     resolve_canonical_batch,
     rrf_merge,
     search_fts,
@@ -77,6 +78,7 @@ from ..substrate import (
 )
 from ..substrate import pipeline_events as pe
 from ..substrate.belief import Entrenchment, auto_confirm, resolve_trust
+from ..substrate.corrections import decide_correction
 from ..substrate.events import row_to_event
 from ..substrate.search import FTS5_SPECIALS_RE
 from . import schemas
@@ -91,10 +93,12 @@ from .schemas import (
     CompoundTextPart,
     ConflictFlag,
     ContextSummary,
+    CorrectionDecision,
     Depth,
     InvalidationSummary,
     ObserveEvent,
     ObserveResult,
+    ProposedCorrectionView,
     RecallCoverage,
     RecallFeedback,
     RecallHit,
@@ -1114,6 +1118,7 @@ def recall(
     full_payload: bool = False,
     stats: bool = False,
     feedback: RecallFeedback | None = None,
+    decide: CorrectionDecision | None = None,
 ) -> RecallResult:
     """Read the vault. Six call modes share this signature:
 
@@ -1148,9 +1153,25 @@ def recall(
     if feedback is not None:
         _record_recall_feedback(db, feedback)
 
+    # Operator confirm/reject on an entity-audit proposal (additive optional
+    # arg per I1, like feedback). Applied synchronously so the same turn can
+    # tell the user "done"; the outcome rides back on `note`. Kept in its own
+    # variable so the query path's note reassignments can't clobber it on a
+    # combined recall(decide=..., query=...) call.
+    decide_note: str | None = None
+    if decide is not None:
+        outcome = decide_correction(db, proposal_id=decide.proposal_id, verdict=decide.verdict)
+        decide_note = f"correction {decide.verdict}: {outcome.note}"
+
     summary: ContextSummary | None = None
     if stats:
         summary = _build_stats_summary(db)
+
+    # Surface the open audit queue on the session-start/check-in call
+    # (stats=True), and after a decision so the client sees what remains.
+    pending: list[ProposedCorrectionView] = (
+        _pending_correction_views(db) if (stats or decide is not None) else []
+    )
 
     # ── Single-event lookup mode ───────────────────────────────────────────
     if by_id is not None or by_content_hash is not None:
@@ -1166,8 +1187,9 @@ def recall(
             return RecallResult(
                 hits=[],
                 depth_used="shallow",
-                note=f"no event found for {selector}",
+                note=_combine_notes(decide_note, note or f"no event found for {selector}"),
                 summary=summary,
+                pending_corrections=pending,
             )
         invalidations = _attach_invalidations([target], db)
         conflicts = _attach_conflicts([target], db)
@@ -1191,7 +1213,9 @@ def recall(
                 )
             ],
             depth_used="shallow",
+            note=_combine_notes(decide_note, note),
             summary=summary,
+            pending_corrections=pending,
         )
 
     # ── Search / browse mode ───────────────────────────────────────────────
@@ -1288,9 +1312,10 @@ def recall(
             for e in events
         ],
         depth_used=depth_used,
-        note=note,
+        note=_combine_notes(decide_note, note),
         summary=summary,
         coverage=_compute_coverage(events, invalidations, conflicts),
+        pending_corrections=pending,
     )
 
 
@@ -1312,6 +1337,29 @@ def _build_stats_summary(db: Any) -> ContextSummary:
         by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + c
         by_origin[row["origin"]] = by_origin.get(row["origin"], 0) + c
     return ContextSummary(total_events=total, by_kind=by_kind, by_origin=by_origin)
+
+
+def _combine_notes(*parts: str | None) -> str | None:
+    """Join the non-empty note fragments (e.g. a decide outcome + a depth
+    fallback) into one ``note``, or None when there's nothing to say."""
+    kept = [p for p in parts if p]
+    return "; ".join(kept) if kept else None
+
+
+def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorrectionView]:
+    """Open entity-audit proposals, mapped to the recall wire model."""
+    return [
+        ProposedCorrectionView(
+            id=p.id,
+            kind=p.kind,
+            entity_id=p.entity_id,
+            entity_name=p.entity_name,
+            prompt=p.prompt,
+            evidence=p.evidence,
+            confidence=p.confidence,
+        )
+        for p in read_pending_corrections(db, limit=limit)
+    ]
 
 
 # ── observe ─────────────────────────────────────────────────────────────────

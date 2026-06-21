@@ -336,6 +336,31 @@ class RecallCoverage(BaseModel):
     this yet."""
 
 
+class ProposedCorrectionView(BaseModel):
+    """One open entity-audit proposal awaiting the operator's decision.
+
+    Surfaced on ``recall(stats=True)`` (the session-start / check-in call) so
+    the AI client can raise it conversationally and, on a yes, confirm it via
+    ``recall(decide=...)``. ``prompt`` is a ready-to-ask yes/no question; the
+    structured fields let the client explain or branch.
+
+    Additive per Invariant I1 — a new optional field on RecallResult; the three
+    frozen verbs keep their signatures.
+    """
+
+    id: str
+    """Pass back as ``CorrectionDecision.proposal_id`` to confirm/reject."""
+    kind: str
+    """'retype' | 'merge'."""
+    entity_id: str
+    entity_name: str
+    prompt: str
+    """Human-readable yes/no question, safe to show the user verbatim."""
+    evidence: str
+    """Why the audit flagged it — the pattern that fired."""
+    confidence: float
+
+
 class RecallResult(BaseModel):
     """Result of any `recall` call.
 
@@ -350,6 +375,9 @@ class RecallResult(BaseModel):
     ``summary`` is only populated when ``stats=True`` was requested.
     ``coverage`` is the honesty layer (see RecallCoverage) — populated on
     query/browse results, null on single-event lookups.
+    ``pending_corrections`` lists open entity-audit proposals — populated on
+    ``stats=True`` (and on any call that carried a ``decide``, so the client
+    sees the remaining queue after acting).
     """
 
     hits: list[RecallHit]
@@ -357,6 +385,7 @@ class RecallResult(BaseModel):
     note: str | None = None
     summary: ContextSummary | None = None
     coverage: RecallCoverage | None = None
+    pending_corrections: list[ProposedCorrectionView] = []
 
 
 # ── recall feedback ─────────────────────────────────────────────────────────
@@ -392,6 +421,28 @@ class RecallFeedback(BaseModel):
     missing_topic: str | None = None
     """Free-text note about what the prior recall did NOT surface
     that the caller expected. Capped at MAX_FEEDBACK_TOPIC_CHARS."""
+
+
+# ── correction decision ──────────────────────────────────────────────────────
+
+
+class CorrectionDecision(BaseModel):
+    """The operator's confirm/reject on one entity-audit proposal.
+
+    The client first sees proposals via ``recall(stats=True).pending_corrections``,
+    asks the user, then passes the decision back on its next recall:
+    ``recall(decide=CorrectionDecision(proposal_id=..., verdict="confirm"))``.
+    A confirm applies the correction (re-type / merge) through the append-only
+    primitives and records it; a reject closes the proposal untouched. Deciding
+    an already-decided proposal is a no-op.
+
+    Why optional + on the existing tool: I1 forbids new tools. Additive optional
+    args are allowed, exactly like ``feedback``.
+    """
+
+    proposal_id: str
+    """``ProposedCorrectionView.id`` from a prior recall."""
+    verdict: Literal["confirm", "reject"]
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
