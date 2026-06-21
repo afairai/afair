@@ -200,6 +200,7 @@ def build_server(settings: Settings) -> FastMCP:
         full_payload: bool = False,
         stats: bool = False,
         feedback: schemas.RecallFeedback | None = None,
+        decide: schemas.CorrectionDecision | None = None,
     ) -> schemas.RecallResult:
         return handlers.recall(
             query=query,
@@ -211,6 +212,7 @@ def build_server(settings: Settings) -> FastMCP:
             full_payload=full_payload,
             stats=stats,
             feedback=feedback,
+            decide=decide,
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")
