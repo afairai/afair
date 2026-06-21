@@ -355,6 +355,53 @@ def write_entity_merge(
     )
 
 
+def retype_entity(
+    conn: sqlite3.Connection,
+    *,
+    canonical_name: str,
+    from_kind: str,
+    to_kind: str,
+    reviewed_by: str,
+    source_event_id: str,
+    reason: str = "operator re-typed",
+) -> EntityMerge | None:
+    """Re-type an entity append-only — the operator correction for a
+    miscategorised entity (e.g. "Maxime" extracted as a person when it is a
+    product). ADR-0002 belief-correction.
+
+    An entity's identity encodes its kind (``entity:<sha256(name|kind)>``), so
+    re-typing cannot be an in-place edit (I2 forbids it anyway). It is a MERGE:
+    the old ``(name, from_kind)`` is merged into a fresh ``(name, to_kind)``.
+    ``resolve_canonical`` then redirects the old entity's mentions and edges to
+    the correctly-typed one, while the old entity stays as history. Reuses the
+    existing, tested merge machinery rather than a bespoke path.
+
+    Returns the merge row, or None if ``from_kind == to_kind`` or the source
+    entity does not exist (nothing to re-type).
+    """
+    if from_kind == to_kind:
+        return None
+    source = read_entity_by_id(conn, entity_id(canonical_name, from_kind))
+    if source is None:
+        return None
+    target = write_entity(
+        conn,
+        canonical_name=canonical_name,
+        kind=to_kind,
+        created_by=reviewed_by,
+        source_event_id=source_event_id,
+        confidence=1.0,
+    )
+    return write_entity_merge(
+        conn,
+        from_entity_id=source.id,
+        into_entity_id=target.id,
+        merged_by=reviewed_by,
+        reason=reason,
+        confidence=1.0,
+    )
+
+
 def write_edge_invalidation(
     conn: sqlite3.Connection,
     *,

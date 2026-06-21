@@ -217,3 +217,71 @@ def test_reject_is_atomic_no_half_commit(db: sqlite3.Connection) -> None:
     # The whole transaction rolled back — neither row landed.
     assert latest_edge_review(db, edge_id) is None
     assert read_edge_invalidations(db, edge_id) == []
+
+
+# ── entity re-typing (the operator fix for a miscategorised entity) ──────────
+
+
+def test_retype_entity_redirects_via_merge(db: sqlite3.Connection) -> None:
+    """Re-typing Maxime person→product merges the old into the new, so the old
+    entity's identity resolves to the correctly-typed one (Maxime is a tool,
+    not a person)."""
+    from afair.substrate import entity_id, read_entity_by_id, retype_entity, write_entity
+    from afair.substrate.entities import resolve_canonical
+
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "maxime"}
+    )
+    person = write_entity(
+        db,
+        canonical_name="Maxime",
+        kind="person",
+        created_by="x",
+        source_event_id=ev.id,
+        confidence=0.8,
+    )
+
+    merge = retype_entity(
+        db,
+        canonical_name="Maxime",
+        from_kind="person",
+        to_kind="product",
+        reviewed_by="operator",
+        source_event_id=ev.id,
+        reason="maxime.team is a domain, not a person",
+    )
+    assert merge is not None
+
+    product_id = entity_id("Maxime", "product")
+    # The old person-entity now resolves to the product-entity.
+    assert resolve_canonical(db, person.id) == product_id
+    assert read_entity_by_id(db, product_id).kind == "product"
+
+
+def test_retype_noops_on_same_kind_or_missing(db: sqlite3.Connection) -> None:
+    from afair.substrate import retype_entity
+
+    # Same kind: nothing to do.
+    assert (
+        retype_entity(
+            db,
+            canonical_name="X",
+            from_kind="person",
+            to_kind="person",
+            reviewed_by="op",
+            source_event_id="evt:x",
+        )
+        is None
+    )
+    # Source entity doesn't exist.
+    assert (
+        retype_entity(
+            db,
+            canonical_name="Ghost",
+            from_kind="person",
+            to_kind="product",
+            reviewed_by="op",
+            source_event_id="evt:x",
+        )
+        is None
+    )
