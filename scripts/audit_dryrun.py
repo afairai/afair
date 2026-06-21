@@ -65,9 +65,7 @@ def main() -> int:
         return db.execute(sql, args).fetchall()
 
     def has_table(name: str) -> bool:
-        return bool(
-            q("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name)
-        )
+        return bool(q("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name))
 
     print(f"# afair audit dry-run — vault {s.vault_dir}")
     print(f"# environment={s.environment}\n")
@@ -135,7 +133,7 @@ def main() -> int:
         for r in sample:
             print(
                 f"  [{r['match_method']}/{r['confidence']:.2f}] "
-                f"\"{r['surface_form']}\" -> {r['canonical_name']} ({r['kind']})"
+                f'"{r["surface_form"]}" -> {r["canonical_name"]} ({r["kind"]})'
             )
         print()
 
@@ -165,8 +163,7 @@ def main() -> int:
             conf = r["confidence"]
             conf_s = f"{conf:.2f}" if conf is not None else "n/a"
             print(
-                f"  [{conf_s}/{r['merged_by']}] \"{r['fn']}\" ({r['fk']}) "
-                f"-> \"{r['tn']}\" ({r['tk']})"
+                f'  [{conf_s}/{r["merged_by"]}] "{r["fn"]}" ({r["fk"]}) -> "{r["tn"]}" ({r["tk"]})'
             )
         print()
 
@@ -216,7 +213,7 @@ def main() -> int:
                     subset_pairs.append((kind, na, nb))
     print(f"SURFACE-FORM merge candidates (same kind, name subset): {len(subset_pairs)}")
     for kind, na, nb in subset_pairs[:20]:
-        print(f"  [{kind}] \"{na}\"  ⊂  \"{nb}\"")
+        print(f'  [{kind}] "{na}"  ⊂  "{nb}"')
     print()
 
     # ── projected queue size ─────────────────────────────────────────────────
