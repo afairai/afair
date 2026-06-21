@@ -310,6 +310,39 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_invalidations is append-only (Invariant I2)');
     END
     """,
+    # ── merge_invalidations: undo a merge without deleting it (I2) ───────────
+    # An entity_merge is append-only, but a wrong one (a bad auto-merge the
+    # operator rejected, or a kind reverted to where it came from) must be
+    # reversible — otherwise resolve_canonical is stuck with it. Invalidating a
+    # merge makes resolve_canonical skip that edge, so the from-entity stops
+    # resolving through it. Append-only itself: the original merge row stays as
+    # history (I7 — recorded + reversible, not erased).
+    """
+    CREATE TABLE IF NOT EXISTS merge_invalidations (
+        id                TEXT PRIMARY KEY,
+        merge_id          TEXT NOT NULL REFERENCES entity_merges(id),
+        invalidated_at    TEXT NOT NULL,
+        invalidated_by    TEXT NOT NULL,
+        reason            TEXT NOT NULL,
+        source_event_id   TEXT REFERENCES events(id),
+        UNIQUE(merge_id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS merge_invalidations_merge_idx ON merge_invalidations(merge_id)",
+    """
+    CREATE TRIGGER IF NOT EXISTS merge_invalidations_no_update
+    BEFORE UPDATE ON merge_invalidations
+    BEGIN
+        SELECT RAISE(ABORT, 'merge_invalidations is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS merge_invalidations_no_delete
+    BEFORE DELETE ON merge_invalidations
+    BEGIN
+        SELECT RAISE(ABORT, 'merge_invalidations is append-only (Invariant I2)');
+    END
+    """,
     # ── edge_reviews: the operator's confirm/reject verdicts (ADR-0002) ──────
     # A derived edge is a defeasible belief, not silent truth. The operator
     # (directly, or an AI on their behalf with confirmation) reviews edges; each
@@ -353,7 +386,7 @@ SCHEMA_DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS proposed_corrections (
         id            TEXT PRIMARY KEY,
-        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge')),
+        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review')),
         entity_id     TEXT NOT NULL REFERENCES entities(id),
         detail        TEXT NOT NULL,
         evidence      TEXT NOT NULL,

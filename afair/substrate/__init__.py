@@ -30,6 +30,7 @@ from .entities import (
     entity_id,
     find_edges_for_source_event,
     find_entity_by_name,
+    find_live_merge_from,
     iter_edges_for_entity,
     iter_mentions_for_event,
     latest_edge_review,
@@ -48,6 +49,7 @@ from .entities import (
     write_entity_edge,
     write_entity_mention,
     write_entity_merge,
+    write_merge_invalidation,
 )
 from .events import (
     Event,
@@ -101,6 +103,7 @@ __all__ = [
     "entity_id",
     "find_edges_for_source_event",
     "find_entity_by_name",
+    "find_live_merge_from",
     "hybrid_search",
     "init_db",
     "iter_edges_for_entity",
@@ -138,5 +141,6 @@ __all__ = [
     "write_entity_merge",
     "write_event",
     "write_event_with_status",
+    "write_merge_invalidation",
     "write_object",
 ]
