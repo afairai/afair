@@ -29,7 +29,11 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
   conflict resolver, consolidator, and the recursive self-improvement loop
   (tuner + multi-vendor judge + rollback monitor).
 - **Hosted layer** — per-user single-tenant Fly machines (I8), provisioned and
-  retired from afair-web; the operator's own vault runs at `mcp.afair.ai`.
+  retired from afair-web. Each user gets a per-user vanity host
+  (`<name-suffix>.mcp.afair.ai`, suffix derived from their Clerk id). The
+  operator's own vault is the per-user app `afair-your-app` at
+  `your-app.mcp.afair.ai` (since 2026-06-14; the old single-tenant
+  `mcp.afair.ai` app was retired). There is no bare `mcp.afair.ai` vault.
 - **Deploy** — product CI in this repo (`.github/workflows/ci.yml`: lint/type/
   test, no deploy). The fleet deploys from the private **afair-web** repo
   (`deploy-afair-fleet.yml`, pinned ref); a `vX.Y.Z` tag here triggers it. The
