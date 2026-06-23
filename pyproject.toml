@@ -17,7 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     # Validation
     "pydantic>=2.9.0",
-    "pydantic-settings>=2.6.0",
+    "pydantic-settings>=2.14.2",
     # Substrate storage — SQLite + vector search
     "sqlite-vec>=0.1.6",
     # SQLCipher (Stufe 1 encryption) — whole-database AES-256 encryption.
