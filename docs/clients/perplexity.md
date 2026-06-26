@@ -17,7 +17,7 @@ browser approval step.
 1. **Settings** then **Connectors** then **Add connector** / **Add custom
    MCP server**.
 2. **Name:** `afair`
-3. **Server URL:** `https://mcp.afair.ai/mcp`
+3. **Server URL:** `<your-vault-url>/mcp`
 4. **Authentication:** OAuth. Save and complete the browser approval: sign
    in (GitHub identity through afair.ai), approve the `mcp` scope. The
    connector links itself, no token to paste.
@@ -55,7 +55,7 @@ custom MCP servers; built-in connectors do not count.
 Confirm the OAuth discovery is reachable:
 
 ```bash
-curl -s https://mcp.afair.ai/.well-known/oauth-authorization-server | head -c 200
+curl -s <your-vault-url>/.well-known/oauth-authorization-server | head -c 200
 ```
 
 A 200 with `registration_endpoint` and `code_challenge_methods_supported:

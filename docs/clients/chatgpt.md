@@ -19,7 +19,7 @@ sign-in, nothing is pasted by hand.
    gates custom connectors behind it).
 2. **Add / Create** a custom connector.
 3. **Name:** `afair`
-4. **MCP Server URL:** `https://mcp.afair.ai/mcp`
+4. **MCP Server URL:** `<your-vault-url>/mcp`
 5. **Authentication:** OAuth (the default for a server that advertises it).
    Save, then complete the browser approval: sign in (GitHub identity
    through afair.ai), approve the `mcp` scope. The connector links itself.
@@ -64,11 +64,11 @@ connectors first.
 Confirm the discovery document is reachable:
 
 ```bash
-curl -s https://mcp.afair.ai/.well-known/oauth-protected-resource
+curl -s <your-vault-url>/.well-known/oauth-protected-resource
 ```
 
-Expected: JSON naming `https://mcp.afair.ai/mcp` as the resource and
-`https://mcp.afair.ai` as the authorization server. A 200 here means the
+Expected: JSON naming `<your-vault-url>/mcp` as the resource and
+`<your-vault-url>` as the authorization server. A 200 here means the
 server is healthy and the retry is on the client side.
 
 ### Data residency

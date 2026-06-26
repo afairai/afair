@@ -1,10 +1,16 @@
 # MCP client integration
 
-Connect any MCP-speaking AI client to the deployed afair server.
+Connect any MCP-speaking AI client to your afair vault.
 
-**Server endpoint:** `https://mcp.afair.ai/mcp`
-**Auth:** `Authorization: Bearer <AFAIR_AUTH_TOKEN>` on every request
-**Health:** `https://mcp.afair.ai/health` (no auth required)
+**`<your-vault-url>`** is wherever your vault runs:
+- **Local self-host:** `http://127.0.0.1:8765` (the default after `uv run python -m afair`).
+- **Deployed self-host:** your own domain or Fly app, e.g. `https://your-app.fly.dev`.
+- **Hosted afair.ai** (coming soon): the per-user address shown in your dashboard.
+
+**Server endpoint:** `<your-vault-url>/mcp`
+**Auth:** `Authorization: Bearer <AFAIR_AUTH_TOKEN>` on every request. A local
+self-host instance runs without auth, so there is no token and no header.
+**Health:** `<your-vault-url>/health` (no auth required)
 
 ## The easy path: one command
 
@@ -66,7 +72,7 @@ The first one establishes the surface; the second one establishes the habit. Bot
 grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-
 ```
 
-Copy that value where the client's config says `<AFAIR_AUTH_TOKEN>`. If you've never opened `.env.local`, the token is also visible in the Fly dashboard at `https://fly.io/apps/afair/secrets` (digest only, not the value).
+Copy that value where the client's config says `<AFAIR_AUTH_TOKEN>`. If you deployed to Fly, the token is also in your app's secrets (`fly secrets list -a <your-app>`, digest only). A local self-host instance has no token, so skip this and leave the `Authorization` header out.
 
 ## Verification
 
@@ -94,25 +100,25 @@ auth, run them to confirm the server is reachable before debugging a client:
 
 ```bash
 # Health
-curl -s https://mcp.afair.ai/health
+curl -s <your-vault-url>/health
 # {"status":"ok"}
 
 # OAuth 2.1 authorization-server metadata (RFC 8414)
-curl -s https://mcp.afair.ai/.well-known/oauth-authorization-server
+curl -s <your-vault-url>/.well-known/oauth-authorization-server
 # issuer, authorization_endpoint, token_endpoint,
 # registration_endpoint (Dynamic Client Registration),
 # revocation_endpoint, code_challenge_methods_supported: ["S256"] (PKCE),
 # grant_types_supported: ["authorization_code","refresh_token"]
 
 # Protected-resource metadata (RFC 9728)
-curl -s https://mcp.afair.ai/.well-known/oauth-protected-resource
-# resource: https://mcp.afair.ai/mcp, authorization_servers, scopes_supported
+curl -s <your-vault-url>/.well-known/oauth-protected-resource
+# resource: <your-vault-url>/mcp, authorization_servers, scopes_supported
 
 # Unauthenticated MCP request returns the discovery challenge
-curl -s -D - -o /dev/null https://mcp.afair.ai/mcp -H "Accept: text/event-stream"
+curl -s -D - -o /dev/null <your-vault-url>/mcp -H "Accept: text/event-stream"
 # HTTP/2 401
 # www-authenticate: Bearer realm="afair",
-#   resource_metadata="https://mcp.afair.ai/.well-known/oauth-protected-resource"
+#   resource_metadata="<your-vault-url>/.well-known/oauth-protected-resource"
 ```
 
 That `401` plus `WWW-Authenticate` is what makes a web client (Claude.ai,
