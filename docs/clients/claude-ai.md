@@ -11,7 +11,7 @@ In Claude.ai (web or desktop):
 
 1. **Settings** then **Connectors** then **Add custom connector**
 2. **Name:** `afair`
-3. **Server URL:** `https://mcp.afair.ai/mcp`
+3. **Server URL:** `<your-vault-url>/mcp`
 4. **Save.** Claude.ai discovers the OAuth metadata automatically and opens a
    browser approval step. Sign in there (GitHub identity through
    afair.ai), approve the `mcp` scope, and the connector links itself. No
@@ -63,7 +63,7 @@ The OAuth approval opens, you sign in, but Claude.ai does not register the
 connector. Confirm the discovery endpoints are reachable from your network:
 
 ```bash
-curl -s https://mcp.afair.ai/.well-known/oauth-authorization-server | head -c 200
+curl -s <your-vault-url>/.well-known/oauth-authorization-server | head -c 200
 ```
 
 Expected: a JSON document listing `authorization_endpoint`, `token_endpoint`,
@@ -78,7 +78,7 @@ directly with a bearer token:
 
 ```bash
 TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-)
-curl -X POST https://mcp.afair.ai/mcp \
+curl -X POST <your-vault-url>/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \
