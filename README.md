@@ -28,14 +28,13 @@ can export all of it whenever you want.
 
 ## Two ways to use it
 
-**Let afair.ai run it for you.** Sign up at **[afair.ai](https://afair.ai)** and
-you get your own isolated instance, hosted in the EU, with backups, one-click
-export, and updates handled for you. Nothing to install, no database to operate,
-no keys to babysit. This is the right choice for most people.
+**Run it yourself.** This repository is the whole thing, AGPLv3. Self-host it on
+your own machine or server and you own every layer end to end. It is free,
+forever. The quickstart is below.
 
-**Or run it yourself.** This repository is the whole thing, AGPLv3. Self-host it
-on your own machine or server and you own every layer end to end. The quickstart
-is below.
+**Or let afair.ai run it for you.** Managed hosting, with your own isolated EU
+instance, backups, export, and updates handled for you, is coming soon. Join the
+early-access list at **[afair.ai](https://afair.ai)**.
 
 Same code either way. The hosted product is one deployment of this repo, not a
 separate proprietary fork.

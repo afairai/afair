@@ -20,7 +20,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "afair": {
       "type": "http",
-      "url": "https://mcp.afair.ai/mcp",
+      "url": "<your-vault-url>/mcp",
       "headers": {
         "Authorization": "Bearer <AFAIR_AUTH_TOKEN>"
       }
@@ -37,7 +37,7 @@ You can also do it via the CLI:
 ```bash
 claude mcp add afair \
   --transport http \
-  --url https://mcp.afair.ai/mcp \
+  --url <your-vault-url>/mcp \
   --header "Authorization=Bearer <AFAIR_AUTH_TOKEN>"
 ```
 
@@ -88,7 +88,7 @@ Token is wrong. Verify locally:
 ```bash
 TOKEN=$(grep '^AFAIR_AUTH_TOKEN=' .env.local | cut -d= -f2-)
 curl -s -o /dev/null -w "%{http_code}\n" \
-  -X POST https://mcp.afair.ai/mcp \
+  -X POST <your-vault-url>/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \

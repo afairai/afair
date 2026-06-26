@@ -9,7 +9,7 @@ Append to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.afair]
 type = "http"
-url = "https://mcp.afair.ai/mcp"
+url = "<your-vault-url>/mcp"
 
 [mcp_servers.afair.headers]
 Authorization = "Bearer <AFAIR_AUTH_TOKEN>"
