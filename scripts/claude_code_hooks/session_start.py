@@ -103,13 +103,15 @@ def _emit_context(context_md: str) -> None:
 
 
 def _post(
-    url: str, token: str, payload: dict, session_id: str | None = None
+    url: str, token: str | None, payload: dict, session_id: str | None = None
 ) -> tuple[str | None, dict]:
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
+    # Local self-host runs without auth, so there is no token and no header.
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if session_id:
         headers["mcp-session-id"] = session_id
     req = urllib.request.Request(
