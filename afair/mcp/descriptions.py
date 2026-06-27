@@ -32,7 +32,7 @@ YOUR PROTOCOL:
    context refresh; the user does not want to repeat themselves.
 
 2. When the user shares anything durable, from any part of their life:
-   work, family and friends, health, the private things, call
+   work, family and friends, the personal things, call
    ``afair.remember(content={type:'text', text:...},
    type_hint='decision'|'preference'|'fact'|'plan'|...)``. A work
    decision or deadline counts; so does a friend's kid's name, a food
@@ -74,7 +74,7 @@ WHEN TO CALL:
     any part of life: a work decision or deadline, a colleague's role, a
     friend's or family member's name and what matters to them, a birthday
     or anniversary, a preference (food, travel, how they like to work), a
-    health note, a personal goal, something they are working through.
+    personal goal, something they are working through.
   - The user shows you content (an email, a meeting note, a document, a
     screenshot, a photo, a PDF, an audio clip) whose substance has reason
     to outlive this conversation.
@@ -102,7 +102,7 @@ ARGUMENTS:
     Max 10 MB raw bytes.
   - context: Optional. Where this came from or what it relates to.
     Examples: "email thread with Sajinth", "Tuesday standup",
-    "dinner with Mara", "Dad's cardiologist appointment". Aids future
+    "dinner with Mara", "Mum's birthday weekend". Aids future
     recall.
   - type_hint: Optional. What kind of thing this is, if you have a guess.
     Examples: "email", "meeting_minutes", "decision", "screenshot".

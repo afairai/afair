@@ -30,8 +30,8 @@ from Claude to your coding agent to whatever you pick up next. An AI layer keeps
 it structured for you as you go, so you never have to file or maintain anything.
 You can see what it has learned about you, and correct it when it's wrong.
 
-What goes in is your whole life: work and deadlines, the people you love, your
-health, the dates and details you want an AI to actually keep.
+What goes in is your whole life: your work, the people you love, and the
+personal things you'd rather an AI just knew.
 
 The data is append-only and yours. afair is open source and single-tenant, and
 you can export all of it whenever you want. The name is short for "as far as I

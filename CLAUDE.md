@@ -167,6 +167,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `analysis/phase-0-journal.md` | Daily-use log for the Phase 0 capability gate | Daily during the two-week window |
 | `analysis/2026-06-03-recursive-self-improvement.md` | Design of the tuner / judge / rollback self-improvement loop (referenced from `afair/agents/tuner.py`) | When the loop design changes |
 | `analysis/2026-05-28-observability-strategy.md` | Three-layer plan to make the designed flow visible — pipeline_events table, expectation checker, enriched /health. Triggered by heizzeit stall + consolidator silence | Refresh as drops 1–7 ship |
+| `analysis/2026-06-27-memory-relevance-decay-spec.md` | Spec for time/relevance-aware recall: eight relevance classes (dated, recurring, superseded, decaying, transient, evergreen, periodic, commitment), salience decay + re-surfacing within I2/I3 (decay is a recall score, never a delete) | When the relevance/decay design changes |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention — redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets — primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in the afair-web operator runbook | When the source logo changes |
 
