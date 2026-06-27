@@ -179,23 +179,30 @@ class Settings(BaseSettings):
     oauth_issuer: str | None = None
 
     # — Identity backend selection. Pluggable per-deployment.
-    # "hub" = federated GitHub OAuth through afair.ai (identity hub).
-    # "github" = LEGACY direct GitHub OAuth dance (deprecated 2026-06-01,
-    #            kept for fallback during the cutover).
+    # "hub"    = federated GitHub OAuth brokered by the managed afair.ai
+    #            control plane. Used by the hosted fleet, where afair.ai
+    #            owns the GitHub OAuth app centrally. A self-hosted
+    #            instance does not use this: it points at our control plane.
+    # "github" = direct GitHub OAuth against your own GitHub OAuth app.
+    #            The supported path for a self-hosted instance that needs
+    #            web-client logins (Claude.ai, ChatGPT): no afair.ai
+    #            dependency, you own the OAuth app end to end.
     # Future: "magic-link", "clerk", "static-password".
     identity_backend: Literal["hub", "github"] = "hub"
 
     # — Identity hub (federated GitHub OAuth). Used when
-    # identity_backend="hub" (the new default). The hub lives at
-    # https://afair.ai/oauth/identity/* and issues signed JWTs that
-    # this server verifies with the shared HMAC secret. See
-    # afair/mcp/oauth/identity_hub.py.
+    # identity_backend="hub", the default for the managed afair.ai fleet.
+    # The hub lives at https://afair.ai/oauth/identity/* and issues signed
+    # JWTs that this server verifies with the shared HMAC secret. A
+    # self-hosted instance leaves these unset and uses identity_backend
+    # "github" instead. See afair/mcp/oauth/identity_hub.py.
     identity_hub_url: str = "https://afair.ai"
     identity_hub_secret: SecretStr | None = None
 
-    # — LEGACY GitHub OAuth credentials. Only used when
-    # identity_backend="github". Will be removed once the hub
-    # cutover is verified across all deployments.
+    # — GitHub OAuth app credentials. Used when identity_backend="github",
+    # the self-host path for web-client logins. Register a GitHub OAuth app
+    # (free) and set its client id + secret here; the MCP server runs the
+    # OAuth dance itself, with no afair.ai involvement.
     github_oauth_client_id: SecretStr | None = None
     github_oauth_client_secret: SecretStr | None = None
 

@@ -6,23 +6,25 @@ Endpoints exposed:
   POST /oauth/register                          DCR (RFC 7591)
   GET  /oauth/authorize                         start the flow
   GET  /oauth/identity/accept                   hub-issued JWT lands here (NEW)
-  GET  /oauth/identity/github/callback          LEGACY direct-GitHub callback
+  GET  /oauth/identity/github/callback          direct-GitHub callback (self-host)
   POST /oauth/token                             code → JWT access token
   POST /oauth/revoke                            revoke a refresh token
 
-Identity verification is federated through afair.ai (the identity
-hub) by default (``identity_backend="hub"``). The hub drives the
-GitHub OAuth dance and sends us a signed JWT at /oauth/identity/
-accept. The hub is the only afair surface that knows about GitHub
-directly — every consumer trusts hub-issued JWTs via a shared HMAC
-secret. The allowlist check is enforced per-server at /accept time;
-each instance owns its own allowlist.
+Two identity backends, selected per-deployment:
 
-The legacy direct-GitHub backend (``identity_backend="github"``) is
-kept as a fallback during the cutover and will be removed once all
-deployments have migrated. In github mode, /authorize redirects to
-GitHub directly and the response lands at /oauth/identity/github/
-callback (the historical handler).
+The managed afair.ai fleet uses ``identity_backend="hub"`` (the
+default). Identity is federated through afair.ai: the hub drives the
+GitHub OAuth dance and sends us a signed JWT at /oauth/identity/
+accept, which every consumer trusts via a shared HMAC secret. The
+allowlist check is enforced per-server at /accept time; each instance
+owns its own allowlist.
+
+A self-hosted instance uses ``identity_backend="github"``: direct
+GitHub OAuth against the operator's own GitHub OAuth app, with no
+afair.ai involvement. /authorize redirects to GitHub directly and the
+response lands at /oauth/identity/github/callback. This is the
+supported path for self-hosters who want web-client (Claude.ai,
+ChatGPT) logins.
 """
 
 from __future__ import annotations
@@ -183,9 +185,10 @@ def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
 
 
 def _identity_backend(settings: Settings) -> IdentityBackend:
-    """LEGACY direct-GitHub backend. Used only when
-    identity_backend='github' (deprecated fallback). The default
-    'hub' backend skips this and federates through afair.ai.
+    """Direct-GitHub identity backend. Used when
+    identity_backend='github' (the self-host path for web-client
+    logins). The 'hub' backend, default for the managed fleet, skips
+    this and federates through afair.ai.
     """
     if settings.identity_backend != "github":
         msg = f"_identity_backend called with backend={settings.identity_backend!r}"
@@ -200,7 +203,7 @@ def _identity_backend(settings: Settings) -> IdentityBackend:
 
 
 def _identity_callback_url(settings: Settings) -> str:
-    """Legacy direct-GitHub callback (only meaningful when backend=github)."""
+    """Direct-GitHub callback (used when backend=github)."""
     return f"{settings.effective_oauth_issuer}/oauth/identity/github/callback"
 
 
@@ -407,10 +410,10 @@ async def oauth_authorize(request: Request) -> Response:
     finally:
         db.close()
 
-    # Hub-backed flow (default): redirect to the identity hub. The hub
-    # drives GitHub OAuth and bounces back to /oauth/identity/accept
-    # with a signed JWT. Direct-GitHub backend is retained as a
-    # fallback for environments without a reachable hub.
+    # Hub-backed flow (default for the managed fleet): redirect to the
+    # identity hub. The hub drives GitHub OAuth and bounces back to
+    # /oauth/identity/accept with a signed JWT. A self-hosted instance
+    # uses the direct-GitHub backend below instead of the hub.
     if settings.identity_backend == "hub":
         if settings.identity_hub_secret is None:
             return _error(
@@ -526,12 +529,12 @@ async def oauth_identity_accept(request: Request) -> Response:
     )
 
 
-# ── identity callback: LEGACY direct-GitHub path ───────────────────────────
+# ── identity callback: direct-GitHub path (self-host) ──────────────────────
 #
-# Kept reachable for the deprecated `identity_backend="github"` mode.
-# In hub mode this handler is never hit because GitHub redirects to
-# afair.ai's hub URL, not back here. Will be deleted once the cutover
-# is fully verified across all deployments.
+# Used by the `identity_backend="github"` mode, the supported self-host
+# path for web-client logins. In hub mode (the managed fleet default)
+# this handler is never hit because GitHub redirects to afair.ai's hub
+# URL, not back here.
 
 
 async def oauth_identity_github_callback(request: Request) -> Response:

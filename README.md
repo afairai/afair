@@ -69,9 +69,12 @@ cp .env.example .env
 uv run python -m afair
 ```
 
-The server comes up on `http://127.0.0.1:8765`. Point your MCP client at it,
-connect, and you are done. Every environment variable is documented inline in
-`.env.example`. Per-client connection guides live in [docs/clients](docs/clients).
+The server comes up on `http://127.0.0.1:8765`. Point a CLI or desktop client
+(Claude Code, Codex, Cursor) at it, connect, and you are done. Web clients that
+run in the cloud (Claude.ai, ChatGPT) instead need a public HTTPS deployment and
+a quick OAuth setup, covered in [docs/self-hosting.md](docs/self-hosting.md).
+Every environment variable is documented inline in `.env.example`; per-client
+connection guides live in [docs/clients](docs/clients).
 
 ## Works with
 
