@@ -84,9 +84,12 @@ from .search import hybrid_search, rrf_merge, search_fts, search_vec
 from .temporal import (
     TEMPORAL_CLASSES,
     EventTemporal,
+    next_occurrence,
+    next_relevant_moment,
     read_event_temporal,
     read_event_temporal_batch,
     temporal_relevance,
+    upcoming_temporal,
     write_event_temporal,
 )
 
@@ -123,6 +126,8 @@ __all__ = [
     "iter_mentions_for_event",
     "latest_edge_review",
     "latest_edge_reviews_batch",
+    "next_occurrence",
+    "next_relevant_moment",
     "object_exists",
     "object_path",
     "object_plaintext_size",
@@ -151,6 +156,7 @@ __all__ = [
     "search_vec",
     "start_checkpoint_loop",
     "temporal_relevance",
+    "upcoming_temporal",
     "write_edge_invalidation",
     "write_entity",
     "write_entity_edge",
