@@ -10,6 +10,30 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.2](https://github.com/afairai/afair/compare/v0.1.1...v0.1.2) (2026-06-27)
+
+
+### Features
+
+* generic life clusters (work / family & friends / personal), drop health naming ([1806eb8](https://github.com/afairai/afair/commit/1806eb8bc25f18ea4b18c0ce57c883979915a952))
+* **temporal:** P1 of relevance-decay — infer per-event temporal metadata ([6655a49](https://github.com/afairai/afair/commit/6655a4991cbb39380d06bbdc92804cdff80d275d))
+* **temporal:** P2 of relevance-decay — temporal decay in recall ranking ([277cdcc](https://github.com/afairai/afair/commit/277cdcc1b4d7da5a3bd04ced67633a055ca1f3c3))
+* **temporal:** P3 of relevance-decay — recurrence re-surfacing + upcoming ([859f4da](https://github.com/afairai/afair/commit/859f4dadd2d7c5ab80dea898160698c15489152e))
+* **temporal:** P4 of relevance-decay — topic warmth (transient + decaying) ([dffdbed](https://github.com/afairai/afair/commit/dffdbed90e2c06cc8844048fdc87969297c3ec46))
+
+
+### Bug Fixes
+
+* **eval:** keep the regression gate honest after the fixture grew ([b9815ae](https://github.com/afairai/afair/commit/b9815ae60618c37354fae087e7ae3a142773efb3))
+* **temporal:** floor actually-invalidated memories in recall, not just guesses ([a1ab6f1](https://github.com/afairai/afair/commit/a1ab6f101af6ac8148ca1dd849603e1330e47920))
+
+
+### Documentation
+
+* **claude:** correct the going-public status — history NOT yet scrubbed ([63fd02b](https://github.com/afairai/afair/commit/63fd02b1222474b1efa466029891332ddc1c58d1))
+* **temporal:** add post-launch roadmap (2b, tuner, local model) to the spec ([61bc5f3](https://github.com/afairai/afair/commit/61bc5f333c74be207bb65abe4567f17de45e30c1))
+* **temporal:** mark relevance-decay spec Implemented (P1-P4 shipped) ([2af99ae](https://github.com/afairai/afair/commit/2af99aea540a3dd842855bab5cd0521ab020b644))
+
 ## [0.1.1](https://github.com/afairai/afair/compare/v0.1.0...v0.1.1) (2026-06-27)
 
 
