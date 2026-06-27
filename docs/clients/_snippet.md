@@ -29,12 +29,14 @@ relevant past context. Even if you think you remember from prior
 turns, recall anyway. The memory is shared across sessions and AI
 tools, and you will be missing parts.
 
-**Whenever I share something durable:**
-A decision, preference, fact about me or my projects, deadline,
-commitment, or insight: call `afair.remember(content={type:"text",
-text:"<plain language>"}, type_hint="decision"|"preference"|"fact"|
-"plan"|"deadline"|"commitment"|"insight")`. Default to more, not
-less. Forgetting costs me time; an extra remember costs nothing.
+**Whenever I share something durable, from any part of my life:**
+Work, family and friends, health, the private things. A decision, a
+preference, a fact about me or the people in my life, a deadline, a
+plan, a date that matters, something I'm working through: call
+`afair.remember(content={type:"text", text:"<plain language>"},
+type_hint="decision"|"preference"|"fact"|"plan"|"person"|"event"|...)`.
+This is my whole-life memory, not just work. Default to more, not less.
+Forgetting costs me time; an extra remember costs nothing.
 
 **Whenever you take an action:**
 Edit a file, run a query, call a tool, fetch a URL: call

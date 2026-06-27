@@ -31,11 +31,15 @@ YOUR PROTOCOL:
    if they haven't asked anything concrete yet. Treat this as your
    context refresh; the user does not want to repeat themselves.
 
-2. When the user shares a DECISION, PREFERENCE, FACT, plan, deadline,
-   commitment, or insight, call ``afair.remember(content={type:'text',
-   text:...}, type_hint='decision'|'preference'|'fact'|'plan'|...)``.
-   Default to remembering more, not less. The cost of forgetting a
-   memory is much higher than the cost of an extra append-only row.
+2. When the user shares anything durable, from any part of their life:
+   work, family and friends, health, the private things, call
+   ``afair.remember(content={type:'text', text:...},
+   type_hint='decision'|'preference'|'fact'|'plan'|...)``. A work
+   decision or deadline counts; so does a friend's kid's name, a food
+   preference, an anniversary, a worry they keep returning to. afair is
+   the user's whole-life memory, not a work tool. Default to remembering
+   more, not less. The cost of forgetting a memory is much higher than
+   the cost of an extra append-only row.
 
 3. When YOU take an agent action (edit a file, run a query, fetch a URL,
    call another tool) call ``afair.observe(event={action, subject,
@@ -67,9 +71,12 @@ WHEN TO CALL:
   - The user explicitly says "remember", "save", "note that", "keep this",
     "don't forget", "make a note", "add to memory", or any clear save-this
     signal.
-  - The user shares a durable fact worth retaining across sessions: a name,
-    a deadline, a preference, a decision, an ongoing context, an
-    insight, a commitment.
+  - The user shares a durable fact worth retaining across sessions, from
+    any part of life: a work decision or deadline, a colleague's role, a
+    friend's or family member's name and what matters to them, a birthday
+    or anniversary, a preference (food, travel, how they like to work), a
+    health note, a personal goal, something they are working through.
+    afair is the user's whole-life memory, not just a work tool.
   - The user shows you content (an email, a meeting note, a document, a
     screenshot, a photo, a PDF, an audio clip) whose substance has reason
     to outlive this conversation.
@@ -97,7 +104,8 @@ ARGUMENTS:
     Max 10 MB raw bytes.
   - context: Optional. Where this came from or what it relates to.
     Examples: "email thread with Sajinth", "Tuesday standup",
-    "screenshot of the bug in /api/health". Aids future recall.
+    "dinner with Mara", "Dad's cardiologist appointment". Aids future
+    recall.
   - type_hint: Optional. What kind of thing this is, if you have a guess.
     Examples: "email", "meeting_minutes", "decision", "screenshot".
     Advisory only. The system may classify differently.
@@ -137,7 +145,8 @@ WHEN TO CALL:
     me to check?" Just check. Recall is cheap; missing context isn't.
   - Before answering questions that benefit from prior context:
     preferences, past decisions, names, ongoing projects, history with
-    people, recurring themes, deadlines, commitments.
+    people (at work and outside it), important dates, recurring themes,
+    deadlines, commitments.
   - When the user asks "do you remember X?", "what did we say about Y?",
     "remind me of Z?".
   - When the user wants the FULL content of a specific event ("show me the
@@ -155,7 +164,8 @@ WHEN NOT TO CALL:
 
 ARGUMENTS (all optional; combine as needed):
   - query: Natural-language search. Examples: "what did Sajinth say
-    about the roadmap", "deadlines for the API project".
+    about the roadmap", "deadlines for the API project", "what does Mara
+    like to drink", "when is my sister's birthday".
   - by_id: ULID of one specific event. Returns that event in full.
     Use after a prior recall hit when you need the whole content.
   - by_content_hash: sha256-prefixed hash of one specific event.
@@ -261,6 +271,8 @@ ARGUMENTS:
        "result": "follow-up on roadmap", "thread_id": "..."}
       {"action": "deployed", "subject": "afair-prod",
        "result": "v0.1.3", "duration_s": 47}
+      {"action": "drafted_message", "subject": "Mara",
+       "result": "birthday note for Saturday"}
 
 RETURN:
   {"ok": true, "event_id": "...", "content_hash": "sha256:..."}
