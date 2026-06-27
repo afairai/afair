@@ -81,9 +81,16 @@ from .payload import (
 )
 from .schema import SCHEMA_VERSION
 from .search import hybrid_search, rrf_merge, search_fts, search_vec
+from .temporal import (
+    TEMPORAL_CLASSES,
+    EventTemporal,
+    read_event_temporal,
+    write_event_temporal,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "TEMPORAL_CLASSES",
     "CorrectionOutcome",
     "EdgeInvalidation",
     "EdgeReview",
@@ -92,6 +99,7 @@ __all__ = [
     "EntityMention",
     "EntityMerge",
     "Event",
+    "EventTemporal",
     "PendingCorrection",
     "StreamingObjectWriter",
     "build_binary_payload",
@@ -125,6 +133,7 @@ __all__ = [
     "read_entity_by_id",
     "read_event_by_hash",
     "read_event_by_id",
+    "read_event_temporal",
     "read_mentions_batch",
     "read_object",
     "read_pending_corrections",
@@ -144,6 +153,7 @@ __all__ = [
     "write_entity_mention",
     "write_entity_merge",
     "write_event",
+    "write_event_temporal",
     "write_event_with_status",
     "write_merge_invalidation",
     "write_object",
