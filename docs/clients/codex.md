@@ -17,6 +17,13 @@ Authorization = "Bearer <AFAIR_AUTH_TOKEN>"
 
 Replace `<AFAIR_AUTH_TOKEN>` with the value from your `.env.local`.
 
+### Alternative: OAuth (public vault)
+
+If your vault is deployed publicly with OAuth enabled, connect without a token:
+keep the `url` and drop the `[mcp_servers.afair.headers]` table. Codex runs the
+browser sign-in on first use. Cleaner for a public deployment; the bearer above
+stays simplest for a local self-host.
+
 ## 2. Add the instruction snippet
 
 Append the contents of [_snippet.md](_snippet.md) to `~/.codex/AGENTS.md`

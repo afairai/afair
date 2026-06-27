@@ -38,39 +38,51 @@ SERVER_NAME = "afair"
 # domain, or your hosted afair.ai address.
 DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 
-SNIPPET_MARKER = "## afair MCP"
-# Deliberately terser than docs/clients/_snippet.md: this gets auto-injected
-# into every client's instructions, where a short nudge is followed and a long
-# block is ignored. _snippet.md is the fuller human-readable reference.
-SNIPPET_BODY = """\
-You have access to an `afair` MCP server providing persistent memory
-across sessions, AI clients, and devices. Use it daily:
+# Idempotency markers: the current snippet heading, plus the legacy wrapper
+# older installs wrote, so re-running never double-appends.
+SNIPPET_MARKERS = (
+    "## afair: Persistent Memory Across AI Tools",
+    "## afair MCP",
+)
 
-1. **Before answering** questions that benefit from history (preferences,
-   past decisions, names, ongoing projects, recurring themes), call
-   `recall(query)` first.
-2. **When the user signals** save/remember/note/keep, call `remember()`.
-   Also call it proactively for durable facts the user has just shared
-   that should outlive this conversation.
-3. **After completing significant work** (a fix, a feature, a decision,
-   a deployment), call `observe()` to log what happened so future
-   sessions know.
-4. **At session start** for unfamiliar contexts, call `recall(stats=True)`
-   to see a structured overview of the vault (totals, kind breakdown,
-   recent events). For a single past event by id, use `recall(by_id=...)`.
-5. **When recall returns hits**, each one carries
-   `interpretation.canonical_entities` (people, orgs, projects mentioned),
-   `interpretation.entity_edges` (subject-predicate-object relations
-   discovered in that event), and `interpretation.surprise_score` ∈ [0,1]
-   (0 = entities all match the user's recent context; 1 = entities come
-   from nowhere). Use the entities + edges to disambiguate context
-   (Sajinth-from-elvah vs. Sajinth-from-Athara are different canonicals).
-   High surprise on a hit is a signal that more context-pulling may be
-   needed before acting on it.
+# Fallback, used only when docs/clients/_snippet.md can't be read (e.g. the
+# script was copied out of the checkout). The live source is that file;
+# _load_snippet() keeps the installer and the docs from ever drifting.
+_SNIPPET_FALLBACK = """\
+## afair: Persistent Memory Across AI Tools
 
-Be a thoughtful librarian. Save signal, not noise. The substrate is the
-user's vault, not yours.
+You have access to `afair`, an MCP server that holds my durable memory across
+every session, every AI tool, every device. Use it. At conversation start call
+`afair.recall(query=...)`. When I share something durable (a decision,
+preference, fact, deadline, commitment, insight) call `afair.remember(...)`.
+When you take an action (edit a file, run a query, fetch a URL) call
+`afair.observe(...)`. Don't ask whether to remember or recall; just do it.
 """
+
+
+def _load_snippet() -> str:
+    """The instruction block, single-sourced from docs/clients/_snippet.md.
+
+    Extracts the first fenced ``markdown`` block so the installer and the docs
+    are the same text and can't drift. Falls back to the embedded copy if the
+    repo docs aren't reachable.
+    """
+    doc = Path(__file__).resolve().parent.parent / "docs" / "clients" / "_snippet.md"
+    try:
+        text = doc.read_text(encoding="utf-8")
+    except OSError:
+        return _SNIPPET_FALLBACK
+    fence = text.find("```markdown")
+    if fence == -1:
+        return _SNIPPET_FALLBACK
+    body_start = text.find("\n", fence) + 1
+    body_end = text.find("```", body_start)
+    if body_end == -1:
+        return _SNIPPET_FALLBACK
+    return text[body_start:body_end].strip()
+
+
+SNIPPET_BODY = _load_snippet()
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -140,19 +152,15 @@ def _load_token() -> str:
     return ""
 
 
-def _append_snippet_if_missing(
-    path: Path, *, dry: bool, indent_under_h2: bool = True
-) -> Change | None:
-    """Append the instruction block to a CLAUDE.md / AGENTS.md / etc.
+def _append_snippet_if_missing(path: Path, *, dry: bool) -> Change | None:
+    """Append the instruction block to a CLAUDE.md / AGENTS.md / rules file.
 
-    Idempotent — checks for SNIPPET_MARKER first.
+    Idempotent: skips if any known snippet marker is already present. The block
+    is self-headed (it starts with its own H2), so it drops in as-is.
     """
-    if path.exists() and SNIPPET_MARKER in path.read_text():
+    if path.exists() and any(m in path.read_text() for m in SNIPPET_MARKERS):
         return None
-    block = f"\n\n{SNIPPET_MARKER}\n\n{SNIPPET_BODY}\n"
-    if not indent_under_h2:
-        # For .cursorrules (no Markdown headers convention), drop the H2 line
-        block = "\n\n# afair MCP\n\n" + SNIPPET_BODY + "\n"
+    block = f"\n\n{SNIPPET_BODY}\n"
     if dry:
         return Change("snippet", path, "would append")
     path.parent.mkdir(parents=True, exist_ok=True)
