@@ -226,7 +226,7 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
         _ok(f"Claude Code: {action} snippet to {claude_md}")
         changes.append(snippet_change)
 
-    # Phase 2 #3 — SessionStart lifecycle hook for auto-loaded vault context.
+    # Phase 2 #3: SessionStart lifecycle hook for auto-loaded vault context.
     hook_changes = _install_session_start_hook(token=token, url=url, dry=dry)
     changes.extend(hook_changes)
 
@@ -286,7 +286,7 @@ def _install_session_start_hook(*, token: str, url: str, dry: bool) -> list[Chan
     hooks = settings.setdefault("hooks", {})
     session_hooks = hooks.setdefault("SessionStart", [])
     hook_command = f"python3 {hook_script}"
-    # Idempotency — look for our exact command among existing hooks.
+    # Idempotency: look for our exact command among existing hooks.
     already = any(
         any(h.get("command") == hook_command for h in entry.get("hooks", []))
         for entry in session_hooks
@@ -340,7 +340,7 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     if marker in existing:
         _ok(f"Codex: config.toml already has [{marker}] block")
         # Note: we don't surgically replace an existing TOML block on this
-        # pass — leave it to the user to remove and re-run if they want a
+        # pass: leave it to the user to remove and re-run if they want a
         # fresh value. Avoids brittle in-place TOML editing.
     else:
         backup = _backup(config_path, dry)
@@ -426,7 +426,7 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
 
 def print_claude_ai_instructions(url: str) -> None:
     print()
-    print(f"  {YELLOW}!{RESET}  Claude.ai (web/desktop) — UI-only setup, not automatable:")
+    print(f"  {YELLOW}!{RESET}  Claude.ai (web/desktop): UI-only setup, not automatable:")
     print()
     print("       1. Open Claude.ai → Settings → Connectors → Add custom connector")
     print(f"       2. URL:      {url}")
@@ -467,7 +467,7 @@ def main() -> int:
     token_status = (
         f"{DIM}from .env.local / TOKEN env (not echoed){RESET}"
         if token
-        else f"{DIM}none — local self-host runs without auth{RESET}"
+        else f"{DIM}none, local self-host runs without auth{RESET}"
     )
     print(f"=== afair client installer ({mode}) ===")
     print(f"  url:   {url}")
@@ -482,10 +482,10 @@ def main() -> int:
 
     print()
     if dry:
-        print(f"  {YELLOW}DRY RUN{RESET} — {len(changes)} change(s) would be made.")
+        print(f"  {YELLOW}DRY RUN{RESET}: {len(changes)} change(s) would be made.")
         print("  Run without --dry-run to apply.")
     else:
-        print(f"  {GREEN}DONE{RESET} — {len(changes)} change(s) applied.")
+        print(f"  {GREEN}DONE{RESET}: {len(changes)} change(s) applied.")
         print("  Restart any running MCP clients to pick up the new server.")
 
     return 0

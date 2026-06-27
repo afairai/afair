@@ -1,4 +1,4 @@
-# Cursor — connecting to afair
+# Cursor: connecting to afair
 
 Cursor supports MCP servers via `.cursor/mcp.json` at user or project scope.
 
@@ -35,7 +35,7 @@ a local self-host.
 
 ## 2. Add the instruction snippet
 
-Cursor reads instructions from a few places — pick one or both:
+Cursor reads instructions from a few places; pick one or both:
 
 - **Project-scoped:** create `.cursor/rules/afair.md` and paste the
   contents of [_snippet.md](_snippet.md).
@@ -49,7 +49,7 @@ Restart Cursor. In a chat with the AI:
 
 > Use the afair MCP server to list its tools.
 
-Expected: three tools — `remember`, `recall`, `observe`.
+Expected: three tools: `remember`, `recall`, `observe`.
 
 Round-trip:
 
@@ -65,7 +65,7 @@ Then in a new Cursor chat (or from another client):
 ### Cursor's MCP indicator shows "disconnected" or red dot
 
 Most often a config typo. Cursor logs MCP errors to the Output panel under
-"MCP" — check there. Common issues:
+"MCP"; check there. Common issues:
 
 - URL missing trailing slash on `/mcp/`
 - Bearer token has extra whitespace or a newline (Cursor doesn't tolerate
@@ -74,9 +74,9 @@ Most often a config typo. Cursor logs MCP errors to the Output panel under
 
 ### Tool calls feel slow
 
-Cursor sometimes adds 1–2 s of latency around MCP calls. For the
+Cursor sometimes adds 1-2 s of latency around MCP calls. For the
 `recall` shallow path (FTS5 only), the actual server response is well
-under 100 ms — anything more is Cursor's MCP client overhead. We can't
+under 100 ms; anything more is Cursor's MCP client overhead. We can't
 fix that from the server side.
 
 ### Cursor and parallel agents
