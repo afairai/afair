@@ -95,6 +95,15 @@ def test_temporal_queries_now_prefer_the_recent_record() -> None:
     assert report.families["temporal"]["hit_at_1"] >= 0.9
 
 
+def test_stale_memories_sink_below_live_ones() -> None:
+    """The relevance-decay layer: a passed deadline and a superseded fact must
+    not outrank the live memory. These cases score hit@1=0 without decay (the
+    stale event matches the query terms more strongly); the decay re-rank flips
+    them. Regression guard for P2/P3 of the relevance-decay feature."""
+    report = run_retrieval_quality(_load())
+    assert report.families["stale-demotion"]["hit_at_1"] >= 0.9
+
+
 # ── the recency re-rank itself (unit) ───────────────────────────────────────
 
 

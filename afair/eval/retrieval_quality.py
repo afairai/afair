@@ -26,6 +26,7 @@ FAMILIES = (
     "entity-name",  # query is an entity's canonical name
     "alias",  # query uses a known alias / alternate surface form
     "temporal",  # recency-sensitive ("latest", "current")
+    "stale-demotion",  # a passed/superseded memory must not outrank the live one
     "contradiction-present",  # relevant record exists amid a conflicting one
     "multi-event-dilution",  # one strong relevant event among many weak ones
     "hard-negative",  # query that must NOT surface a particular event
@@ -38,11 +39,22 @@ class BenchSeed(BaseModel):
 
     ``age_days`` backdates the event's created_at so temporal/recency behaviour
     can be tested honestly (an "old role" vs a "current role" that were recorded
-    at different times, not both at once)."""
+    at different times, not both at once).
+
+    The optional temporal_* fields seed an ``event_temporal`` record directly
+    (no worker, no LLM), so the relevance-decay ranking can be exercised
+    deterministically: a one-off past its ``relevance_horizon`` decays, a
+    ``superseded`` memory is floored."""
 
     tag: str
     text: str
     age_days: int = 0
+    temporal_class: str | None = None
+    event_time: str | None = None
+    relevance_horizon: str | None = None
+    recurrence_rule: str | None = None
+    closure_state: str | None = None
+    temporal_confidence: float = 0.9
 
 
 class BenchCase(BaseModel):
@@ -113,7 +125,7 @@ def _run_one_case_ranked(case: BenchCase) -> list[str]:
 
     from ..mcp import handlers
     from ..mcp.context import ServerContext, clear_context, set_context
-    from ..substrate import open_db, write_event
+    from ..substrate import open_db, write_event, write_event_temporal
 
     with tempfile.TemporaryDirectory() as tmp:
         db = open_db(Path(tmp))
@@ -139,6 +151,19 @@ def _run_one_case_ranked(case: BenchCase) -> list[str]:
                     created_at=created_at,
                 )
                 tag_by_event_id[ev.id] = seed.tag
+                if seed.temporal_class is not None:
+                    write_event_temporal(
+                        db,
+                        event_id=ev.id,
+                        event_hash=ev.content_hash,
+                        temporal_class=seed.temporal_class,
+                        confidence=seed.temporal_confidence,
+                        computed_by="temporal:v1",
+                        event_time=seed.event_time,
+                        relevance_horizon=seed.relevance_horizon,
+                        recurrence_rule=seed.recurrence_rule,
+                        closure_state=seed.closure_state,
+                    )
 
             result = handlers.recall(query=case.query, depth="shallow", limit=case.k)
             return [tag_by_event_id.get(h.event_id, "") for h in result.hits]
@@ -226,6 +251,9 @@ DEFAULT_GATE = Gate(
         # Promoted to hard once the temporal-intent recency re-rank landed —
         # "current/latest" queries must surface the newest record.
         "temporal": {"hit_at_1": 0.9},
+        # The relevance-decay layer: a passed deadline / superseded fact must
+        # not outrank the live memory. Without decay these score hit@1=0.
+        "stale-demotion": {"hit_at_1": 0.9},
     },
     soft=("contradiction-present", "multi-event-dilution", "hard-negative"),
 )
