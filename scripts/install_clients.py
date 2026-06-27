@@ -39,8 +39,11 @@ SERVER_NAME = "afair"
 DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 
 SNIPPET_MARKER = "## afair MCP"
+# Deliberately terser than docs/clients/_snippet.md: this gets auto-injected
+# into every client's instructions, where a short nudge is followed and a long
+# block is ignored. _snippet.md is the fuller human-readable reference.
 SNIPPET_BODY = """\
-You have access to a `afair` MCP server providing persistent memory
+You have access to an `afair` MCP server providing persistent memory
 across sessions, AI clients, and devices. Use it daily:
 
 1. **Before answering** questions that benefit from history (preferences,
