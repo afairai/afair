@@ -33,7 +33,10 @@ from typing import Any
 # ── config ──────────────────────────────────────────────────────────────────
 
 SERVER_NAME = "afair"
-DEFAULT_URL = "https://mcp.afair.ai/mcp"
+# Local self-host default, matching `uv run python -m afair`. Override with
+# --url (or the URL env var) for a deployed vault: your Fly app, your own
+# domain, or your hosted afair.ai address.
+DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 
 SNIPPET_MARKER = "## afair MCP"
 SNIPPET_BODY = """\
@@ -116,6 +119,13 @@ def _backup(path: Path, dry: bool) -> Path | None:
 
 
 def _load_token() -> str:
+    """The bearer token for a deployed or hosted vault, or "" for a local
+    self-host instance (which runs without auth).
+
+    Looked up from the TOKEN env var, then ``.env.local``. Absent is fine: the
+    install functions write no Authorization header when the token is empty, so
+    a plain ``uv run python -m afair`` + this installer works out of the box.
+    """
     token = os.environ.get("TOKEN")
     if token:
         return token
@@ -124,8 +134,7 @@ def _load_token() -> str:
         for line in env_local.read_text().splitlines():
             if line.startswith("AFAIR_AUTH_TOKEN="):
                 return line.split("=", 1)[1].strip()
-    msg = "could not find token. Set TOKEN env var, or ensure .env.local has AFAIR_AUTH_TOKEN=..."
-    raise SystemExit(msg)
+    return ""
 
 
 def _append_snippet_if_missing(
@@ -166,11 +175,9 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
         return []
 
     changes: list[Change] = []
-    desired = {
-        "type": "http",
-        "url": url,
-        "headers": {"Authorization": f"Bearer {token}"},
-    }
+    desired: dict[str, Any] = {"type": "http", "url": url}
+    if token:
+        desired["headers"] = {"Authorization": f"Bearer {token}"}
 
     for path, label in [(primary_path, "~/.claude.json"), (legacy_path, "~/.claude/settings.json")]:
         settings: dict[str, Any] = {}
@@ -235,8 +242,11 @@ def _install_session_start_hook(*, token: str, url: str, dry: bool) -> list[Chan
         _err(f"Claude Code hook: script not found at {hook_script}")
         return changes
 
-    # 1) write ~/.afair.env (gitignored, chmod 600)
-    env_content = f"AFAIR_URL={url}\nAFAIR_AUTH_TOKEN={token}\n"
+    # 1) write ~/.afair.env (gitignored, chmod 600). Local self-host has no
+    # token, so omit the line entirely rather than write an empty one.
+    env_content = f"AFAIR_URL={url}\n"
+    if token:
+        env_content += f"AFAIR_AUTH_TOKEN={token}\n"
     if not (env_path.exists() and env_path.read_text() == env_content):
         backup = _backup(env_path, dry)
         if not dry:
@@ -311,12 +321,9 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     # Codex schema (codex-cli 0.133.0): no `type` field, header subtable is
     # `http_headers` (not `headers`). Verified against working sentry and
     # marker-io entries on the host.
-    block = (
-        f"\n[mcp_servers.{SERVER_NAME}]\n"
-        f'url = "{url}"\n\n'
-        f"[mcp_servers.{SERVER_NAME}.http_headers]\n"
-        f'Authorization = "Bearer {token}"\n'
-    )
+    block = f'\n[mcp_servers.{SERVER_NAME}]\nurl = "{url}"\n'
+    if token:
+        block += f'\n[mcp_servers.{SERVER_NAME}.http_headers]\nAuthorization = "Bearer {token}"\n'
     marker = f"[mcp_servers.{SERVER_NAME}]"
 
     if marker in existing:
@@ -373,11 +380,9 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
                 return []
 
     mcp_servers = config.setdefault("mcpServers", {})
-    desired = {
-        "type": "http",
-        "url": url,
-        "headers": {"Authorization": f"Bearer {token}"},
-    }
+    desired: dict[str, Any] = {"type": "http", "url": url}
+    if token:
+        desired["headers"] = {"Authorization": f"Bearer {token}"}
 
     if mcp_servers.get(SERVER_NAME) == desired:
         _ok("Cursor: mcp.json already up to date")
@@ -431,6 +436,12 @@ def main() -> int:
         description="Install afair MCP server config into detected clients."
     )
     parser.add_argument(
+        "--url",
+        default=None,
+        help=f"Your vault's MCP URL. Defaults to the local self-host address "
+        f"({DEFAULT_URL}); pass a deployed vault, e.g. https://your-app.fly.dev/mcp.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would change without writing any files.",
@@ -438,13 +449,18 @@ def main() -> int:
     args = parser.parse_args()
 
     token = _load_token()
-    url = os.environ.get("URL", DEFAULT_URL)
+    url = args.url or os.environ.get("URL") or DEFAULT_URL
     dry = bool(args.dry_run)
 
     mode = f"{YELLOW}DRY RUN{RESET}" if dry else f"{GREEN}APPLY{RESET}"
+    token_status = (
+        f"{DIM}from .env.local / TOKEN env (not echoed){RESET}"
+        if token
+        else f"{DIM}none — local self-host runs without auth{RESET}"
+    )
     print(f"=== afair client installer ({mode}) ===")
     print(f"  url:   {url}")
-    print(f"  token: {DIM}from .env.local / TOKEN env (not echoed){RESET}")
+    print(f"  token: {token_status}")
     print()
 
     changes: list[Change] = []
