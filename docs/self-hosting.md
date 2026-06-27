@@ -22,9 +22,12 @@ cp .env.example .env
 uv run python -m afair
 ```
 
-The server listens on `http://127.0.0.1:8765`. Point any MCP client at it (see
-[docs/clients](clients)). Locally you need no auth and no encryption key; both
-are required only when `ENVIRONMENT=fly` (see below).
+The server listens on `http://127.0.0.1:8765`. Point a CLI or desktop MCP
+client at it (Claude Code, Codex, Cursor; see [docs/clients](clients)) and you
+are done. Locally you need no auth and no encryption key. Web clients
+(Claude.ai, ChatGPT) are a separate case: they run in the vendor's cloud, so a
+local server cannot serve them (see [Connecting clients](#connecting-clients-cli-vs-web)
+below).
 
 ## What it stores, and where
 
@@ -52,8 +55,51 @@ python -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
 Every other variable is documented inline in [`.env.example`](../.env.example).
-The OAuth and hosted-deployment variables are optional for a single-user
-self-host; you can ignore that whole block and use the static bearer token.
+The OAuth variables (section 7) are needed only to serve web clients; the
+managed-fleet variables (section 8) are not used by a self-host. For CLI and
+desktop clients the static bearer token is all you need.
+
+## Connecting clients: CLI vs web
+
+How a client authenticates depends on whether it runs on your machine or in
+someone else's cloud.
+
+**CLI and desktop clients** (Claude Code, Codex, Cursor, Windsurf) run locally
+and talk to the server directly. They send the static `AFAIR_AUTH_TOKEN` as a
+bearer and need no OAuth. This works against a local `127.0.0.1` server and a
+public one alike. Nothing else in this section applies to them.
+
+**Web clients** (Claude.ai, ChatGPT) run in the vendor's cloud. They cannot
+reach `localhost` and cannot send a bearer token, so they need two things a
+local run does not provide: a public HTTPS URL, and a browser OAuth login. To
+serve them from your own instance:
+
+1. Deploy the server somewhere publicly reachable over HTTPS (see *Deploy to
+   Fly.io* below, or any container host), and set `OAUTH_ISSUER` to that public
+   URL, for example `https://memory.example.com`.
+2. Register a GitHub OAuth app at
+   <https://github.com/settings/developers> (*New OAuth App*). Set the
+   **Authorization callback URL** to
+   `https://<your-host>/oauth/identity/github/callback`. It is free and takes a
+   minute.
+3. Set these secrets on the deployment:
+
+   ```bash
+   IDENTITY_BACKEND=github
+   GITHUB_OAUTH_CLIENT_ID=<from the GitHub app>
+   GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub app>
+   IDENTITY_ALLOWLIST=<your GitHub username>   # single-tenant: only you
+   OAUTH_ISSUER=https://<your-host>
+   AFAIR_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+   ```
+
+The server runs the whole OAuth dance itself; GitHub is only the login, and
+there is no dependency on afair.ai. (The `hub` identity backend is the reverse:
+it federates login through afair.ai's control plane and exists for the managed
+fleet, not for self-hosting.)
+
+If you only use CLI and desktop clients, skip all of this and run with just the
+bearer token, locally or in production.
 
 ## Deploy to Fly.io
 
