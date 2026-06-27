@@ -211,6 +211,15 @@ _RECUR_WINDOW_DAYS = 14.0
 _RECUR_FLOOR = 0.5
 _COMMITMENT_DONE_FLOOR = 0.3
 
+# Topic warmth (P4). A transient memory fades fast; a decaying topic fades
+# slowly as it goes quiet. Both decay against the memory's own age (the record's
+# created_at, a close proxy for when the event landed). New activity on a topic
+# is itself new, recent events — so a topic that stays alive keeps fresh,
+# high-relevance memories while the stale ones sink. Tunable; a future hand-off
+# to the self-improvement tuner can own these curves.
+_TRANSIENT_HALF_LIFE_DAYS = 2.0
+_DECAYING_HALF_LIFE_DAYS = 60.0
+
 
 def temporal_relevance(record: EventTemporal, now: datetime) -> float:
     """How relevant a memory is *right now*, in [0,1], for recall ranking.
@@ -231,6 +240,13 @@ def _raw_temporal_factor(record: EventTemporal, now: datetime) -> float:
     if cls == "commitment":
         # Salient while open, recedes once fulfilled (P3).
         return _COMMITMENT_DONE_FLOOR if record.closure_state == "fulfilled" else 1.0
+    if cls == "transient":
+        # Ephemeral — fades fast against its own age (P4).
+        return _age_decay(record, now, _TRANSIENT_HALF_LIFE_DAYS)
+    if cls == "decaying":
+        # A topic that goes quiet fades slowly; new activity is itself recent
+        # events that stay fresh (P4).
+        return _age_decay(record, now, _DECAYING_HALF_LIFE_DAYS)
     # Recurrence (P3): a recurring item, or a periodic one with a usable rule,
     # re-surfaces near its next occurrence and recedes between — it does not
     # decay to a floor like a one-off.
@@ -247,6 +263,16 @@ def _raw_temporal_factor(record: EventTemporal, now: datetime) -> float:
         decay = float(0.5 ** (days_past / HALF_LIFE_DAYS))
         return max(_DECAY_FLOOR, decay)
     return 1.0
+
+
+def _age_decay(record: EventTemporal, now: datetime, half_life_days: float) -> float:
+    """Exponential decay against the memory's own age, floored. The age anchor
+    is the record's ``created_at`` (a close proxy for when the event landed)."""
+    anchor = _parse_iso(record.created_at)
+    if anchor is None or now <= anchor:
+        return 1.0
+    days = (now - anchor).total_seconds() / 86400.0
+    return max(_DECAY_FLOOR, float(0.5 ** (days / half_life_days)))
 
 
 def _parse_iso(value: str | None) -> datetime | None:
