@@ -1,9 +1,9 @@
 # Contributing to afair
 
-Thanks for considering a contribution. afair is a memory vault for AI
-assistants: an append-only substrate behind a small, frozen MCP surface. This
-guide covers how to set it up, the rules that keep it coherent, and how to get
-a change merged.
+Thanks for considering a contribution. afair is one shared memory for your AI
+tools: an append-only substrate behind a small, frozen MCP surface, with an AI
+layer that keeps it structured on top. This guide covers how to set it up, the
+rules that keep it coherent, and how to get a change merged.
 
 Read [VISION.md](VISION.md) first if you haven't. The eight invariants in §4
 are the project's constitution, and the most important ones for a contributor
