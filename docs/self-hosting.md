@@ -65,9 +65,10 @@ How a client authenticates depends on whether it runs on your machine or in
 someone else's cloud.
 
 **CLI and desktop clients** (Claude Code, Codex, Cursor, Windsurf) run locally
-and talk to the server directly. They send the static `AFAIR_AUTH_TOKEN` as a
-bearer and need no OAuth. This works against a local `127.0.0.1` server and a
-public one alike. Nothing else in this section applies to them.
+and talk to the server directly. They can send the static `AFAIR_AUTH_TOKEN` as
+a bearer (the simplest path, and the only one against a local loopback server),
+or do the OAuth browser sign-in when they connect to a public deployment. With
+the bearer path, nothing else in this section applies to them.
 
 **Web clients** (Claude.ai, ChatGPT) run in the vendor's cloud. They cannot
 reach `localhost` and cannot send a bearer token, so they need two things a

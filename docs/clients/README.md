@@ -8,8 +8,9 @@ Connect any MCP-speaking AI client to your afair vault.
 - **Hosted afair.ai** (coming soon): the per-user address shown in your dashboard.
 
 **Server endpoint:** `<your-vault-url>/mcp`
-**Auth:** `Authorization: Bearer <AFAIR_AUTH_TOKEN>` on every request. A local
-self-host instance runs without auth, so there is no token and no header.
+**Auth:** a static bearer token or the OAuth browser sign-in (see
+[Two ways to authenticate](#two-ways-to-authenticate) below). A local self-host
+runs without auth, so there is no token and no header.
 **Health:** `<your-vault-url>/health` (no auth required)
 
 ## The easy path: one command
@@ -34,29 +35,38 @@ to pick up the new server. Claude.ai is UI-only; see [claude-ai.md](claude-ai.md
 The per-client docs below explain what the script does, what to tweak for
 non-default setups, and how to troubleshoot.
 
+## Two ways to authenticate
+
+The server speaks both. Which you use depends on the client and the deployment,
+not on a fixed rule:
+
+- **Bearer token:** a static `AFAIR_AUTH_TOKEN` in an `Authorization` header.
+  Any client that lets you set headers can use it. Simplest for a local
+  self-host, and the only option against a loopback address with no public URL
+  to run OAuth against. (A local instance runs without auth, so there is no
+  token at all.)
+- **OAuth 2.1:** DCR + PKCE, browser sign-in, nothing to paste. Required by the
+  web clients (they cannot set a header or reach localhost), and also supported
+  by the CLI/desktop clients when they connect to a public vault.
+
+For a **public deployment**, prefer OAuth everywhere: a real per-user login
+beats a shared static token sitting in config files. Keep the bearer for a
+**local** self-host or a headless setup.
+
 ## Per-client setup
 
-**CLI clients** use the static bearer token and originate the request from
-your own machine (best for strict EU-only data flow):
-
-| Client | Status | Setup guide |
+| Client | Auth | Setup guide |
 |---|---|---|
-| [Claude Code (CLI)](claude-code.md) | ✅ Recommended | HTTP transport + `headers` |
-| [Codex CLI](codex.md) | ✅ Supported | HTTP transport in `~/.codex/config.toml` |
-| [Cursor](cursor.md) | ✅ Supported | `.cursor/mcp.json` |
+| [Claude Code (CLI)](claude-code.md) | bearer or OAuth | HTTP transport |
+| [Codex CLI](codex.md) | bearer or OAuth | `~/.codex/config.toml` |
+| [Cursor](cursor.md) | bearer or OAuth | `.cursor/mcp.json` |
+| [Claude.ai (web/desktop)](claude-ai.md) | OAuth | Custom Connector UI |
+| [ChatGPT (web)](chatgpt.md) | OAuth (plan-gated) | Connectors / Developer mode |
+| [Perplexity (web)](perplexity.md) | OAuth (plan-gated) | Connectors |
 
-**Web clients** connect by server URL alone; the hosted OAuth flow (DCR +
-PKCE, browser sign-in) handles auth, so there is no token to paste:
-
-| Client | Status | Setup guide |
-|---|---|---|
-| [Claude.ai (web/desktop)](claude-ai.md) | ✅ OAuth | Custom Connector UI |
-| [ChatGPT (web)](chatgpt.md) | ✅ OAuth (plan-gated) | Connectors / Developer mode |
-| [Perplexity (web)](perplexity.md) | ✅ OAuth (plan-gated) | Connectors |
-
-The web clients share one OAuth flow, so a connector that works in one works
-in all. "plan-gated" means custom MCP connectors are a paid-tier surface in
-that product, not an afair limitation.
+The web clients share one OAuth flow, so a connector that works in one works in
+all. "plan-gated" means custom MCP connectors are a paid-tier surface in that
+product, not an afair limitation.
 
 ## The two pieces every client needs
 
