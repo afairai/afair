@@ -221,3 +221,30 @@ Calendar write-back, notifications/push, and any external-source ingestion of
 dates (Gmail/Calendar) stay out: those belong to the trust-ladder connectors,
 not the substrate. This spec is purely about how the vault's own memories decay
 and re-surface in recall.
+
+## 11. Post-launch roadmap (planned, not yet built)
+
+Shipped P1–P4 are honest but not the ceiling. Three follow-ups are deliberately
+deferred (so the open-source release ships a complete, working feature rather
+than half-built depth), each with its trigger:
+
+- **Decaying → real topic activity (gap 2b).** Today the `decaying`/`transient`
+  classes decay against the memory's own age (`created_at`), a proxy. The real
+  signal is topic *activity*: the recency of the most recent event sharing an
+  entity (via `entity_mentions`). A still-active old topic should stay warm; a
+  quiet one should fade. Trigger: when the age proxy demonstrably mis-ranks on
+  the benchmark. Note: gap 2a (superseded → the authoritative invalidation
+  signal) is **done** (recall floors actually-invalidated memories).
+- **Tuner-owned decay curves.** The half-lives, windows, and floors are module
+  constants ready to hand to the self-improvement tuner (register `worker=
+  "temporal"` specs; read effective values via `TunableRegistry` at the recall
+  call-site; add a temporal replay/judge shape). Blocked on the same thing the
+  tuner is globally blocked on: a ground-truth eval-set as the promote metric.
+  The retrieval-quality `stale-demotion` family is the start of that set.
+- **Local / distilled classifier.** The temporal worker calls an LLM per event.
+  A small local model (distilled from the LLM as teacher, the labels it already
+  produces plus user corrections) would remove per-event egress, a strong fit
+  for afair's sovereignty stance. I5 makes the swap a config change
+  (`ollama/...`); the benchmark is the measuring stick. The 8-way classification
+  distills cleanly; date/recurrence extraction is the harder part and likely
+  stays LLM or rule-based (a hybrid). Trigger: cost/privacy/scale.
