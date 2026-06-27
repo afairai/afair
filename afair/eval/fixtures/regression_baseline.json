@@ -33,5 +33,13 @@
   ],
   "8:hard-negative:Sajinth": [
     "saj"
+  ],
+  "9:stale-demotion:quarterly report": [
+    "process",
+    "deadline"
+  ],
+  "10:stale-demotion:office location": [
+    "current",
+    "old"
   ]
 }
