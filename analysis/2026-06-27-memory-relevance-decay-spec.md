@@ -1,8 +1,14 @@
 # Memory relevance and temporal decay — design spec
 
-> **Document version:** 0.1 (Draft)
-> **Status:** Draft
+> **Document version:** 1.0
+> **Status:** Implemented (P1–P4 shipped 2026-06-27)
 > **Audience:** afair maintainers
+> **Shipped:** P1 extract (6655a49), P2 decay-in-ranking (277cdcc), P3 recurrence
+> re-surfacing + session-start `upcoming` (859f4da), P4 topic warmth (dffdbed).
+> Lives in `afair/substrate/temporal.py`, `afair/agents/temporal.py`, the recall
+> re-rank in `afair/mcp/handlers.py`, and the `upcoming` field in
+> `afair/mcp/resources.py`. Half-lives + windows are module constants, ready to
+> hand to the self-improvement tuner.
 > **Origin:** raised 2026-06-27 (Gowry). Appointments and deadlines matter until
 > their date, then fade; birthdays and anniversaries recur. And the same shape
 > applies well beyond dates: a finished project, a superseded fact, a passing
