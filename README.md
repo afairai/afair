@@ -17,14 +17,22 @@
 
 ---
 
-afair is a memory vault for AI assistants. Connect it once, and the tools you
-already use (Claude, ChatGPT, your coding agent, whatever you pick up next) can
-remember what matters to you: your decisions, your projects, the context you are
-tired of repeating at the start of every session.
+You use more than one AI, and each of them remembers you separately. What you
+build up in one tool doesn't exist in the next, so you keep re-explaining
+yourself: your decisions, your projects, the context you're tired of repeating
+at the start of every session.
 
-It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), so
-any MCP client reaches the same vault. The data is append-only and yours, and you
-can export all of it whenever you want.
+afair is one memory that all of them share. It runs as your own vault and
+connects to each tool through the [Model Context
+Protocol](https://modelcontextprotocol.io) (MCP), so the same memory follows you
+from Claude to your coding agent to whatever you pick up next. An AI layer keeps
+it structured for you as you work, so you never have to file or maintain
+anything. You can see what it has learned about you, and correct it when it's
+wrong.
+
+The data is append-only and yours. afair is open source and single-tenant, and
+you can export all of it whenever you want. The name is short for "as far as I
+remember", the hedge it's built to make unnecessary.
 
 ## Two ways to use it
 
