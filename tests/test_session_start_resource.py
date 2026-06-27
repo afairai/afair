@@ -7,7 +7,7 @@ open_threads pull from the consolidator, and the cache semantics.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,7 +17,7 @@ from afair.agents.mode_switcher import MODE_CEN, MODE_DMN, MODE_SWITCHER_ORIGIN
 from afair.agents.salience import SalienceWorker
 from afair.mcp import resources
 from afair.settings import Settings
-from afair.substrate import open_db, write_event
+from afair.substrate import open_db, write_event, write_event_temporal
 
 if TYPE_CHECKING:
     import sqlite3
@@ -355,3 +355,43 @@ def test_cache_invalidates_on_new_event(db: sqlite3.Connection, settings: Settin
     # Cache key uses latest event id — the new event invalidates implicitly.
     payload_after = resources.read_session_start(db)
     assert payload_after["vault_size"]["total"] == 2
+
+
+def test_session_start_includes_upcoming(db: sqlite3.Connection) -> None:
+    """A recurring memory coming due soon surfaces in the upcoming field."""
+    event = write_event(
+        db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "Mara's birthday"},
+    )
+    soon = (datetime.now(UTC) + timedelta(days=4)).isoformat()
+    write_event_temporal(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        temporal_class="recurring",
+        confidence=0.9,
+        computed_by="temporal:v1",
+        event_time=soon,
+        recurrence_rule="FREQ=YEARLY",
+    )
+    payload = resources.build_session_start_payload(db)
+    assert "upcoming" in payload
+    ids = {item["event_id"] for item in payload["upcoming"]}
+    assert event.id in ids
+    item = next(i for i in payload["upcoming"] if i["event_id"] == event.id)
+    assert item["temporal_class"] == "recurring"
+    assert item["when"] is not None
+    assert "upcoming" in payload["instructions"]
+
+
+def test_session_start_upcoming_empty_when_nothing_due(db: sqlite3.Connection) -> None:
+    write_event(
+        db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "a plain note"},
+    )
+    payload = resources.build_session_start_payload(db)
+    assert payload["upcoming"] == []
