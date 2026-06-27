@@ -43,9 +43,14 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
 
 - **Open-core split + going public** — repos moved to the `afairai` org (still
   private); deploy split (fleet from afair-web); OSS community-health files
-  (CONTRIBUTING / SECURITY / CoC / CHANGELOG / CITATION / templates);
-  history scrubbed of the private strategy docs + the operator Clerk ID. The
-  remaining steps live in `afair-web/strategy/going-public-checklist.md`.
+  (CONTRIBUTING / SECURITY / CoC / CHANGELOG / CITATION / templates); operator
+  ops (operations.md, workflows, fly configs, provision/retire) moved to
+  afair-web; the private strategy docs gitignored out of the working tree. The
+  one remaining gate before flipping public: **scrub git history** — the
+  business-confidential docs (funding, GBrain analyses, dashboard concept,
+  positioning) are still in past commits (no *secrets* are, the repo was audited
+  clean). Plan + exact `git-filter-repo` targets in
+  `afair-web/strategy/going-public-checklist.md` §4. Then flip visibility.
 
 ### 0.3 Blocked
 
