@@ -73,6 +73,12 @@ _OPEN_THREADS_LIMIT = 8
 # slowly; a handful is plenty to prompt the user without flooding.
 _PENDING_CORRECTIONS_LIMIT = 5
 
+# How many upcoming dated/recurring memories to surface, and how far ahead
+# to look. The relevance-decay layer's re-surfacing half (P3): a birthday
+# next week, a deadline in ten days, a still-open promise.
+_UPCOMING_LIMIT = 8
+_UPCOMING_WINDOW_DAYS = 30.0
+
 
 class _Cache:
     """Tiny TTL+key cache for the session-start payload."""
@@ -124,6 +130,7 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
         for p in read_pending_corrections(conn, limit=_PENDING_CORRECTIONS_LIMIT)
     ]
+    upcoming = _read_upcoming(conn)
 
     instructions = (
         "These are the top recent salient events from the user's vault "
@@ -151,6 +158,12 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             'artifact), use verdict="retract" to withdraw it. Never apply '
             "without asking."
         )
+    if upcoming:
+        instructions += (
+            " upcoming lists dated and recurring memories coming due soon "
+            "(a birthday, a deadline, a still-open promise), each with the "
+            "date it next matters. Bring one up when it fits the conversation."
+        )
 
     return {
         "mode": mode,
@@ -159,9 +172,36 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "recent_salient_events": salient,
         "open_threads": open_threads,
         "pending_corrections": pending,
+        "upcoming": upcoming,
         "salience_producer": SALIENCE_PRODUCED_BY,
         "instructions": instructions,
     }
+
+
+def _read_upcoming(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Dated/recurring memories coming due within the window, soonest first.
+
+    The re-surfacing half of the relevance-decay layer (P3): the same temporal
+    metadata that demotes a passed deadline lifts a birthday or a still-open
+    promise back up as it approaches.
+    """
+    from datetime import UTC, datetime
+
+    from ..substrate import next_relevant_moment, upcoming_temporal
+
+    now = datetime.now(UTC)
+    records = upcoming_temporal(conn, now, within_days=_UPCOMING_WINDOW_DAYS, limit=_UPCOMING_LIMIT)
+    out: list[dict[str, Any]] = []
+    for record in records:
+        when = next_relevant_moment(record, now)
+        out.append(
+            {
+                "event_id": record.event_id,
+                "temporal_class": record.temporal_class,
+                "when": when.isoformat() if when is not None else None,
+            }
+        )
+    return out
 
 
 def read_session_start(conn: sqlite3.Connection) -> dict[str, Any]:

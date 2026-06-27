@@ -14,7 +14,8 @@ See ``analysis/2026-06-27-memory-relevance-decay-spec.md`` for the full design
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import calendar
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -22,6 +23,7 @@ from ulid import ULID
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Callable
 
 
 # The inferred temporal classes (spec §2). Inferred from content by the worker,
@@ -198,9 +200,16 @@ HALF_LIFE_DAYS = 14.0
 """After an event's relevance horizon passes, its factor halves every two
 weeks. Tunable; the self-improvement loop can own this later."""
 
-# Classes that decay against a clock in P2. recurring/periodic re-surfacing and
-# decaying/transient topic-warmth come in later phases.
+# Classes that decay against a clock (P2). A periodic item WITH a usable
+# recurrence rule re-surfaces instead (P3); without one it falls back to decay.
 _CLOCK_DECAY_CLASSES = frozenset({"one_off", "periodic"})
+
+# Re-surfacing (P3). A recurring/periodic item is fully relevant within this
+# many days of its next occurrence and sits at a floor between occurrences. A
+# commitment is fully relevant while open and recedes once fulfilled.
+_RECUR_WINDOW_DAYS = 14.0
+_RECUR_FLOOR = 0.5
+_COMMITMENT_DONE_FLOOR = 0.3
 
 
 def temporal_relevance(record: EventTemporal, now: datetime) -> float:
@@ -216,9 +225,21 @@ def temporal_relevance(record: EventTemporal, now: datetime) -> float:
 
 
 def _raw_temporal_factor(record: EventTemporal, now: datetime) -> float:
-    if record.temporal_class == "superseded" or record.closure_state == "superseded":
+    cls = record.temporal_class
+    if cls == "superseded" or record.closure_state == "superseded":
         return _SUPERSEDED_FLOOR
-    if record.temporal_class in _CLOCK_DECAY_CLASSES:
+    if cls == "commitment":
+        # Salient while open, recedes once fulfilled (P3).
+        return _COMMITMENT_DONE_FLOOR if record.closure_state == "fulfilled" else 1.0
+    # Recurrence (P3): a recurring item, or a periodic one with a usable rule,
+    # re-surfaces near its next occurrence and recedes between — it does not
+    # decay to a floor like a one-off.
+    nxt = next_occurrence(record, now)
+    if nxt is not None:
+        days_to_next = abs((nxt - now).total_seconds()) / 86400.0
+        return 1.0 if days_to_next <= _RECUR_WINDOW_DAYS else _RECUR_FLOOR
+    if cls in _CLOCK_DECAY_CLASSES:
+        # one-off, or periodic with no usable recurrence → clock decay (P2).
         horizon = _parse_iso(record.relevance_horizon) or _parse_iso(record.event_time)
         if horizon is None or now <= horizon:
             return 1.0  # no usable date, or the moment hasn't passed yet
@@ -239,3 +260,113 @@ def _parse_iso(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+# ── recurrence + re-surfacing (Phase 3) ─────────────────────────────────────
+#
+# A deliberately small RRULE reader: the common FREQ shapes the spec scopes
+# (YEARLY for birthdays/anniversaries, MONTHLY/WEEKLY/DAILY). Anything richer
+# returns None and the item simply doesn't re-surface, rather than guessing.
+
+
+def next_occurrence(record: EventTemporal, now: datetime) -> datetime | None:
+    """The next occurrence at or after ``now`` for a recurring/periodic record,
+    from its ``event_time`` anchor and a simple ``FREQ=`` rule. ``None`` when
+    there is no usable anchor or rule."""
+    anchor = _parse_iso(record.event_time)
+    freq = _rrule_freq(record.recurrence_rule)
+    if anchor is None or freq is None:
+        return None
+    if anchor >= now:
+        return anchor
+    if freq == "YEARLY":
+        return _advance_calendar(anchor, now, _add_year)
+    if freq == "MONTHLY":
+        return _advance_calendar(anchor, now, _add_month)
+    if freq == "WEEKLY":
+        return _advance_fixed(anchor, now, timedelta(weeks=1))
+    if freq == "DAILY":
+        return _advance_fixed(anchor, now, timedelta(days=1))
+    return None
+
+
+def next_relevant_moment(record: EventTemporal, now: datetime) -> datetime | None:
+    """The next moment this memory becomes relevant: its next recurrence, or a
+    still-future one-off / commitment time. ``None`` if nothing upcoming."""
+    nxt = next_occurrence(record, now)
+    if nxt is not None:
+        return nxt
+    event_time = _parse_iso(record.event_time)
+    if event_time is not None and event_time >= now:
+        return event_time
+    return None
+
+
+def _rrule_freq(rule: str | None) -> str | None:
+    if not rule:
+        return None
+    for part in rule.split(";"):
+        token = part.strip().upper()
+        if token.startswith("FREQ="):
+            return token[len("FREQ=") :]
+    return None
+
+
+def _advance_fixed(anchor: datetime, now: datetime, step: timedelta) -> datetime:
+    steps = int((now - anchor) / step) + 1
+    return anchor + step * steps
+
+
+def _advance_calendar(
+    anchor: datetime, now: datetime, step: Callable[[datetime], datetime]
+) -> datetime:
+    candidate = anchor
+    # Bounded: a few iterations even for an anchor years/months in the past.
+    while candidate < now:
+        candidate = step(candidate)
+    return candidate
+
+
+def _add_year(dt: datetime) -> datetime:
+    try:
+        return dt.replace(year=dt.year + 1)
+    except ValueError:  # Feb 29 → clamp to Feb 28 in a non-leap year
+        return dt.replace(year=dt.year + 1, day=28)
+
+
+def _add_month(dt: datetime) -> datetime:
+    month = dt.month + 1
+    year = dt.year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def upcoming_temporal(
+    conn: sqlite3.Connection, now: datetime, *, within_days: float, limit: int
+) -> list[EventTemporal]:
+    """Records whose next relevant moment falls within ``within_days``, soonest
+    first. Recurring/periodic items near their next occurrence, plus one-offs
+    and open commitments with a near future time. Latest record per event wins.
+    Feeds the session-start ``upcoming`` re-surfacing (P3)."""
+    horizon = now + timedelta(days=within_days)
+    rows = conn.execute(
+        """
+        SELECT * FROM event_temporal
+        WHERE temporal_class IN ('recurring', 'periodic', 'one_off', 'commitment')
+        ORDER BY created_at DESC
+        """
+    ).fetchall()
+    seen: set[str] = set()
+    scored: list[tuple[datetime, EventTemporal]] = []
+    for row in rows:
+        event_hash = row["event_hash"]
+        if event_hash in seen:
+            continue
+        seen.add(event_hash)  # DESC order → first seen is the newest record
+        record = _row_to_event_temporal(row)
+        when = next_relevant_moment(record, now)
+        if when is not None and now <= when <= horizon:
+            scored.append((when, record))
+    scored.sort(key=lambda item: item[0])
+    return [record for _, record in scored[:limit]]
