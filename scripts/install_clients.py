@@ -53,8 +53,9 @@ _SNIPPET_FALLBACK = """\
 
 You have access to `afair`, an MCP server that holds my durable memory across
 every session, every AI tool, every device. Use it. At conversation start call
-`afair.recall(query=...)`. When I share something durable (a decision,
-preference, fact, deadline, commitment, insight) call `afair.remember(...)`.
+`afair.recall(query=...)`. When I share something durable from any part of my
+life, work or personal (a decision, a preference, a person, a date that matters,
+a plan), call `afair.remember(...)`.
 When you take an action (edit a file, run a query, fetch a URL) call
 `afair.observe(...)`. Don't ask whether to remember or recall; just do it.
 """
