@@ -998,27 +998,41 @@ def _recency_rerank(events: list[Event]) -> list[Event]:
     return sorted(events, key=_key, reverse=True)
 
 
-def _temporal_rerank(events: list[Event], db: sqlite3.Connection) -> list[Event]:
+# Floor applied to a memory the user actually superseded (a real invalidation
+# event), mirroring the temporal "superseded" floor. The authoritative signal,
+# not the worker's inferred class.
+_INVALIDATED_FLOOR = 0.15
+
+
+def _temporal_rerank(
+    events: list[Event], db: sqlite3.Connection, invalidated: set[str] | None = None
+) -> list[Event]:
     """Stable re-rank scaling each hit's position by its temporal relevance.
 
     Phase 2 of the relevance-decay design. Reads the temporal layer in one
     batch; hits with no temporal record yet (most, until the worker catches up)
     get factor 1.0 and keep their place, while decayed one-offs and superseded
-    facts sink. Never excludes anything — decay is a recall score, not a delete
-    (I2). The caller skips this for depth="deep", the flat history lens.
+    facts sink. A memory carrying a real invalidation is floored regardless of
+    its inferred class, so the authoritative supersession signal wins. Never
+    excludes anything — decay is a recall score, not a delete (I2). The caller
+    skips this for depth="deep", the flat history lens.
     """
     if len(events) < 2:
         return events
+    invalidated = invalidated or set()
     temporal_map = read_event_temporal_batch(db, [e.content_hash for e in events])
-    if not temporal_map:
+    if not temporal_map and not invalidated:
         return events
     now = datetime.now(UTC)
     n = len(events)
     scored: list[tuple[float, int, Event]] = []
     for i, e in enumerate(events):
         base = float(n - i)  # incoming order is the baseline
-        record = temporal_map.get(e.content_hash)
-        factor = temporal_relevance(record, now) if record is not None else 1.0
+        if e.content_hash in invalidated:
+            factor = _INVALIDATED_FLOOR
+        else:
+            record = temporal_map.get(e.content_hash)
+            factor = temporal_relevance(record, now) if record is not None else 1.0
         scored.append((base * factor, i, e))
     scored.sort(key=lambda t: (-t[0], t[1]))
     return [e for _, _, e in scored]
@@ -1343,19 +1357,25 @@ def recall(
         if query and _has_temporal_intent(query):
             events = _recency_rerank(events)
 
+        # Invalidations first — used by both the temporal decay (an actually-
+        # superseded memory is the authoritative "stale" signal) and the
+        # article-first hoist below. Reordering never changes content hashes,
+        # so this set stays valid through both steps.
+        invalidations = _attach_invalidations(events, db)
+
         # Temporal relevance (Phase 2): de-prioritize memories whose moment has
         # passed (a closed deadline, last month's dinner) so settled things
-        # don't crowd out what's live. Decay is a recall score, never a delete
-        # (I2); history stays findable. depth="deep" is the flat history lens
-        # that bypasses it. See the relevance-decay spec in analysis/.
+        # don't crowd out what's live. A memory the user actually invalidated is
+        # floored here too, so the real supersession signal wins over the
+        # worker's inferred "superseded" class. Decay is a recall score, never a
+        # delete (I2); history stays findable. depth="deep" is the flat history
+        # lens that bypasses it. See the relevance-decay spec in analysis/.
         if depth != "deep":
-            events = _temporal_rerank(events, db)
+            events = _temporal_rerank(events, db, invalidated=set(invalidations))
 
         # Article-first: when an entity article matched, surface the dense
         # synthesis before the raw events it summarizes (query path only —
-        # browse mode stays chronological). Compute invalidations first so
-        # superseded articles are filtered out before they get hoisted.
-        invalidations = _attach_invalidations(events, db)
+        # browse mode stays chronological).
         events = _article_first_order(events, invalidated=set(invalidations))
 
     # invalidations is computed per-branch above (browse + query) and reused

@@ -166,10 +166,33 @@ def test_deep_depth_bypasses_temporal_rerank(
     monkeypatch.setattr(
         handlers,
         "_temporal_rerank",
-        lambda events, db: (calls.append(1), original(events, db))[1],
+        lambda events, db, invalidated=None: (calls.append(1), original(events, db, invalidated))[
+            1
+        ],
     )
     handlers.recall(query="aurora", depth="deep")
     assert calls == []  # the flat history lens never decays
 
     handlers.recall(query="aurora")  # default does
     assert calls == [1]
+
+
+def test_recall_demotes_an_actually_invalidated_memory(ctx: ServerContext) -> None:
+    """The real supersession signal (an invalidation event) floors a memory in
+    recall, independent of the temporal worker's inferred class. Closes the gap
+    where the temporal 'superseded' class only ever guessed."""
+    old = handlers.remember(
+        content=TextContent(type="text", text="aurora ran the alpha project project"),
+        context="t",
+    )
+    new = handlers.remember(
+        content=TextContent(type="text", text="aurora now runs the beta project"),
+        context="t",
+        invalidates=[old.content_hash],
+    )
+    result = handlers.recall(query="aurora project")
+    hashes = [h.content_hash for h in result.hits]
+    assert old.content_hash in hashes
+    assert new.content_hash in hashes
+    # the superseded memory is floored → ranks below the current one
+    assert hashes.index(new.content_hash) < hashes.index(old.content_hash)
