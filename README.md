@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/afairai/afair/actions/workflows/ci.yml"><img src="https://github.com/afairai/afair/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3" /></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Model_Context_Protocol-7c3aed.svg" alt="MCP" /></a>
@@ -55,8 +56,8 @@ afair exposes exactly three tools, and they are frozen for good:
 - **`recall`** pulls back what is relevant to the moment.
 - **`observe`** logs what the AI just did, so the vault keeps up.
 
-Once you hand your AI the short setup snippet, it calls these on its own. Nothing
-reaches the vault unless a call puts it there.
+Once you hand your AI the short [setup snippet](docs/clients/_snippet.md), it
+calls these on its own. Nothing reaches the vault unless a call puts it there.
 
 ## Run it yourself
 
@@ -75,6 +76,17 @@ run in the cloud (Claude.ai, ChatGPT) instead need a public HTTPS deployment and
 a quick OAuth setup, covered in [docs/self-hosting.md](docs/self-hosting.md).
 Every environment variable is documented inline in `.env.example`; per-client
 connection guides live in [docs/clients](docs/clients).
+
+## Teach your AI to use it
+
+Connecting the server is half of it; the other half is making your AI reach for
+the tools on its own. Paste the short [instruction snippet](docs/clients/_snippet.md)
+into the client's persistent instructions (CLAUDE.md, AGENTS.md, Custom
+Instructions, or `.cursorrules`), and it will recall context at the start of a
+conversation, remember what's durable, and observe what it does, without you
+prompting it each time. The same snippet works for every client. For Claude
+Code, Codex, and Cursor, `scripts/install_clients.py` writes both the connection
+config and the snippet for you.
 
 ## Works with
 
