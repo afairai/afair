@@ -23,7 +23,7 @@ jobs:
   github-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Extract this version's CHANGELOG section
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
