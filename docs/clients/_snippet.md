@@ -35,8 +35,8 @@ preference, a fact about me or the people in my life, a deadline, a
 plan, a date that matters, something I'm working through: call
 `afair.remember(content={type:"text", text:"<plain language>"},
 type_hint="decision"|"preference"|"fact"|"plan"|"person"|"event"|...)`.
-This is my whole-life memory, not just work. Default to more, not less.
-Forgetting costs me time; an extra remember costs nothing.
+Default to more, not less. Forgetting costs me time; an extra remember
+costs nothing.
 
 **Whenever you take an action:**
 Edit a file, run a query, call a tool, fetch a URL: call
