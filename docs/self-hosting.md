@@ -41,9 +41,9 @@ database, queue, or cache to operate.
 When you expose afair on the public internet, two settings become mandatory and
 the server refuses to boot without them (`ENVIRONMENT=fly`):
 
-- **`AFAIR_AUTH_TOKEN`** — a bearer token every MCP client must send. Without it
+- **`AFAIR_AUTH_TOKEN`**: a bearer token every MCP client must send. Without it
   the substrate would be world-readable and world-writable.
-- **`AFAIR_VAULT_KEY`** — the vault encryption key. With it set, the SQLite
+- **`AFAIR_VAULT_KEY`**: the vault encryption key. With it set, the SQLite
   database is opened through SQLCipher (whole-file AES-256) and blobs are written
   with AES-256-GCM. **Losing this key after data has been written under it means
   the data is unrecoverable.** Keep a copy somewhere safe and separate.
@@ -101,6 +101,64 @@ fleet, not for self-hosting.)
 If you only use CLI and desktop clients, skip all of this and run with just the
 bearer token, locally or in production.
 
+## Run with Docker (any host)
+
+The repo ships a `Dockerfile`. The same image runs locally, on a VPS, or on any
+container host; Fly (below) is just one place to put it.
+
+```bash
+docker build -t afair .
+
+docker run -d --name afair \
+  -p 8080:8080 \
+  -v afair-vault:/data \
+  -e AFAIR_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+  -e AFAIR_VAULT_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+  -e OAUTH_ISSUER="https://your-host" \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  afair
+```
+
+The image defaults to `ENVIRONMENT=fly` (production mode): it enforces the auth
+token and the vault key, and requires `OAUTH_ISSUER` (your public URL) at boot,
+even if you only use CLI clients. The vault lives on the `afair-vault` volume at
+`/data/vault`; back that volume up and you have the whole vault. The container
+listens on port `8080`; put a TLS-terminating reverse proxy (Caddy, nginx,
+Traefik) in front for the public HTTPS URL that web clients require.
+
+For a throwaway local container with none of the production requirements, drop
+into local mode:
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e ENVIRONMENT=local -e MCP_PORT=8765 \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  afair
+```
+
+### docker compose
+
+```yaml
+# compose.yaml: set the four values in a sibling .env file
+services:
+  afair:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - afair-vault:/data
+    environment:
+      AFAIR_AUTH_TOKEN: ${AFAIR_AUTH_TOKEN}
+      AFAIR_VAULT_KEY: ${AFAIR_VAULT_KEY}
+      OAUTH_ISSUER: ${OAUTH_ISSUER}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+volumes:
+  afair-vault:
+```
+
+Then `docker compose up -d`.
+
 ## Deploy to Fly.io
 
 `fly.toml.example` is a starting config (rename it to `fly.toml` and set your own
@@ -123,6 +181,30 @@ fly deploy --app <your-app>
 before you deploy. After deploy, `curl https://<your-app>.fly.dev/health` should
 return `200`.
 
+## Verify it works
+
+After any of the above, confirm the server is up:
+
+```bash
+curl -s <your-host>/health
+# {"status":"ok"}
+```
+
+`<your-host>` is `http://127.0.0.1:8765` locally, or your public URL once
+deployed. For a full no-client smoke (health + auth gate), run `scripts/smoke.sh`
+from the repo root.
+
+Then connect a client (see [docs/clients](clients)) and do the round-trip that
+proves memory persists across tools. Ask the client to:
+
+1. **remember** something: *"Use afair to remember: my deploy smoke test ran
+   today."*
+2. **recall** it, ideally from a different client: *"What did afair record about
+   my deploy smoke test?"*
+
+If the second client returns what the first one stored, the vault is live and
+shared across your tools. That cross-tool round-trip is the whole point.
+
 ## Backups
 
 Back up `VAULT_DIR`. On Fly, snapshot the volume (`fly volumes snapshots create`)
@@ -144,7 +226,7 @@ in-place re-keying, so:
 
 - Generate it with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
 - Set it as a deployment secret (for example `fly secrets set AFAIR_VAULT_KEY=...`).
-- **Keep a copy somewhere safe and separate** from the server — a password
+- **Keep a copy somewhere safe and separate** from the server: a password
   manager or an offline note. That copy is your only recovery path; lose the key
   and the data is gone.
 
