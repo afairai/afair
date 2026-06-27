@@ -41,6 +41,19 @@ claude mcp add afair \
   --header "Authorization=Bearer <AFAIR_AUTH_TOKEN>"
 ```
 
+### Alternative: OAuth (public vault)
+
+If your vault is deployed publicly with OAuth enabled, connect without a token:
+add the server by URL only and Claude Code runs the browser sign-in (DCR + PKCE)
+on first use. Drop the `headers` block:
+
+```jsonc
+{ "mcpServers": { "afair": { "type": "http", "url": "<your-vault-url>/mcp" } } }
+```
+
+This is the cleaner path for a public deployment (no static token in your
+config). The bearer above stays the simplest path for a local self-host.
+
 ## 2. Add the instruction snippet
 
 Append the contents of [_snippet.md](_snippet.md) to `~/.claude/CLAUDE.md`

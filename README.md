@@ -77,6 +77,26 @@ a quick OAuth setup, covered in [docs/self-hosting.md](docs/self-hosting.md).
 Every environment variable is documented inline in `.env.example`; per-client
 connection guides live in [docs/clients](docs/clients).
 
+## Install it with your coding agent
+
+Already in Claude Code, Codex, or another coding agent? Hand it the prompt below
+and it sets itself up: clone, dependencies, config, and the MCP wiring, then it
+proves the round-trip.
+
+> Set up afair (the open-source MCP memory server at
+> https://github.com/afairai/afair) on this machine and connect this tool to it.
+> Clone it, run `uv sync`, copy `.env.example` to `.env`, and ask me for an LLM
+> provider API key to put there. Then run
+> `uv run python scripts/install_clients.py` to wire my MCP clients and add the
+> afair instruction snippet. Tell me the command to start the server
+> (`uv run python -m afair`) and how to keep it running. Once it is up, remember
+> a test fact and recall it to prove it works. Follow `docs/self-hosting.md` and
+> `docs/clients/`; put my API key only in `.env`, nowhere else.
+
+That runs locally and serves CLI and desktop clients out of the box. To reach
+web clients (Claude.ai, ChatGPT), follow the public-deployment notes in
+[docs/self-hosting.md](docs/self-hosting.md).
+
 ## Teach your AI to use it
 
 Connecting the server is half of it; the other half is making your AI reach for

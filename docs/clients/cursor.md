@@ -26,6 +26,13 @@ Or via the Cursor UI:
 2. Paste the JSON, or fill the form
 3. **Enable**
 
+### Alternative: OAuth (public vault)
+
+If your vault is deployed publicly with OAuth enabled, connect without a token:
+keep the `url` and drop the `headers` block. Cursor runs the browser sign-in on
+first use. Cleaner for a public deployment; the bearer above stays simplest for
+a local self-host.
+
 ## 2. Add the instruction snippet
 
 Cursor reads instructions from a few places — pick one or both:
