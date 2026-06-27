@@ -391,19 +391,21 @@ def build_app(settings: Settings) -> Starlette:
         ),
         Route("/oauth/register", oauth_routes.oauth_register, methods=["POST"]),
         Route("/oauth/authorize", oauth_routes.oauth_authorize, methods=["GET"]),
-        # NEW (2026-06-01): hub-federated identity. The MCP server
-        # no longer talks to GitHub directly — afair.ai's identity hub
-        # verifies the user and sends a signed JWT here.
+        # Hub-federated identity (default for the managed fleet). In
+        # hub mode the MCP server does not talk to GitHub directly:
+        # afair.ai's identity hub verifies the user and sends a signed
+        # JWT here. A self-hosted github-mode instance uses the
+        # callback route below instead.
         Route(
             "/oauth/identity/accept",
             oauth_routes.oauth_identity_accept,
             methods=["GET"],
         ),
-        # LEGACY direct-GitHub callback. Kept reachable only when
-        # ``identity_backend="github"`` (the deprecated fallback).
-        # In hub mode (default) this route is unused — GitHub
-        # redirects to afair.ai's hub URL, never here. Will be
-        # removed once the cutover is verified.
+        # Direct-GitHub callback. Reachable when
+        # ``identity_backend="github"`` (the supported self-host path
+        # for web-client logins). In hub mode (managed-fleet default)
+        # this route is unused: GitHub redirects to afair.ai's hub URL,
+        # never here.
         Route(
             "/oauth/identity/github/callback",
             oauth_routes.oauth_identity_github_callback,
