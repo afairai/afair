@@ -176,7 +176,12 @@ ARGUMENTS (all optional; combine as needed):
                   → normal hybrid). Recommended default.
       "shallow" → FTS5 keyword only. Cheapest.
       "normal"  → Hybrid FTS5 + vector. Local embedding inference, ~120ms.
-      "deep"    → Same as normal today; reserved for Phase 3+ reasoning.
+      "deep"    → Hybrid like normal, but the flat history lens: temporal
+                  relevance decay is OFF, so past-dated and superseded
+                  memories rank by match strength alone. Use for history /
+                  as-of questions ("what did I know back then", "show me past
+                  appointments"). Default recall instead de-prioritizes
+                  memories whose moment has passed, without dropping them.
   - limit: Default 20. Max hits to return.
   - full_payload: Default false. When true, each hit's payload is the full
     untruncated content (for text-large events, the blob is read back into

@@ -85,6 +85,8 @@ from .temporal import (
     TEMPORAL_CLASSES,
     EventTemporal,
     read_event_temporal,
+    read_event_temporal_batch,
+    temporal_relevance,
     write_event_temporal,
 )
 
@@ -134,6 +136,7 @@ __all__ = [
     "read_event_by_hash",
     "read_event_by_id",
     "read_event_temporal",
+    "read_event_temporal_batch",
     "read_mentions_batch",
     "read_object",
     "read_pending_corrections",
@@ -147,6 +150,7 @@ __all__ = [
     "search_fts",
     "search_vec",
     "start_checkpoint_loop",
+    "temporal_relevance",
     "write_edge_invalidation",
     "write_entity",
     "write_entity_edge",
