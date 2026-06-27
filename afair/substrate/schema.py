@@ -612,6 +612,49 @@ SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS export_jobs_status_idx ON export_jobs(status, requested_at DESC)",
     "CREATE INDEX IF NOT EXISTS export_jobs_token_idx ON export_jobs(download_token_hash)",
     "CREATE INDEX IF NOT EXISTS export_jobs_expires_idx ON export_jobs(expires_at)",
+    # ── event_temporal: derived time/relevance metadata per event ───────────
+    # Phase 1 of the relevance-decay design (see
+    # analysis/2026-06-27-memory-relevance-decay-spec.md). The temporal worker
+    # infers, per event, an optional temporal class + event time + relevance
+    # horizon + recurrence + closure, so recall can LATER de-prioritize expired
+    # one-offs and re-surface recurring items. Append-only and re-derivable
+    # (I2/I3): nothing is ever deleted; "forgetting" is a recall score, not a
+    # row mutation. UNIQUE(event_hash, computed_by) makes the row its own
+    # idempotency marker (no cursor) while letting a bumped worker version
+    # re-derive over the unchanged substrate (I7).
+    """
+    CREATE TABLE IF NOT EXISTS event_temporal (
+        id                 TEXT PRIMARY KEY,
+        event_id           TEXT NOT NULL REFERENCES events(id),
+        event_hash         TEXT NOT NULL REFERENCES events(content_hash),
+        temporal_class     TEXT NOT NULL,
+        event_time         TEXT,
+        relevance_horizon  TEXT,
+        recurrence_rule    TEXT,
+        closure_state      TEXT,
+        confidence         REAL NOT NULL,
+        computed_by        TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        UNIQUE(event_hash, computed_by)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS event_temporal_event_idx ON event_temporal(event_id)",
+    "CREATE INDEX IF NOT EXISTS event_temporal_class_idx ON event_temporal(temporal_class)",
+    "CREATE INDEX IF NOT EXISTS event_temporal_time_idx ON event_temporal(event_time)",
+    """
+    CREATE TRIGGER IF NOT EXISTS event_temporal_no_update
+    BEFORE UPDATE ON event_temporal
+    BEGIN
+        SELECT RAISE(ABORT, 'event_temporal is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS event_temporal_no_delete
+    BEFORE DELETE ON event_temporal
+    BEGIN
+        SELECT RAISE(ABORT, 'event_temporal is append-only (Invariant I2)');
+    END
+    """,
 )
 
 

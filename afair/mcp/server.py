@@ -38,6 +38,7 @@ from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.rollback_monitor import RollbackMonitor
 from ..agents.salience import SalienceWorker
+from ..agents.temporal import TemporalWorker
 from ..agents.tuner import Tuner
 from ..substrate import start_checkpoint_loop
 from ..substrate.db import set_vault_key
@@ -129,6 +130,7 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityCanonicalizer(),
                 EntityDeduplicator(),
                 EntityArticleWorker(),
+                TemporalWorker(),
                 SalienceWorker(),
                 ModeSwitcher(),
                 # Self-improvement tuner — observation mode (Phase B
