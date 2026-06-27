@@ -30,7 +30,7 @@ turns, recall anyway. The memory is shared across sessions and AI
 tools, and you will be missing parts.
 
 **Whenever I share something durable, from any part of my life:**
-Work, family and friends, health, the private things. A decision, a
+Work, family and friends, the personal things. A decision, a
 preference, a fact about me or the people in my life, a deadline, a
 plan, a date that matters, something I'm working through: call
 `afair.remember(content={type:"text", text:"<plain language>"},
