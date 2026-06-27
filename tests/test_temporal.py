@@ -321,3 +321,27 @@ def test_upcoming_temporal_windows_and_sorts(db: sqlite3.Connection, sample_even
     hashes = {r.event_hash for r in upcoming}
     assert sample_event.content_hash in hashes  # birthday in 5 days is upcoming
     assert far_event.content_hash not in hashes  # deadline in 100 days is not
+
+
+# ── topic warmth: transient + decaying (Phase 4) ────────────────────────────
+
+
+def test_transient_fades_fast() -> None:
+    fresh = _rec("transient", created_at=(_NOW - timedelta(days=1)).isoformat())
+    stale = _rec("transient", created_at=(_NOW - timedelta(days=10)).isoformat())
+    assert temporal_relevance(fresh, _NOW) > 0.6  # ~0.71 after one day
+    assert temporal_relevance(stale, _NOW) <= 0.2  # floored after ten
+
+
+def test_decaying_fades_slowly() -> None:
+    fresh = _rec("decaying", created_at=(_NOW - timedelta(days=2)).isoformat())
+    quiet = _rec("decaying", created_at=(_NOW - timedelta(days=60)).isoformat())
+    assert temporal_relevance(fresh, _NOW) > 0.95  # barely moved after two days
+    assert temporal_relevance(quiet, _NOW) == pytest.approx(0.5, abs=0.02)  # one half-life
+
+
+def test_decaying_outlasts_transient_over_the_same_span() -> None:
+    span = (_NOW - timedelta(days=10)).isoformat()
+    decaying = temporal_relevance(_rec("decaying", created_at=span), _NOW)
+    transient = temporal_relevance(_rec("transient", created_at=span), _NOW)
+    assert decaying > transient
