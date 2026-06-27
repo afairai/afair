@@ -82,6 +82,7 @@ from ..substrate.belief import Entrenchment, auto_confirm, resolve_trust
 from ..substrate.corrections import decide_correction
 from ..substrate.events import row_to_event
 from ..substrate.search import FTS5_SPECIALS_RE
+from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
@@ -110,6 +111,8 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from ..substrate.events import Event
 
 # All MCP-initiated events carry origin "agent" in v1. Per-client refinement
@@ -995,6 +998,56 @@ def _recency_rerank(events: list[Event]) -> list[Event]:
     return sorted(events, key=_key, reverse=True)
 
 
+def _temporal_rerank(events: list[Event], db: sqlite3.Connection) -> list[Event]:
+    """Stable re-rank scaling each hit's position by its temporal relevance.
+
+    Phase 2 of the relevance-decay design. Reads the temporal layer in one
+    batch; hits with no temporal record yet (most, until the worker catches up)
+    get factor 1.0 and keep their place, while decayed one-offs and superseded
+    facts sink. Never excludes anything — decay is a recall score, not a delete
+    (I2). The caller skips this for depth="deep", the flat history lens.
+    """
+    if len(events) < 2:
+        return events
+    temporal_map = read_event_temporal_batch(db, [e.content_hash for e in events])
+    if not temporal_map:
+        return events
+    now = datetime.now(UTC)
+    n = len(events)
+    scored: list[tuple[float, int, Event]] = []
+    for i, e in enumerate(events):
+        base = float(n - i)  # incoming order is the baseline
+        record = temporal_map.get(e.content_hash)
+        factor = temporal_relevance(record, now) if record is not None else 1.0
+        scored.append((base * factor, i, e))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [e for _, _, e in scored]
+
+
+def _build_temporal_overlay(
+    events: list[Event], db: sqlite3.Connection
+) -> dict[str, dict[str, Any]]:
+    """Per-hit temporal annotation (class + current relevance) for the
+    interpretation dict, so the AI can SEE why a memory ranked where it did.
+    Merged into the entity overlay; absent for hits with no temporal record."""
+    if not events:
+        return {}
+    temporal_map = read_event_temporal_batch(db, [e.content_hash for e in events])
+    if not temporal_map:
+        return {}
+    now = datetime.now(UTC)
+    overlay: dict[str, dict[str, Any]] = {}
+    for e in events:
+        record = temporal_map.get(e.content_hash)
+        if record is None:
+            continue
+        overlay[e.content_hash] = {
+            "temporal_class": record.temporal_class,
+            "temporal_relevance": round(temporal_relevance(record, now), 3),
+        }
+    return overlay
+
+
 # Caveats layer thresholds. A topic whose *newest* matching event is older
 # than this is flagged as possibly out of date. THIN = at most this many hits
 # before recall admits "the vault may not hold this yet."
@@ -1290,6 +1343,14 @@ def recall(
         if query and _has_temporal_intent(query):
             events = _recency_rerank(events)
 
+        # Temporal relevance (Phase 2): de-prioritize memories whose moment has
+        # passed (a closed deadline, last month's dinner) so settled things
+        # don't crowd out what's live. Decay is a recall score, never a delete
+        # (I2); history stays findable. depth="deep" is the flat history lens
+        # that bypasses it. See the relevance-decay spec in analysis/.
+        if depth != "deep":
+            events = _temporal_rerank(events, db)
+
         # Article-first: when an entity article matched, surface the dense
         # synthesis before the raw events it summarizes (query path only —
         # browse mode stays chronological). Compute invalidations first so
@@ -1301,6 +1362,10 @@ def recall(
     # here so the per-hit annotation does not re-query.
     conflicts = _attach_conflicts(events, db)
     overlay = _build_entity_overlay(events, db)
+    # Layer the temporal annotation (class + current relevance) into the same
+    # overlay so it rides into each hit's interpretation, visible to the AI.
+    for chash, temporal_fields in _build_temporal_overlay(events, db).items():
+        overlay.setdefault(chash, {}).update(temporal_fields)
     # Batch the per-hit DB calls that previously ran N+1 (Perf audit C3).
     # Two queries replace 2*N queries for N hits — biggest single win on
     # the recall hot path.
