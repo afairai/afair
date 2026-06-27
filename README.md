@@ -20,16 +20,18 @@
 
 You use more than one AI, and each of them remembers you separately. What you
 build up in one tool doesn't exist in the next, so you keep re-explaining
-yourself: your decisions, your projects, the context you're tired of repeating
-at the start of every session.
+yourself: your decisions, the people in your life, the preferences and the
+history you're tired of repeating at the start of every session.
 
 afair is one memory that all of them share. It runs as your own vault and
 connects to each tool through the [Model Context
 Protocol](https://modelcontextprotocol.io) (MCP), so the same memory follows you
 from Claude to your coding agent to whatever you pick up next. An AI layer keeps
-it structured for you as you work, so you never have to file or maintain
-anything. You can see what it has learned about you, and correct it when it's
-wrong.
+it structured for you as you go, so you never have to file or maintain anything.
+You can see what it has learned about you, and correct it when it's wrong.
+
+What goes in is your whole life: work and deadlines, the people you love, your
+health, the dates and details you want an AI to actually keep.
 
 The data is append-only and yours. afair is open source and single-tenant, and
 you can export all of it whenever you want. The name is short for "as far as I
@@ -52,7 +54,8 @@ separate proprietary fork.
 
 afair exposes exactly three tools, and they are frozen for good:
 
-- **`remember`** stores something durable: a decision, a fact, a preference.
+- **`remember`** stores something durable: a decision, a person who matters, a
+  date you can't miss, a preference.
 - **`recall`** pulls back what is relevant to the moment.
 - **`observe`** logs what the AI just did, so the vault keeps up.
 

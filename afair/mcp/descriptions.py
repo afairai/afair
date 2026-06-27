@@ -36,10 +36,9 @@ YOUR PROTOCOL:
    ``afair.remember(content={type:'text', text:...},
    type_hint='decision'|'preference'|'fact'|'plan'|...)``. A work
    decision or deadline counts; so does a friend's kid's name, a food
-   preference, an anniversary, a worry they keep returning to. afair is
-   the user's whole-life memory, not a work tool. Default to remembering
-   more, not less. The cost of forgetting a memory is much higher than
-   the cost of an extra append-only row.
+   preference, an anniversary, a worry they keep returning to. Default
+   to remembering more, not less. The cost of forgetting a memory is
+   much higher than the cost of an extra append-only row.
 
 3. When YOU take an agent action (edit a file, run a query, fetch a URL,
    call another tool) call ``afair.observe(event={action, subject,
@@ -76,7 +75,6 @@ WHEN TO CALL:
     friend's or family member's name and what matters to them, a birthday
     or anniversary, a preference (food, travel, how they like to work), a
     health note, a personal goal, something they are working through.
-    afair is the user's whole-life memory, not just a work tool.
   - The user shows you content (an email, a meeting note, a document, a
     screenshot, a photo, a PDF, an audio clip) whose substance has reason
     to outlive this conversation.
