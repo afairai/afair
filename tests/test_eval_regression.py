@@ -51,14 +51,18 @@ def test_current_recall_matches_committed_baseline() -> None:
 
 
 def test_gate_flags_a_perturbed_baseline() -> None:
-    """Sanity: a baseline whose top-1 differs is detected as drift."""
+    """Sanity: a baseline whose top-1 differs is detected as drift.
+
+    Perturb every case's top-1 (not just one) so the check is robust to fixture
+    size — a single-case corruption can dilute below the 0.9 gate floor as the
+    fixture grows, which would silently stop testing the gate.
+    """
     cases = _cases()
     baseline = capture_baseline(cases)
-    # Corrupt one case's top-1 so the comparison must flag drift.
-    first_key = next(iter(baseline))
-    baseline[first_key] = ["__not_a_real_tag__", *baseline[first_key]]
+    for key in baseline:
+        baseline[key] = ["__not_a_real_tag__", *baseline[key]]
     report = compare_to_baseline(cases, baseline)
     passed, reasons = regression_gate_ok(report)
     assert not passed
-    assert report.top1_stability < 1.0
+    assert report.top1_stability == 0.0
     assert reasons
