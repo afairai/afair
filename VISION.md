@@ -31,11 +31,12 @@ Four non-negotiable principles:
 
 ## 3. Why Now
 
-Four converging conditions make this the right moment.
+Several converging conditions make this the right moment.
 
 - **MCP has become the universal protocol.** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/mcp), [Cursor](https://docs.cursor.com/context/mcp), Copilot, Windsurf, Cline — all speak MCP. The cross-vendor surface exists for the first time; a single server reaches everything.
 - **Per-user dedicated infrastructure is economically feasible.** [Fly.io](https://fly.io) puts single-tenant deployment at $3–8/month per user instance for typical workloads. Combined with Fly's automatic volume snapshots (and optional continuous SQLite replication via LiteFS Cloud or Litestream when sub-second RPO matters), the architecture that used to be reserved for premium tools (Fastmail, 1Password) is now viable for individual products.
 - **Memory is a recognized infrastructure category — and structurally locked in.** [Mem0 raised $24M](https://mem0.ai/series-a) (Oct 2025), Letta $10M, Supermemory $2.6M, Zep growing. All US-centric, vendor-leaning, multi-tenant SaaS, all built around imposed schemas.
+- **The newest bet locks memory in even harder.** A wave of well-funded labs is moving memory out of a store and into the model itself, training your context directly into the weights (Engram raised $98M in June 2026 to do exactly this). It buys speed, but the memory becomes unreadable, non-portable, and impossible to correct, bound to a single model. That is the structural opposite of user ownership, and it makes a vendor-neutral, inspectable, correctable substrate more valuable, not less.
 - **EU regulatory tailwind.** GDPR's right-to-be-forgotten and the AI Act (fully applicable August 2026, 10-year audit-trail requirement for high-risk systems) create a structural advantage for EU-native, user-owned architectures. Per-user dedicated instances make compliance physically obvious rather than legally complex.
 - **The field knows memory is unsolved.** [Mem0's State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) names what is still open: cross-session identity resolution, memory staleness in high-relevance memories, the noise floor problem.
 
