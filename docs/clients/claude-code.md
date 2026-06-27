@@ -1,4 +1,4 @@
-# Claude Code (CLI) — connecting to afair
+# Claude Code (CLI): connecting to afair
 
 Claude Code's `.mcp.json` lives at three possible scopes; pick the one that
 matches your workflow:
@@ -30,7 +30,7 @@ Add to `~/.claude/settings.json`:
 ```
 
 Replace `<AFAIR_AUTH_TOKEN>` with the value from your `.env.local`
-(or from your password manager — never paste it in chat or commit it).
+(or from your password manager; never paste it in chat or commit it).
 
 You can also do it via the CLI:
 
@@ -66,7 +66,7 @@ Then ask:
 
 > Use the afair MCP server to list the tools available.
 
-Expected: three tools listed — `remember`, `recall`, `observe`.
+Expected: three tools listed: `remember`, `recall`, `observe`.
 
 Now exercise the round-trip:
 
