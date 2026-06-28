@@ -39,11 +39,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file RELEASE_NOTES.md \
-            --verify-tag
+          # Idempotent: in the normal flow release-please already published
+          # this release (and tagged with GITHUB_TOKEN, so this tag-push
+          # workflow doesn't even fire). This path is the manual-tag
+          # fallback; if a release for the tag already exists, leave it be
+          # instead of failing with HTTP 422 "tag_name already exists".
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping create."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file RELEASE_NOTES.md \
+              --verify-tag
+          fi
 
   trigger-fleet-deploy:
     runs-on: ubuntu-latest
