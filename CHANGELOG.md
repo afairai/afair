@@ -10,6 +10,31 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.2](https://github.com/afairai/afair/compare/v0.1.1...v0.1.2) (2026-06-28)
+
+
+### Features
+
+* generic life clusters (work / family & friends / personal), drop health naming ([57391ed](https://github.com/afairai/afair/commit/57391ed6776977765533be3827ea6f660121f930))
+* **temporal:** P1 of relevance-decay — infer per-event temporal metadata ([bf0e560](https://github.com/afairai/afair/commit/bf0e560169bcd29ec6ffeb7c4252cf0e9c35d88e))
+* **temporal:** P2 of relevance-decay — temporal decay in recall ranking ([b672b01](https://github.com/afairai/afair/commit/b672b0160eb7371b3d17bfcd972a263102e51d3f))
+* **temporal:** P3 of relevance-decay — recurrence re-surfacing + upcoming ([7c60fbd](https://github.com/afairai/afair/commit/7c60fbd346e8f4d4bf822c735699e9e298bf58a7))
+* **temporal:** P4 of relevance-decay — topic warmth (transient + decaying) ([5690335](https://github.com/afairai/afair/commit/56903354b58749440e7fc345f6b8df848669f889))
+
+
+### Bug Fixes
+
+* **eval:** keep the regression gate honest after the fixture grew ([c52f3fa](https://github.com/afairai/afair/commit/c52f3faae7dfdd626083de55528af66aa85a02a0))
+* **settings:** treat blank secret env vars as unset ([9719039](https://github.com/afairai/afair/commit/9719039d29f9050435471d6e54f6f3be47612b8a))
+* **temporal:** floor actually-invalidated memories in recall, not just guesses ([04c2172](https://github.com/afairai/afair/commit/04c217206490836645e65a2b623f28c404df823b))
+
+
+### Documentation
+
+* **claude:** correct the going-public status — history NOT yet scrubbed ([4166592](https://github.com/afairai/afair/commit/416659205a8b1eaa1e2d0bfa020e461b0ef6669f))
+* dev branch retired, history scrub complete ([92a2249](https://github.com/afairai/afair/commit/92a224999d1f09e98876b1b907b095e0ec53ade7))
+* refresh current state, fix framing, strip em dashes ([a272f5f](https://github.com/afairai/afair/commit/a272f5faf1df38669604d65210a5c63194c8dced))
+
 ## [0.1.1](https://github.com/afairai/afair/compare/v0.1.0...v0.1.1) (2026-06-27)
 
 
