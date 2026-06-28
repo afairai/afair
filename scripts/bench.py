@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""End-to-end latency bench against the live (or local) MCP server.
+"""End-to-end latency bench against an MCP server.
 
 Run examples:
-    # Live Fly app (default)
+    # Local dev server (http://localhost:8765, the default)
     uv run scripts/bench.py
 
-    # Local dev server (http://localhost:8765 by default)
-    uv run scripts/bench.py --local
-
-    # Custom URL + token
-    AFAIR_URL=https://x.example.com/mcp \\
+    # Any deployment
+    AFAIR_URL=https://memory.example.com/mcp \\
     AFAIR_AUTH_TOKEN=... uv run scripts/bench.py
+
+    # ...or with flags
+    uv run scripts/bench.py --url https://memory.example.com/mcp --token …
 
 What it reports:
     - initialize:   one-shot TLS + MCP handshake cost
@@ -35,8 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_LIVE_URL = "https://mcp.afair.ai/mcp"
-DEFAULT_LOCAL_URL = "http://localhost:8765/mcp"
+DEFAULT_URL = "http://localhost:8765/mcp"
 
 DEFAULT_QUERIES = [
     "constitutional invariants memory ownership",
@@ -168,12 +167,7 @@ def main() -> int:
     parser.add_argument(
         "--url",
         default=os.environ.get("AFAIR_URL"),
-        help="MCP endpoint URL (default: live Fly app, or http://localhost:8765/mcp with --local)",
-    )
-    parser.add_argument(
-        "--local",
-        action="store_true",
-        help="Default to http://localhost:8765/mcp instead of the live Fly app",
+        help=f"MCP endpoint URL (default: {DEFAULT_URL}, or $AFAIR_URL)",
     )
     parser.add_argument(
         "--token",
@@ -194,7 +188,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    url = args.url or (DEFAULT_LOCAL_URL if args.local else DEFAULT_LIVE_URL)
+    url = args.url or DEFAULT_URL
     token = args.token or _load_token_from_env_local()
     if not token:
         print("ERROR: no bearer token provided. Set AFAIR_AUTH_TOKEN or --token.")
