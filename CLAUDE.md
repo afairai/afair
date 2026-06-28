@@ -47,10 +47,10 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
   files are in place; operator/fleet tooling lives only in afair-web. The git
   history was scrubbed of that tooling (provision/retire, fly configs, deploy
   workflows). No secrets were ever in history, and the business-confidential
-  docs were never committed (they have always been gitignored). `main` and the
-  tags are clean on GitHub. **Open before the visibility flip: the `dev` branch
-  still carries the old tooling and needs the same scrub.** Then
-  `gh repo edit afairai/afair --visibility public`.
+  docs were never committed (they have always been gitignored). `main`, the
+  tags, and the release-please branch are clean on GitHub; the stale `dev`
+  branch was deleted (backed up locally as a bundle). **Only remaining step:
+  the visibility flip,** `gh repo edit afairai/afair --visibility public`.
 - **scripts/ hygiene.** Only self-hoster and contributor scripts remain; fleet
   tooling moved to afair-web; `bench.py` defaults to the local server.
 
