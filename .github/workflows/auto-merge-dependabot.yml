@@ -1,4 +1,4 @@
-# Hourly auto-merge of green Dependabot PRs.
+# Auto-merge green Dependabot PRs, twice a day.
 #
 # Scope is deliberately narrow (see CLAUDE.md "release flow"):
 #   - ONLY pull requests authored by Dependabot are touched. The
@@ -6,10 +6,10 @@
 #     stays the maintainer's manual "cut a release + deploy the fleet"
 #     gate.
 #   - A PR is merged ONLY when every status check has reported and all
-#     are green. Pending checks → skipped this run (retried next hour).
+#     are green. Pending checks → skipped this run (retried next run).
 #     Any failing check → skipped (a broken bump never lands).
 #
-# Why an hourly cron and not GitHub native auto-merge: native auto-merge
+# Why a scheduled cron and not GitHub native auto-merge: native auto-merge
 # needs branch protection with REQUIRED status checks, which this repo
 # intentionally doesn't enforce (solo maintainer, direct pushes). The
 # cron polls, checks, and merges deterministically with no extra config.
@@ -23,7 +23,7 @@ name: Auto-merge Dependabot
 
 on:
   schedule:
-    - cron: "0 * * * *" # hourly, on the hour (UTC)
+    - cron: "0 */12 * * *" # every 12 hours (00:00 + 12:00 UTC)
   workflow_dispatch: {} # allow a manual kick from the Actions tab
 
 # Least privilege: merge PRs, read their check state. Nothing else.
