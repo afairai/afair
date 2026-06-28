@@ -67,3 +67,74 @@ def test_mcp_port_validates_range(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+# ── blank-secret normalization ───────────────────────────────────────────────
+# A present-but-empty secret env var (the shape .env.example ships,
+# e.g. `AFAIR_VAULT_KEY=`) parses as "" not None. Two footguns followed before
+# the _blank_secret_is_unset normalizer: empty AFAIR_VAULT_KEY crashed LOCAL
+# boot on the length check, and empty AFAIR_AUTH_TOKEN slipped past the fly
+# required-gate and booted the public server unauthenticated.
+
+# A valid 32+ byte key for the fly-mode tests (token_urlsafe(32)-shaped).
+_VALID_KEY = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40 bytes
+
+
+def test_blank_vault_key_boots_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`AFAIR_VAULT_KEY=` (the .env.example default) must not crash local boot.
+
+    Regression: pre-fix this raised "AFAIR_VAULT_KEY is too short" because ""
+    is not None, so the length check fired even in plaintext-OK local mode.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "")
+    monkeypatch.setenv("AFAIR_AUTH_TOKEN", "")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.vault_key is None  # blank → unset → plaintext local
+    assert s.auth_token is None
+
+
+def test_blank_vault_key_normalizes_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whitespace-only is also treated as unset, not as a 3-byte key."""
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "   ")
+
+    assert Settings(_env_file=None).vault_key is None  # type: ignore[call-arg]
+
+
+def test_blank_auth_token_rejected_in_fly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The security fix: an empty AFAIR_AUTH_TOKEN must NOT boot a fly server.
+
+    Pre-fix, "" passed the `auth_token is None` gate and the public server
+    came up world-readable/writable. Blank → None makes the gate fire.
+    """
+    monkeypatch.setenv("ENVIRONMENT", "fly")
+    monkeypatch.setenv("AFAIR_AUTH_TOKEN", "")
+    monkeypatch.setenv("AFAIR_VAULT_KEY", _VALID_KEY)
+    monkeypatch.setenv("OAUTH_ISSUER", "https://memory.example.com")
+
+    with pytest.raises(ValidationError, match="AFAIR_AUTH_TOKEN"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_blank_vault_key_rejected_in_fly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blank vault key in fly must fail loudly (not silently run plaintext)."""
+    monkeypatch.setenv("ENVIRONMENT", "fly")
+    monkeypatch.setenv("AFAIR_AUTH_TOKEN", _VALID_KEY)
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "")
+    monkeypatch.setenv("OAUTH_ISSUER", "https://memory.example.com")
+
+    with pytest.raises(ValidationError, match="AFAIR_VAULT_KEY"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_short_nonempty_vault_key_still_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The length check is preserved for a real-but-weak key (Security L3)."""
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "short")
+
+    with pytest.raises(ValidationError, match="too short"):
+        Settings(_env_file=None)  # type: ignore[call-arg]

@@ -266,6 +266,34 @@ class Settings(BaseSettings):
     # responsive to context-switches.
     surprise_context_window: int = Field(default=20, ge=1, le=500)
 
+    @field_validator(
+        "auth_token",
+        "jwt_secret",
+        "vault_key",
+        "github_oauth_client_id",
+        "github_oauth_client_secret",
+        mode="before",
+    )
+    @classmethod
+    def _blank_secret_is_unset(cls, v: object) -> object:
+        """Treat a blank secret env var as unset (None), not as an empty value.
+
+        ``.env.example`` ships these keys present-but-empty (``AFAIR_VAULT_KEY=``),
+        which pydantic parses as ``""`` rather than ``None``. Two real footguns
+        follow if we don't normalize:
+
+        - ``AFAIR_VAULT_KEY=`` crashed local boot on the < 32-byte length check,
+          contradicting the docs ("locally you need no encryption key").
+        - ``AFAIR_AUTH_TOKEN=`` in ``ENVIRONMENT=fly`` slipped past the
+          ``is None`` required-gate (``""`` is not None), booting the public
+          server unauthenticated.
+
+        Mapping blank → None makes the required/length validators see the truth.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @field_validator("vault_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: str | Path) -> Path:
