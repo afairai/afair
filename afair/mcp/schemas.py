@@ -401,7 +401,7 @@ class RecallFeedback(BaseModel):
     The MCP-client AI calls ``recall(...)`` once to get hits, then on
     its NEXT recall passes a ``feedback`` payload referring to those
     earlier hits. The signal drives the self-improvement tuner — see
-    ``analysis/2026-06-03-recursive-self-improvement.md`` §2.1.
+    the recursive self-improvement design.
 
     All fields optional. Empty payload is a no-op. IDs over the cap
     are truncated silently to keep one inflated client from flooding

@@ -83,14 +83,14 @@ def test_save_then_consume_authorization_code(db: sqlite3.Connection) -> None:
         scope="mcp",
         code_challenge="abc123",
         code_challenge_method="S256",
-        user_sub="gowrynath",
-        user_email="gowrynath@example.com",
+        user_sub="operator",
+        user_email="operator@example.com",
     )
     assert saved.code.startswith("nfac_")
 
     consumed = storage.consume_authorization_code(db, saved.code)
     assert consumed is not None
-    assert consumed.user_sub == "gowrynath"
+    assert consumed.user_sub == "operator"
     assert consumed.code_challenge == "abc123"
 
     # Single-use — second consume returns None
@@ -112,8 +112,8 @@ def test_expired_authorization_code_is_rejected_at_consume(db: sqlite3.Connectio
         scope="mcp",
         code_challenge="abc123",
         code_challenge_method="S256",
-        user_sub="gowrynath",
-        user_email="gowrynath@example.com",
+        user_sub="operator",
+        user_email="operator@example.com",
         ttl_seconds=-1,  # already expired
     )
     assert storage.consume_authorization_code(db, saved.code) is None
@@ -165,7 +165,7 @@ def test_consume_authorization_code_is_atomic_under_concurrency(tmp_path: Path) 
             scope="mcp",
             code_challenge="abc",
             code_challenge_method="S256",
-            user_sub="gowry",
+            user_sub="operator",
             user_email="g@example.test",
         )
     finally:
@@ -225,13 +225,13 @@ def test_save_then_consume_login_state(db: sqlite3.Connection) -> None:
 
 def test_refresh_token_round_trip(db: sqlite3.Connection) -> None:
     token = storage.issue_refresh_token(
-        db, client_id="nf_test", user_sub="gowrynath", scope=None, ttl_seconds=60
+        db, client_id="nf_test", user_sub="operator", scope=None, ttl_seconds=60
     )
     assert token.startswith("nfrt_")
 
     found = storage.lookup_refresh_token(db, token)
     assert found is not None
-    assert found.user_sub == "gowrynath"
+    assert found.user_sub == "operator"
 
     # Revoke; subsequent lookup fails
     assert storage.revoke_refresh_token(db, token) is True
@@ -242,7 +242,7 @@ def test_refresh_token_round_trip(db: sqlite3.Connection) -> None:
 
 def test_expired_refresh_token_is_rejected(db: sqlite3.Connection) -> None:
     token = storage.issue_refresh_token(
-        db, client_id="nf_test", user_sub="gowrynath", scope=None, ttl_seconds=-1
+        db, client_id="nf_test", user_sub="operator", scope=None, ttl_seconds=-1
     )
     # Already expired (ttl_seconds=-1)
     assert storage.lookup_refresh_token(db, token) is None
@@ -253,19 +253,19 @@ def test_expired_refresh_token_is_rejected(db: sqlite3.Connection) -> None:
 
 def test_jwt_round_trip(settings: Settings) -> None:
     issued = jwt_mod.issue_access_token(
-        settings=settings, subject="gowrynath", email="gowrynath@example.com"
+        settings=settings, subject="operator", email="operator@example.com"
     )
-    assert issued.subject == "gowrynath"
+    assert issued.subject == "operator"
     assert issued.expires_at > time.time()
 
     claims = jwt_mod.validate(issued.token, settings=settings)
-    assert claims.sub == "gowrynath"
-    assert claims.email == "gowrynath@example.com"
+    assert claims.sub == "operator"
+    assert claims.email == "operator@example.com"
     assert claims.iss == "https://test.local"  # trailing slash stripped
 
 
 def test_jwt_invalid_signature_rejected(settings: Settings, tmp_path: Path) -> None:
-    issued = jwt_mod.issue_access_token(settings=settings, subject="gowrynath", email=None)
+    issued = jwt_mod.issue_access_token(settings=settings, subject="operator", email=None)
     # Different secret → invalid signature
     other = Settings(
         _env_file=None,  # type: ignore[call-arg]
@@ -280,7 +280,7 @@ def test_jwt_invalid_signature_rejected(settings: Settings, tmp_path: Path) -> N
 
 def test_jwt_wrong_audience_rejected(settings: Settings) -> None:
     issued = jwt_mod.issue_access_token(
-        settings=settings, subject="gowrynath", email=None, audience="https://other.example/"
+        settings=settings, subject="operator", email=None, audience="https://other.example/"
     )
     with pytest.raises(jwt_mod.JWTInvalid):
         jwt_mod.validate(issued.token, settings=settings)

@@ -613,8 +613,7 @@ SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS export_jobs_token_idx ON export_jobs(download_token_hash)",
     "CREATE INDEX IF NOT EXISTS export_jobs_expires_idx ON export_jobs(expires_at)",
     # ── event_temporal: derived time/relevance metadata per event ───────────
-    # Phase 1 of the relevance-decay design (see
-    # analysis/2026-06-27-memory-relevance-decay-spec.md). The temporal worker
+    # Phase 1 of the relevance-decay design. The temporal worker
     # infers, per event, an optional temporal class + event time + relevance
     # horizon + recurrence + closure, so recall can LATER de-prioritize expired
     # one-offs and re-surface recurring items. Append-only and re-derivable

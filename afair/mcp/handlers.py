@@ -1369,7 +1369,7 @@ def recall(
         # floored here too, so the real supersession signal wins over the
         # worker's inferred "superseded" class. Decay is a recall score, never a
         # delete (I2); history stays findable. depth="deep" is the flat history
-        # lens that bypasses it. See the relevance-decay spec in analysis/.
+        # lens that bypasses it.
         if depth != "deep":
             events = _temporal_rerank(events, db, invalidated=set(invalidations))
 

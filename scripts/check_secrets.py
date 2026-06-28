@@ -4,13 +4,13 @@
 The settings layer refuses to start when ``ENVIRONMENT=fly`` unless a few
 secrets are present (see ``afair/settings.py`` validators). When an app is
 missing one, the deploy itself succeeds but the machine crash-loops and the
-only signal is an opaque 502/503 on ``/health``. That is exactly how the
-afair-dev environment silently rotted three weeks behind prod.
+only signal is an opaque 502/503 on ``/health``. A dev environment can drift
+silently behind prod this way for weeks.
 
 This script turns that into a fast, named failure *before* the deploy:
 
-    python scripts/check_secrets.py afair-your-app      # gate one app
-    python scripts/check_secrets.py --diff afair-dev afair-your-app
+    python scripts/check_secrets.py your-app          # gate one app
+    python scripts/check_secrets.py --diff your-app-dev your-app
 
 It only reads secret *names* (``fly secrets list`` never exposes values), so it
 is safe to run anywhere a deploy token can reach.

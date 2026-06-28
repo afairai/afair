@@ -51,7 +51,7 @@ Per-feature detail and dates live in
 * **adr:** record the as-built entity-audit + decide surface in ADR-0002 ([dbb34ec](https://github.com/afairai/afair/commit/dbb34ece42ab32317acc8584ab8b1ca6c25d66b0))
 * **adr:** record the rationale for the constitutional invariants ([42a4030](https://github.com/afairai/afair/commit/42a40309479ff9f4489141122c0f5d45f18fe799))
 * align CONTRIBUTING intro with current positioning ([186c952](https://github.com/afairai/afair/commit/186c95272799f7cb0a9eb476e482d0973f6b6e0c))
-* **claude:** correct operator vault host — your-app, not mcp.afair.ai ([ee02645](https://github.com/afairai/afair/commit/ee02645a0f76f00ccfd57218e41694d6d9860c11))
+* **claude:** correct the operator vault host reference ([ee02645](https://github.com/afairai/afair/commit/ee02645a0f76f00ccfd57218e41694d6d9860c11))
 * make the connect + hosting story self-host-ready for going public ([3e071b2](https://github.com/afairai/afair/commit/3e071b2e198a8ab1c80f0a235ba881ba4ac93ba3))
 * **readme:** surface the instruction snippet, add CI badge, fix snippet drift ([8652759](https://github.com/afairai/afair/commit/8652759e7073fd325e164cc6b462f664940dee12))
 * **self-host:** add Docker/compose path, a verify step, and a README doc index ([b306745](https://github.com/afairai/afair/commit/b30674510ea52fdb426ff541182a48c9f7c2fb3f))

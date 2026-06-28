@@ -1,8 +1,7 @@
 """
 Self-improvement tuner — Phase B implementation.
 
-Closes the loop from
-``analysis/2026-06-03-recursive-self-improvement.md``: generate
+Closes the recursive self-improvement loop: generate
 hypotheses, run replay + invariant guards + LLM-judge panel, and
 PROMOTE the variant when judge majority + guards both pass.
 

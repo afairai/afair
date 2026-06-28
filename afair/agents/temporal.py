@@ -1,7 +1,6 @@
 """TemporalWorker — infers time/relevance metadata per event.
 
-Phase 1 of the relevance-decay design
-(``analysis/2026-06-27-memory-relevance-decay-spec.md``). For each event the
+Phase 1 of the relevance-decay design. For each event the
 extractor has already processed, this worker infers a *temporal class* (one of
 :data:`afair.substrate.temporal.TEMPORAL_CLASSES`) plus an optional event time,
 relevance horizon, recurrence rule, and closure state, and writes one

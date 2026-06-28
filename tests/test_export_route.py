@@ -98,7 +98,7 @@ def test_export_cors_localhost_rejected_in_prod(vault_dir) -> None:
         afair_auth_token=SecretStr("master"),
         export_token=SecretStr("test-token"),
         environment="fly",
-        oauth_issuer="https://your-app.mcp.afair.ai",
+        oauth_issuer="https://memory.example.com",
         vault_key=SecretStr("k" * 64),
     )
     app = Starlette(routes=[Route("/internal/export", export_endpoint, methods=["GET"])])

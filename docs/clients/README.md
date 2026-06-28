@@ -138,6 +138,5 @@ directly. Both paths reach the same three tools.
 
 **Still needs a human:** the final per-client click-through (approve in the
 browser, confirm `remember`/`recall`/`observe` show up, do a save-here /
-recall-there round-trip) is the Phase 0 capability gate, tracked in the
-[journal](../../analysis/phase-0-journal.md). The server side above is
-verified; the per-vendor UI walk is what each daily-use session confirms.
+recall-there round-trip) is the Phase 0 capability gate. The server side above
+is verified; the per-vendor UI walk is what each daily-use session confirms.

@@ -127,7 +127,7 @@ are recorded so a future reader weighs them with eyes open.
 3. **I7 is aspirational today, not yet load-bearing.** The self-improvement
    tuner runs at `promote_enabled=False`: judge-evaluates-judge without a
    ground-truth eval set is research-grade dubious (see the comment in
-   `mcp/server.py` and `analysis/2026-06-03-recursive-self-improvement.md`).
+   `mcp/server.py` and the recursive self-improvement design notes).
    The invariant promises more than the system currently delivers. That is
    acceptable for a north star, but it should be stated plainly: I7 today is a
    guardrail design, not lived behavior.

@@ -13,8 +13,7 @@ loop are all live. Current focus: the open-source launch.
 
 ### 0.1 What's live
 
-All of this is in daily real-world use. Per-feature detail + the dated
-build-log live in [`analysis/build-log.md`](analysis/build-log.md).
+All of this is in daily real-world use.
 
 - **Substrate** (`afair/substrate/`): append-only, content-addressed vault: a
   SQLite event store (FTS5 + sqlite-vec) plus a filesystem blob store for large
@@ -31,10 +30,8 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
   monitor).
 - **Hosted layer**: per-user single-tenant Fly machines (I8), provisioned and
   retired from afair-web. Each user gets a per-user vanity host
-  (`<name-suffix>.mcp.afair.ai`, suffix derived from their Clerk id). The
-  operator's own vault is the per-user app `afair-your-app` at
-  `your-app.mcp.afair.ai` (since 2026-06-14; the old single-tenant
-  `mcp.afair.ai` app was retired). There is no bare `mcp.afair.ai` vault.
+  (`<name-suffix>.mcp.afair.ai`, suffix derived from their Clerk id). There is
+  no bare `mcp.afair.ai` vault; every vault is its own per-user app.
 - **Deploy**: product CI in this repo (`.github/workflows/ci.yml`: lint/type/
   test, no deploy). The fleet deploys from the private **afair-web** repo
   (`deploy-afair-fleet.yml`, pinned ref); a `vX.Y.Z` tag here triggers it. The
@@ -49,8 +46,10 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
   workflows). No secrets were ever in history, and the business-confidential
   docs were never committed (they have always been gitignored). `main`, the
   tags, and the release-please branch are clean on GitHub; the stale `dev`
-  branch was deleted (backed up locally as a bundle). **Only remaining step:
-  the visibility flip,** `gh repo edit afairai/afair --visibility public`.
+  branch was deleted. Final pre-flip pass: internal and personal material
+  moved to afair-web (the `analysis/` notes, the operator vault host), with a
+  second history scrub for it. Then the visibility flip,
+  `gh repo edit afairai/afair --visibility public`.
 - **scripts/ hygiene.** Only self-hoster and contributor scripts remain; fleet
   tooling moved to afair-web; `bench.py` defaults to the local server.
 
@@ -63,8 +62,7 @@ build-log live in [`analysis/build-log.md`](analysis/build-log.md).
 - **Vault Dashboard**: read-only insight surface on the control plane
   (entity-graph hero, surprise heatmap). After the daily-use window.
 - **Observability (Phase 0.5)**: pipeline_events lifecycle tracing +
-  expectation checker + enriched `/health`. Design in
-  `analysis/2026-05-28-observability-strategy.md`.
+  expectation checker + enriched `/health`.
 - **Early-access signup professionalization**: at ≥50–100 signups: dedicated
   store, double opt-in, admin broadcast.
 - **Funding stance**: bootstrap-default / VC-conditional (private note).
@@ -170,11 +168,6 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
 | _(hosted fleet ops: `provision`/`retire`/`hourly-backup` workflows + `provision_user.py`/`retire_user.py`/`recover_user.py`/`onboarding_email.py`)_ | Live only in the private **afair-web** repo (control plane); scrubbed from this repo's history | n/a here |
-| `analysis/build-log.md` | Archived per-feature build-log (detail moved out of CLAUDE.md §0 to keep it lean) | Append when a phase closes |
-| `analysis/phase-0-journal.md` | Capability-gate daily-use log (window closed 2026-06-14) | Closed; archival |
-| `analysis/2026-06-03-recursive-self-improvement.md` | Design of the tuner / judge / rollback self-improvement loop (referenced from `afair/agents/tuner.py`) | When the loop design changes |
-| `analysis/2026-05-28-observability-strategy.md` | Three-layer plan to make the designed flow visible: pipeline_events table, expectation checker, enriched /health. Triggered by heizzeit stall + consolidator silence | Refresh as drops 1–7 ship |
-| `analysis/2026-06-27-memory-relevance-decay-spec.md` | Spec for time/relevance-aware recall: eight relevance classes (dated, recurring, superseded, decaying, transient, evergreen, periodic, commitment), salience decay + re-surfacing within I2/I3 (decay is a recall score, never a delete) | When the relevance/decay design changes |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention: redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets: primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in the afair-web operator runbook | When the source logo changes |
 

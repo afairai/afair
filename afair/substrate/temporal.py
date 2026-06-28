@@ -8,7 +8,7 @@ Append-only (I2): no UPDATE, no DELETE (enforced by schema triggers).
 Re-derivable (I3/I7): bumping the worker's ``computed_by`` version writes new
 rows over the unchanged substrate. Decay is a recall score, never a mutation.
 
-See ``analysis/2026-06-27-memory-relevance-decay-spec.md`` for the full design
+See the relevance-decay design notes for the full picture
 (the eight relevance classes and how recall will later consume them).
 """
 
@@ -189,7 +189,7 @@ def read_event_temporal_batch(
 # nothing is ever excluded (history stays findable, I3); the effect is scaled
 # by the worker's confidence so a shaky inference barely moves ranking; and
 # only the clock-driven + superseded classes decay in P2 — the rest return 1.0
-# until later phases. See analysis/2026-06-27-memory-relevance-decay-spec.md.
+# until later phases.
 
 _DECAY_FLOOR = 0.15
 """A decayed one-off never sinks below this — it drops in ranking but stays

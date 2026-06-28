@@ -205,7 +205,7 @@ def test_jwt_sub_drives_rate_limit_identity(tmp_path: Path) -> None:
     Without this, a JWT mint-and-rotate loop creates a fresh bucket on
     every request and the per-identity cap is meaningless (Sec audit I2).
 
-    The test issues TWO different JWTs for the same subject ("gowry"),
+    The test issues TWO different JWTs for the same subject ("operator"),
     asserts both succeed for many requests, then verifies the rate
     limiter saw them under one identity by inspecting the bucket map.
     """
@@ -217,7 +217,7 @@ def test_jwt_sub_drives_rate_limit_identity(tmp_path: Path) -> None:
         vault_dir=tmp_path,
         auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
         jwt_secret="a-secret-long-enough-for-hs256-tests-32+",  # type: ignore[arg-type]
-        identity_allowlist="gowry",  # type: ignore[arg-type]
+        identity_allowlist="operator",  # type: ignore[arg-type]
     )
     app = build_app(settings)
     rate_limiter = next(
@@ -225,8 +225,8 @@ def test_jwt_sub_drives_rate_limit_identity(tmp_path: Path) -> None:
     )
     rate_limiter.reset()
 
-    token_a = issue_access_token(settings=settings, subject="gowry", email=None).token
-    token_b = issue_access_token(settings=settings, subject="gowry", email=None).token
+    token_a = issue_access_token(settings=settings, subject="operator", email=None).token
+    token_b = issue_access_token(settings=settings, subject="operator", email=None).token
     assert token_a != token_b  # different jti / iat → different bytes
 
     with TestClient(app) as client:
