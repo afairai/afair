@@ -1,0 +1,95 @@
+# Hourly auto-merge of green Dependabot PRs.
+#
+# Scope is deliberately narrow (see CLAUDE.md "release flow"):
+#   - ONLY pull requests authored by Dependabot are touched. The
+#     release-please PR (github-actions[bot]) is NEVER auto-merged — it
+#     stays the maintainer's manual "cut a release + deploy the fleet"
+#     gate.
+#   - A PR is merged ONLY when every status check has reported and all
+#     are green. Pending checks → skipped this run (retried next hour).
+#     Any failing check → skipped (a broken bump never lands).
+#
+# Why an hourly cron and not GitHub native auto-merge: native auto-merge
+# needs branch protection with REQUIRED status checks, which this repo
+# intentionally doesn't enforce (solo maintainer, direct pushes). The
+# cron polls, checks, and merges deterministically with no extra config.
+#
+# Why GITHUB_TOKEN is enough here: merging a dependency bump needs no
+# downstream workflow to fire. (The release PR would — which is the other
+# reason it's excluded: a GITHUB_TOKEN merge wouldn't trigger the release
+# tag + fleet deploy. Dependabot bumps just land and ride the next
+# release PR.)
+name: Auto-merge Dependabot
+
+on:
+  schedule:
+    - cron: "0 * * * *" # hourly, on the hour (UTC)
+  workflow_dispatch: {} # allow a manual kick from the Actions tab
+
+# Least privilege: merge PRs, read their check state. Nothing else.
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: auto-merge-dependabot
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge green Dependabot PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t prs < <(gh pr list -R "$REPO" --author "app/dependabot" \
+            --state open --json number --jq '.[].number')
+
+          if [ "${#prs[@]}" -eq 0 ]; then
+            echo "No open Dependabot PRs."
+            exit 0
+          fi
+
+          for n in "${prs[@]}"; do
+            info=$(gh pr view "$n" -R "$REPO" \
+              --json number,title,mergeable,author,statusCheckRollup)
+
+            title=$(jq -r '.title' <<<"$info")
+            login=$(jq -r '.author.login' <<<"$info")
+            mergeable=$(jq -r '.mergeable' <<<"$info")
+
+            # Belt-and-suspenders: never touch a non-Dependabot author,
+            # even if the list filter ever changes upstream.
+            if [[ "$login" != *dependabot* ]]; then
+              echo "PR #$n: author '$login' is not Dependabot — skip."
+              continue
+            fi
+
+            total=$(jq '[(.statusCheckRollup // [])[]] | length' <<<"$info")
+            pending=$(jq '[(.statusCheckRollup // [])[]
+              | select((.__typename=="CheckRun" and .status!="COMPLETED")
+                or (.__typename=="StatusContext" and (.state=="PENDING" or .state=="EXPECTED")))]
+              | length' <<<"$info")
+            failed=$(jq '[(.statusCheckRollup // [])[]
+              | select((.__typename=="CheckRun"
+                  and (.conclusion|IN("FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE")))
+                or (.__typename=="StatusContext" and (.state=="FAILURE" or .state=="ERROR")))]
+              | length' <<<"$info")
+
+            echo "PR #$n '$title': mergeable=$mergeable checks total=$total pending=$pending failed=$failed"
+
+            if [ "$mergeable" != "MERGEABLE" ]; then echo "  skip: not mergeable"; continue; fi
+            if [ "$total" -eq 0 ]; then echo "  skip: no checks reported yet"; continue; fi
+            if [ "$pending" -ne 0 ]; then echo "  skip: checks still running"; continue; fi
+            if [ "$failed" -ne 0 ]; then echo "  skip: a check failed"; continue; fi
+
+            echo "  all green — merging (squash)…"
+            gh pr merge "$n" -R "$REPO" --squash --delete-branch \
+              || { echo "  merge failed; will retry next run"; continue; }
+          done
