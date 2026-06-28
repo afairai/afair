@@ -10,6 +10,33 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.2](https://github.com/afairai/afair/compare/v0.1.1...v0.1.2) (2026-06-28)
+
+
+### Features
+
+* generic life clusters (work / family & friends / personal), drop health naming ([0e3a991](https://github.com/afairai/afair/commit/0e3a991d7ddffb60e85b3fc4631bcd638c73979b))
+* **temporal:** P1 of relevance-decay — infer per-event temporal metadata ([2a3083d](https://github.com/afairai/afair/commit/2a3083d81a3755011db93c7626eb945ad0c51fc5))
+* **temporal:** P2 of relevance-decay — temporal decay in recall ranking ([dcbb6e1](https://github.com/afairai/afair/commit/dcbb6e1238fcf0a16aa123fa96d33097b7bbdcea))
+* **temporal:** P3 of relevance-decay — recurrence re-surfacing + upcoming ([d547881](https://github.com/afairai/afair/commit/d547881cc549c052a2f88ae39f06f3f2ce9c62db))
+* **temporal:** P4 of relevance-decay — topic warmth (transient + decaying) ([8d26872](https://github.com/afairai/afair/commit/8d26872da88221c56d9e6e45b47124b8d3910e05))
+
+
+### Bug Fixes
+
+* **eval:** keep the regression gate honest after the fixture grew ([0984234](https://github.com/afairai/afair/commit/0984234ac134a9c25026e7109831dcfbb8a299ae))
+* **settings:** treat blank secret env vars as unset ([6813b26](https://github.com/afairai/afair/commit/6813b26a39f26f752d8d58f0323a9ebe81a3d136))
+* **temporal:** floor actually-invalidated memories in recall, not just guesses ([217e785](https://github.com/afairai/afair/commit/217e785acb0891ad817d032d437b6cd4d101fbc9))
+
+
+### Documentation
+
+* **claude:** correct the going-public status — history NOT yet scrubbed ([e128759](https://github.com/afairai/afair/commit/e1287597108dde2142b445914c37d7a7d0b9f65a))
+* dev branch retired, history scrub complete ([d370781](https://github.com/afairai/afair/commit/d370781b91ce06451d2c174bacdd5fb67c4d3396))
+* refresh current state, fix framing, strip em dashes ([e70d37d](https://github.com/afairai/afair/commit/e70d37def13ee1592fd1ac46c8ab85085ecaf75b))
+* **temporal:** add post-launch roadmap (2b, tuner, local model) to the spec ([dd8a9fc](https://github.com/afairai/afair/commit/dd8a9fc26bc0576dd3f902f3d8a2c33309963351))
+* **temporal:** mark relevance-decay spec Implemented (P1-P4 shipped) ([5e03586](https://github.com/afairai/afair/commit/5e03586523811f5f1d7b9d698ca3a476493cc7f2))
+
 ## [0.1.1](https://github.com/afairai/afair/compare/v0.1.0...v0.1.1) (2026-06-27)
 
 
