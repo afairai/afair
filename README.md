@@ -26,9 +26,15 @@ history you're tired of repeating at the start of every session.
 afair is one memory that all of them share. It runs as your own vault and
 connects to each tool through the [Model Context
 Protocol](https://modelcontextprotocol.io) (MCP), so the same memory follows you
-from Claude to your coding agent to whatever you pick up next. An AI layer keeps
-it structured for you as you go, so you never have to file or maintain anything.
-You can see what it has learned about you, and correct it when it's wrong.
+from Claude to your coding agent to whatever you pick up next.
+
+Capturing a thought is cheap. Keeping it structured, the people, the projects,
+what changed, what still matters, is the expensive part, and it stays expensive
+because your life keeps moving. That work is interpretation: reasoning, not
+filing, and it's exactly what these models have gotten good at. So afair does it
+for you. An AI layer reads what you've told it and keeps the structure current on
+its own, so you never file or maintain anything. You can see what it has learned
+about you, and correct it when it's wrong.
 
 What goes in is your whole life: your work, the people you love, and the
 personal things you'd rather an AI just knew.
