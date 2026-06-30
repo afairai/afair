@@ -64,13 +64,75 @@ not a requirement.
 If your harness logs in with OAuth and you have no standalone API key, that's
 fine for the MCP connection, but the structuring stays off until you add one of
 the keys above. The cheapest path to the full experience is a single OpenAI key
-with every role pointed at OpenAI.
+with every role pointed at OpenAI. To use no external provider at all, see
+[Run it fully local](#run-it-fully-local-no-external-provider) below.
 
-**Zero keys, fully local:** point the roles at Ollama models (e.g.
-`EXTRACTOR_MODEL=ollama/llama3.3`) and run an [Ollama](https://ollama.com) server.
-litellm talks to it locally, so the structuring runs with no provider key and no
-data leaving your machine. Quality is lower than the hosted models, but nothing
-is sent to a vendor.
+## Run it fully local (no external provider)
+
+afair can run with **zero external calls**, nothing leaves your machine. This is
+I4 (you own the substrate) taken all the way: no vendor ever sees a byte. It is a
+self-host / homelab path, not the hosted default, because of one resource cost
+explained below.
+
+afair has three LLM needs, and only one is heavy:
+
+| Need | Local path | Cost |
+|---|---|---|
+| **Recall** (the hot path) | FTS5 + sqlite-vec, always local | negligible |
+| **Embeddings** (semantic recall) | `fastembed/<model>` (ONNX, in-process, no network; already a dependency) | light: CPU, ~100–400 MB, runs on any node |
+| **Structuring** (the extractor) | `ollama/<model>` via litellm | this is the part that wants RAM / a GPU |
+
+Recall and embeddings are light enough for a small box. The only component that
+benefits from a bigger node is the extractor LLM, and because structuring runs on
+the **cold path** (background, not in the recall response), it tolerates a slow
+CPU: a few seconds per event is fine since it never blocks a recall.
+
+**Hardware, extractor only:**
+
+- A **7–8B** model (e.g. `qwen2.5:7b`, `llama3.1:8b`, q4 quant) needs ~6–8 GB RAM.
+  Comfortable on a 16 GB machine. Apple Silicon (M-series) or any GPU with ≥8 GB
+  VRAM is ideal; CPU-only works but is slow.
+- A **14–32B** model structures noticeably better and needs ~16–32 GB, GPU
+  recommended.
+
+A 16 GB Mac mini or a homelab box with a consumer GPU runs the whole thing
+comfortably. A 1 GB VPS cannot host a useful local LLM, that is the real
+"needs a bigger node," and it applies to the extractor alone.
+
+**Config (text + structuring + recall, fully local):**
+
+```bash
+# Structuring on a local Ollama model — no provider key
+EXTRACTOR_MODEL=ollama/qwen2.5:7b
+# Embeddings via local ONNX — no provider key, no network
+EMBEDDING_MODEL=fastembed/BAAI/bge-small-en-v1.5
+EMBEDDING_DIM=384                 # must match the fastembed model
+SEMANTIC_RECALL_ENABLED=true
+COLD_PATH_ENABLED=true
+# Leave ANTHROPIC_API_KEY / OPENAI_API_KEY unset.
+```
+
+Then run Ollama alongside afair:
+
+```bash
+ollama serve            # or the macOS app
+ollama pull qwen2.5:7b  # one-time model download
+```
+
+**Honest gaps in fully-local mode:**
+
+- **Audio.** The default `TRANSCRIPTION_MODEL=openai/whisper-1` is OpenAI; there is
+  no first-class local Whisper route through litellm yet. Skip audio memories, or
+  transcribe out of band, until this lands.
+- **Images.** Set `VISION_MODEL` to a local vision model (e.g.
+  `ollama/llama3.2-vision:11b`) if you remember images; it is heavier than the
+  text model.
+- **The self-improvement judge** is cross-vendor by design (Sonnet + GPT-5 +
+  Gemini). Fully local means running the tuner with a single local judge or
+  leaving it off; it is background-only, so daily use is unaffected.
+- **Quality.** A local 7B structures measurably worse than `claude-haiku-4-5`. It
+  works, but "organizes itself" is cleaner on the hosted models. Bump to a larger
+  local model if your hardware allows.
 
 ## What it stores, and where
 
