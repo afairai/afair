@@ -61,11 +61,13 @@ not a requirement.
   ships no embeddings, so set `SEMANTIC_RECALL_ENABLED=false` (recall falls back
   to FTS/keyword) and skip audio.
 
-If your harness logs in with OAuth and you have no standalone API key, that's
-fine for the MCP connection, but the structuring stays off until you add one of
-the keys above. The cheapest path to the full experience is a single OpenAI key
-with every role pointed at OpenAI. To use no external provider at all, see
-[Run it fully local](#run-it-fully-local-no-external-provider) below.
+If your harness logs in with OAuth and you have no standalone API key, the
+structuring stays off until you give afair a model it can reach. Two good
+keyless options: if you pay for **GitHub Copilot**, point afair at it and reuse
+that login (see [Use your GitHub Copilot subscription](#use-your-github-copilot-subscription-no-api-key)),
+or run the structuring **fully local** with Ollama (see
+[Run it fully local](#run-it-fully-local-no-external-provider)). Otherwise the
+cheapest hosted path is a single OpenAI key with every role pointed at OpenAI.
 
 ## Run it fully local (no external provider)
 
@@ -133,6 +135,47 @@ ollama pull qwen2.5:7b  # one-time model download
 - **Quality.** A local 7B structures measurably worse than `claude-haiku-4-5`. It
   works, but "organizes itself" is cleaner on the hosted models. Bump to a larger
   local model if your hardware allows.
+
+## Use your GitHub Copilot subscription (no API key)
+
+If you already pay for GitHub Copilot, afair can use it as the structuring LLM
+with **no separate API key and no extra cost**. litellm has a `github_copilot`
+provider that reuses your Copilot login, and afair is vendor-neutral, so it is
+just a model string. This is the cleanest path for the many developers whose
+harnesses authenticate by OAuth and who have no standalone API key.
+
+```bash
+EXTRACTOR_MODEL=github_copilot/gpt-4.1
+VISION_MODEL=github_copilot/gpt-4.1          # only if you remember images
+# Copilot serves chat only, not embeddings, so keep embeddings local:
+EMBEDDING_MODEL=fastembed/BAAI/bge-small-en-v1.5
+EMBEDDING_DIM=384
+# Leave ANTHROPIC_API_KEY / OPENAI_API_KEY unset.
+```
+
+**One-time login.** On the first call litellm runs GitHub's device flow. afair
+prints a line like:
+
+```
+Please visit https://github.com/login/device and enter code XXXX-XXXX to authenticate.
+```
+
+Open that URL, enter the code, approve. litellm caches the token under
+`~/.config/litellm/github_copilot/`, and every later call (including the
+background cold-path) reuses it headless. You authorize once.
+
+**Gotchas:**
+
+- **Embeddings.** A `github_copilot/*` embedding model returns *"Model is not
+  supported"*, Copilot exposes chat models only. Use local `fastembed` for
+  embeddings (above), or an `openai/*` embedding model with an OpenAI key.
+- **Model names** follow Copilot's catalogue (`github_copilot/gpt-4.1`,
+  `github_copilot/gpt-4o`, `github_copilot/claude-sonnet-4`, ...). Pick one your
+  Copilot plan includes.
+- The same trick works for **any litellm provider**: set the model string and
+  either let litellm read that provider's standard env var (`GROQ_API_KEY`,
+  `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, ...) or, for self-authenticating ones
+  like `github_copilot`, nothing at all.
 
 ## What it stores, and where
 

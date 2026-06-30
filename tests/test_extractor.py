@@ -11,6 +11,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import SecretStr
 
 from afair.agents import extractor, interpretation
 from afair.agents.llm import LLMRateLimit, LLMResponseError, LLMResult, LLMTimeout
@@ -22,6 +23,39 @@ from afair.substrate import open_db
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+
+class _KeyCtx:
+    """Minimal stand-in for ServerContext, just the provider key attributes."""
+
+    def __init__(self) -> None:
+        self.openai_api_key = SecretStr("sk-openai")
+        self.anthropic_api_key = SecretStr("sk-anthropic")
+        self.gemini_api_key = SecretStr("sk-gemini")
+        self.voyage_api_key = SecretStr("sk-voyage")
+
+
+def test_api_key_for_managed_providers() -> None:
+    ctx = _KeyCtx()
+    assert extractor._api_key_for("openai/gpt-4o-mini", ctx) == "sk-openai"
+    assert extractor._api_key_for("anthropic/claude-haiku-4-5", ctx) == "sk-anthropic"
+    assert extractor._api_key_for("gemini/gemini-2.5-flash", ctx) == "sk-gemini"
+    assert extractor._api_key_for("voyage/voyage-3", ctx) == "sk-voyage"
+
+
+def test_api_key_for_self_authenticating_and_local_return_none() -> None:
+    # github_copilot self-authenticates; ollama/fastembed need no key; unknown
+    # providers are left to litellm's own env-var resolution. Critically, none
+    # of these must be handed afair's anthropic key by mistake.
+    ctx = _KeyCtx()
+    for model in (
+        "github_copilot/gpt-4o",
+        "ollama/qwen2.5:7b",
+        "fastembed/BAAI/bge-small-en-v1.5",
+        "groq/llama-3.3-70b",
+        "mistral/mistral-large",
+    ):
+        assert extractor._api_key_for(model, ctx) is None, model
 
 
 # A canonical "good" extraction the mock LLM returns by default.

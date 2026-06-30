@@ -69,13 +69,32 @@ atexit.register(lambda: _EXECUTOR.shutdown(wait=True, cancel_futures=False))
 
 
 def _api_key_for(model: str, ctx: object) -> str | None:
-    """Return the right secret-value key for a given litellm-style model string."""
+    """The afair-managed secret for a litellm model string, or None.
+
+    afair explicitly manages keys for the providers it ships defaults for
+    (OpenAI, Anthropic, Gemini, Voyage). For every other provider it returns
+    None on purpose, and that is what unlocks the rest of litellm's catalogue:
+
+    - ``github_copilot/*`` self-authenticates through litellm's own GitHub OAuth
+      device flow (reuse your Copilot subscription, no API key).
+    - ``ollama/*`` / ``fastembed/*`` and other local backends need no key.
+    - any other provider (``groq/*``, ``mistral/*``, ``deepseek/*``,
+      ``openrouter/*``, ...) is picked up by litellm from that provider's own
+      standard env var.
+
+    Passing the wrong vendor's key would break those calls, so when afair
+    doesn't own the provider it passes nothing and lets litellm resolve auth.
+    """
     if model.startswith("openai/"):
         key = getattr(ctx, "openai_api_key", None)
     elif model.startswith("gemini/"):
         key = getattr(ctx, "gemini_api_key", None)
-    else:
+    elif model.startswith("anthropic/"):
         key = getattr(ctx, "anthropic_api_key", None)
+    elif model.startswith("voyage/"):
+        key = getattr(ctx, "voyage_api_key", None)
+    else:
+        return None
     return key.get_secret_value() if key is not None else None
 
 
