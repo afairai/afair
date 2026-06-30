@@ -146,6 +146,88 @@ def test_copilot_skips_when_vscode_absent(
     assert not _vscode_mcp(home).exists()
 
 
+# ── client selection (--only / --skip) ───────────────────────────────────────
+
+
+def test_select_clients_default_is_all(installer: ModuleType) -> None:
+    assert installer.select_clients(None, None) == list(installer.CLIENT_KEYS)
+
+
+def test_select_clients_only_filters_and_keeps_order(installer: ModuleType) -> None:
+    # Order follows CLIENT_KEYS, not the order the user typed.
+    assert installer.select_clients("codex,claude-code", None) == ["claude-code", "codex"]
+
+
+def test_select_clients_skip_excludes(installer: ModuleType) -> None:
+    out = installer.select_clients(None, "cursor,claude-ai")
+    assert "cursor" not in out and "claude-ai" not in out
+    assert "claude-code" in out and "copilot" in out
+
+
+def test_select_clients_is_case_and_space_insensitive(installer: ModuleType) -> None:
+    assert installer.select_clients(" Copilot , CURSOR ", None) == ["cursor", "copilot"]
+
+
+def test_select_clients_unknown_name_raises(installer: ModuleType) -> None:
+    with pytest.raises(ValueError, match="unknown client"):
+        installer.select_clients("vscode", None)
+
+
+def test_select_clients_only_and_skip_conflict(installer: ModuleType) -> None:
+    with pytest.raises(ValueError, match="either --only or --skip"):
+        installer.select_clients("codex", "cursor")
+
+
+# ── loopback / web-client gating ─────────────────────────────────────────────
+
+
+def test_is_loopback(installer: ModuleType) -> None:
+    assert installer._is_loopback("http://127.0.0.1:8765/mcp")
+    assert installer._is_loopback("http://localhost:8765/mcp")
+    assert not installer._is_loopback("https://my-vault.fly.dev/mcp")
+
+
+def test_detect_clients_gates_claude_ai_on_public_url(installer: ModuleType, home: Path) -> None:
+    # Claude.ai is a cloud web client: usable only against a public URL.
+    assert installer.detect_clients("http://127.0.0.1:8765/mcp")["claude-ai"] is False
+    assert installer.detect_clients("https://vault.example.com/mcp")["claude-ai"] is True
+
+
+# ── interactive picker ───────────────────────────────────────────────────────
+
+
+def _detected_all_but_ai() -> dict[str, bool]:
+    return {
+        "claude-code": True,
+        "codex": True,
+        "cursor": False,
+        "copilot": True,
+        "claude-ai": False,
+    }
+
+
+def test_prompt_empty_input_selects_available(installer: ModuleType) -> None:
+    # Enter / 'a' picks the detected (available) ones, skipping not-founds.
+    out = installer.prompt_clients(_detected_all_but_ai(), input_fn=lambda _: "")
+    assert out == ["claude-code", "codex", "copilot"]
+
+
+def test_prompt_numbers_pick_specific_and_keep_order(installer: ModuleType) -> None:
+    # "2,1" -> claude-code (1) + codex (2), returned in CLIENT_KEYS order.
+    out = installer.prompt_clients(_detected_all_but_ai(), input_fn=lambda _: "2,1")
+    assert out == ["claude-code", "codex"]
+
+
+def test_prompt_quit_returns_empty(installer: ModuleType) -> None:
+    assert installer.prompt_clients(_detected_all_but_ai(), input_fn=lambda _: "q") == []
+
+
+def test_prompt_reprompts_on_garbage_then_accepts(installer: ModuleType) -> None:
+    answers = iter(["nonsense", "copilot"])
+    out = installer.prompt_clients(_detected_all_but_ai(), input_fn=lambda _: next(answers))
+    assert out == ["copilot"]
+
+
 # ── token lookup ─────────────────────────────────────────────────────────────
 
 

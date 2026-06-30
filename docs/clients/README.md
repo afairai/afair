@@ -16,18 +16,28 @@ runs without auth, so there is no token and no header.
 ## The easy path: one command
 
 ```bash
-uv run python scripts/install_clients.py --dry-run   # preview
-uv run python scripts/install_clients.py             # apply
+uv run python scripts/install_clients.py             # interactive picker
+uv run python scripts/install_clients.py --yes        # all detected, no prompt
+uv run python scripts/install_clients.py --only copilot   # just one
+uv run python scripts/install_clients.py --dry-run    # preview, change nothing
 ```
 
 This script:
 
+- On a terminal, shows an **interactive picker** so it never installs everywhere
+  by surprise. Pick by number or name. A piped / CI run (no TTY) installs into
+  all detected clients, and `--yes` does the same without prompting.
+- `--only <a,b>` / `--skip <a,b>` choose non-interactively; `--list` prints the
+  client keys (`claude-code`, `codex`, `cursor`, `copilot`, `claude-ai`).
 - Reads the token from `.env.local`
-- Detects Claude Code, Codex CLI, Cursor, and GitHub Copilot (VS Code) on your machine
-- Writes the MCP server config to each one's settings file
-- Appends the instruction snippet to each one's CLAUDE.md / AGENTS.md / rules
-- Backs up every file it touches (`<path>.bak.<timestamp>`)
-- Is idempotent, running twice is safe
+- Detects Claude Code, Codex CLI, Cursor, and GitHub Copilot (VS Code); writes
+  each one's MCP server config and appends the instruction snippet to its
+  CLAUDE.md / AGENTS.md / rules
+- **Web clients (Claude.ai) are only offered against a public URL.** They run in
+  the vendor's cloud and can't reach your `localhost`, so a local self-host can't
+  serve them, the picker says so and skips them.
+- Backs up every file it touches (`<path>.bak.<timestamp>`); idempotent, running
+  twice is safe
 
 After running, **restart any open MCP clients** (Claude Code, Cursor, etc.)
 to pick up the new server. Claude.ai is UI-only; see [claude-ai.md](claude-ai.md).

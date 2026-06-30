@@ -13,9 +13,18 @@ Idempotent: running again replaces the existing afair entry and does
 not duplicate the instruction snippet. Always backs up any file it changes
 to ``<path>.bak.<timestamp>`` so revert is one ``mv`` away.
 
+On a terminal it shows an interactive picker so it never lands everywhere by
+surprise. A piped / non-TTY run (e.g. `yes | ...`, CI) keeps the old "all
+detected" behaviour. --only / --skip choose non-interactively; --yes forces all.
+
 Usage:
-    uv run python scripts/install_clients.py            # apply
-    uv run python scripts/install_clients.py --dry-run  # preview only
+    uv run python scripts/install_clients.py                  # interactive picker
+    uv run python scripts/install_clients.py --yes            # all detected, no prompt
+    uv run python scripts/install_clients.py --dry-run        # preview only
+    uv run python scripts/install_clients.py --list           # show client keys
+    uv run python scripts/install_clients.py --only copilot   # just one
+    uv run python scripts/install_clients.py --only claude-code,codex
+    uv run python scripts/install_clients.py --skip cursor    # all but one
     URL=... TOKEN=... uv run python scripts/install_clients.py
 """
 
@@ -29,7 +38,11 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ── config ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +51,10 @@ SERVER_NAME = "afair"
 # --url (or the URL env var) for a deployed vault: your Fly app, your own
 # domain, or your hosted afair.ai address.
 DEFAULT_URL = "http://127.0.0.1:8765/mcp"
+
+# Selectable client keys, in install order. `claude-ai` is print-only (its setup
+# is a UI walk-through, not a file write). Used by --only / --skip.
+CLIENT_KEYS: tuple[str, ...] = ("claude-code", "codex", "cursor", "copilot", "claude-ai")
 
 # Idempotency markers: the current snippet heading, plus the legacy wrapper
 # older installs wrote, so re-running never double-appends.
@@ -183,7 +200,7 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
     legacy_path = Path.home() / ".claude" / "settings.json"
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
 
-    if not primary_path.exists() and not legacy_path.exists() and shutil.which("claude") is None:
+    if not _detect_claude_code():
         _skip("Claude Code not detected (no ~/.claude.json, no settings.json, no `claude` in PATH)")
         return []
 
@@ -324,7 +341,7 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     config_path = Path.home() / ".codex" / "config.toml"
     agents_md = Path.home() / ".codex" / "AGENTS.md"
 
-    if not config_path.exists() and shutil.which("codex") is None:
+    if not _detect_codex():
         _skip("Codex CLI not detected (no ~/.codex/config.toml, no `codex` in PATH)")
         return []
 
@@ -375,8 +392,7 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
     mcp_path = Path.home() / ".cursor" / "mcp.json"
     rule_path = Path.home() / ".cursor" / "rules" / "afair.md"
 
-    cursor_app = Path("/Applications/Cursor.app")
-    if not mcp_path.parent.exists() and not cursor_app.exists():
+    if not _detect_cursor():
         _skip("Cursor not detected (no ~/.cursor, no /Applications/Cursor.app)")
         return []
 
@@ -477,11 +493,10 @@ def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
     snippet into. We configure the server globally and print the one manual
     step, the same way Claude.ai is handled.
     """
-    user_dir = _vscode_user_dir()
-    detected = user_dir is not None or VSCODE_APP.exists() or shutil.which("code") is not None
-    if not detected:
+    if not _detect_copilot():
         _skip("GitHub Copilot / VS Code not detected (no Code user dir, no app, no `code` in PATH)")
         return []
+    user_dir = _vscode_user_dir()
     if user_dir is None:
         user_dir = _vscode_user_dir_default()
     mcp_path = user_dir / "mcp.json"
@@ -534,6 +549,18 @@ def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
 
 def print_claude_ai_instructions(url: str) -> None:
     print()
+    if _is_loopback(url):
+        # A cloud web client cannot reach a loopback address. Telling the user
+        # to paste their localhost into Claude.ai would just fail to connect.
+        print(f"  {YELLOW}!{RESET}  Claude.ai (web): can't use your local server.")
+        print()
+        print(f"       Your vault is at {url}, a localhost address. Claude.ai")
+        print("       runs in Anthropic's cloud and cannot reach your machine, so")
+        print("       there is nothing to paste. To use web clients, deploy afair")
+        print("       to a public HTTPS URL (see docs/self-hosting.md), then re-run")
+        print("       this with --url https://your-vault/mcp --only claude-ai.")
+        print("       For local use, the CLI/desktop clients above are the way.")
+        return
     print(f"  {YELLOW}!{RESET}  Claude.ai (web/desktop): UI-only setup, not automatable:")
     print()
     print("       1. Open Claude.ai → Settings → Connectors → Add custom connector")
@@ -545,6 +572,129 @@ def print_claude_ai_instructions(url: str) -> None:
     print()
     print("       Note: Claude.ai bearer-token MCP has had auth bugs (issue #164).")
     print("       If it fails, Claude Code + Codex CLI both work today.")
+
+
+# ── client selection ─────────────────────────────────────────────────────────
+
+
+def select_clients(only: str | None, skip: str | None) -> list[str]:
+    """Resolve --only / --skip into the ordered list of client keys to run.
+
+    Default (neither given) is every key, the historical behaviour. --only and
+    --skip are mutually exclusive. Unknown names raise ValueError listing the
+    valid keys, so a typo fails loudly instead of silently installing nothing.
+    """
+    if only and skip:
+        raise ValueError("pass either --only or --skip, not both")
+    valid = set(CLIENT_KEYS)
+
+    def _parse(raw: str) -> set[str]:
+        names = {n.strip().lower() for n in raw.split(",") if n.strip()}
+        unknown = names - valid
+        if unknown:
+            raise ValueError(
+                f"unknown client(s): {', '.join(sorted(unknown))}. valid: {', '.join(CLIENT_KEYS)}"
+            )
+        return names
+
+    if only:
+        chosen = _parse(only)
+    elif skip:
+        chosen = valid - _parse(skip)
+    else:
+        chosen = valid
+    return [k for k in CLIENT_KEYS if k in chosen]
+
+
+# ── detection + interactive picker ───────────────────────────────────────────
+
+CLIENT_LABELS: dict[str, str] = {
+    "claude-code": "Claude Code",
+    "codex": "Codex CLI",
+    "cursor": "Cursor",
+    "copilot": "GitHub Copilot (VS Code)",
+    "claude-ai": "Claude.ai (web)",
+}
+
+
+def _is_loopback(url: str) -> bool:
+    """True when the MCP URL points at this machine. A web client (Claude.ai,
+    ChatGPT) runs in the vendor's cloud and cannot reach a loopback address, so
+    those clients are only offered against a public URL."""
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _detect_claude_code() -> bool:
+    return (
+        (Path.home() / ".claude.json").exists()
+        or (Path.home() / ".claude" / "settings.json").exists()
+        or shutil.which("claude") is not None
+    )
+
+
+def _detect_codex() -> bool:
+    return (Path.home() / ".codex" / "config.toml").exists() or shutil.which("codex") is not None
+
+
+def _detect_cursor() -> bool:
+    return (Path.home() / ".cursor").exists() or Path("/Applications/Cursor.app").exists()
+
+
+def _detect_copilot() -> bool:
+    return _vscode_user_dir() is not None or VSCODE_APP.exists() or shutil.which("code") is not None
+
+
+def detect_clients(url: str) -> dict[str, bool]:
+    """Which selectable clients are usable right now. The CLI/desktop clients
+    are "detected" if installed; Claude.ai is a web client, so it's usable only
+    when the URL is public (it can't reach your localhost)."""
+    return {
+        "claude-code": _detect_claude_code(),
+        "codex": _detect_codex(),
+        "cursor": _detect_cursor(),
+        "copilot": _detect_copilot(),
+        "claude-ai": not _is_loopback(url),
+    }
+
+
+def prompt_clients(
+    detected: dict[str, bool], *, input_fn: Callable[[str], str] = input
+) -> list[str]:
+    """Interactive picker. Lists every client with its status; the default
+    (empty input or 'a') selects the usable ones. Accepts numbers, names, or
+    'q' to cancel. Returns the chosen keys in CLIENT_KEYS order ([] = cancel)."""
+    keys = list(CLIENT_KEYS)
+    default = [k for k in keys if detected.get(k)]
+    print("Which clients should afair install into?")
+    for i, key in enumerate(keys, 1):
+        if detected.get(key):
+            tag = f"{GREEN}available{RESET}"
+        elif key == "claude-ai":
+            tag = f"{DIM}needs a public URL (can't reach localhost){RESET}"
+        else:
+            tag = f"{DIM}not found{RESET}"
+        print(f"  {i}) {CLIENT_LABELS[key]:<26} {tag}")
+    print()
+    hint = "Numbers (e.g. 1,2), names, 'a' = all available, 'q' = cancel [a]: "
+    while True:
+        raw = input_fn(hint).strip().lower()
+        if raw in {"q", "quit"}:
+            return []
+        if raw in {"", "a", "all"}:
+            return default
+        chosen: set[str] = set()
+        ok = True
+        for tok in raw.replace(",", " ").split():
+            if tok.isdigit() and 1 <= int(tok) <= len(keys):
+                chosen.add(keys[int(tok) - 1])
+            elif tok in CLIENT_KEYS:
+                chosen.add(tok)
+            else:
+                ok = False
+        if ok and chosen:
+            return [k for k in keys if k in chosen]
+        _warn("Didn't understand that. Use numbers, names, 'a', or 'q'.")
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -565,11 +715,69 @@ def main() -> int:
         action="store_true",
         help="Show what would change without writing any files.",
     )
+    parser.add_argument(
+        "--only",
+        default=None,
+        metavar="CLIENT[,CLIENT...]",
+        help=f"Install into only these clients (comma-separated). "
+        f"Valid: {', '.join(CLIENT_KEYS)}. Mutually exclusive with --skip.",
+    )
+    parser.add_argument(
+        "--skip",
+        default=None,
+        metavar="CLIENT[,CLIENT...]",
+        help="Install into every detected client except these (comma-separated). "
+        "Mutually exclusive with --only.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List the selectable client keys and exit.",
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Force the interactive picker (default on a terminal when no "
+        "--only/--skip/--yes is given).",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Don't prompt; install into all detected clients (the old behaviour).",
+    )
     args = parser.parse_args()
+
+    if args.list:
+        print("Selectable clients (use with --only / --skip):")
+        for key in CLIENT_KEYS:
+            print(f"  {key}")
+        return 0
 
     token = _load_token()
     url = args.url or os.environ.get("URL") or DEFAULT_URL
     dry = bool(args.dry_run)
+
+    # Choose targets. Explicit --only/--skip wins. Otherwise prompt on a TTY
+    # (unless --yes), so it never lands everywhere by surprise; a piped/CI run
+    # (no TTY) keeps the old "all detected" behaviour so `yes | ...` still works.
+    try:
+        if args.only or args.skip:
+            selected = select_clients(args.only, args.skip)
+        elif args.interactive or (sys.stdin.isatty() and not args.yes):
+            selected = prompt_clients(detect_clients(url))
+            if not selected:
+                _warn("Cancelled, nothing installed.")
+                return 0
+        else:
+            selected = list(CLIENT_KEYS)
+    except ValueError as e:
+        _err(str(e))
+        return 2
+    if not selected:
+        _warn("No clients selected, nothing to do.")
+        return 0
 
     mode = f"{YELLOW}DRY RUN{RESET}" if dry else f"{GREEN}APPLY{RESET}"
     token_status = (
@@ -578,16 +786,25 @@ def main() -> int:
         else f"{DIM}none, local self-host runs without auth{RESET}"
     )
     print(f"=== afair client installer ({mode}) ===")
-    print(f"  url:   {url}")
-    print(f"  token: {token_status}")
+    print(f"  url:     {url}")
+    print(f"  token:   {token_status}")
+    print(f"  targets: {', '.join(selected)}")
     print()
 
+    # Keyed dispatch so --only / --skip select exactly which run. Order follows
+    # CLIENT_KEYS via `selected`. claude-ai is print-only (UI setup).
+    file_installers = {
+        "claude-code": install_claude_code,
+        "codex": install_codex,
+        "cursor": install_cursor,
+        "copilot": install_copilot,
+    }
     changes: list[Change] = []
-    changes += install_claude_code(token=token, url=url, dry=dry)
-    changes += install_codex(token=token, url=url, dry=dry)
-    changes += install_cursor(token=token, url=url, dry=dry)
-    changes += install_copilot(token=token, url=url, dry=dry)
-    print_claude_ai_instructions(url)
+    for key in selected:
+        if key == "claude-ai":
+            print_claude_ai_instructions(url)
+        else:
+            changes += file_installers[key](token=token, url=url, dry=dry)
 
     print()
     if dry:
