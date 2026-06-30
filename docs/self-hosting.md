@@ -146,11 +146,12 @@ harnesses authenticate by OAuth and who have no standalone API key.
 
 ```bash
 EXTRACTOR_MODEL=github_copilot/gpt-4.1
-VISION_MODEL=github_copilot/gpt-4.1          # only if you remember images
-# Copilot serves chat only, not embeddings, so keep embeddings local:
+# Copilot serves chat only, so embeddings stay local:
 EMBEDDING_MODEL=fastembed/BAAI/bge-small-en-v1.5
 EMBEDDING_DIM=384
-# Leave ANTHROPIC_API_KEY / OPENAI_API_KEY unset.
+# VISION_MODEL / TRANSCRIPTION_MODEL: Copilot has no image/audio models, so
+# leave the defaults (they need an API key) or point them at a local model.
+# Leave ANTHROPIC_API_KEY / OPENAI_API_KEY unset to stay fully keyless on text.
 ```
 
 **One-time login.** On the first call litellm runs GitHub's device flow. afair
@@ -166,9 +167,10 @@ background cold-path) reuses it headless. You authorize once.
 
 **Gotchas:**
 
-- **Embeddings.** A `github_copilot/*` embedding model returns *"Model is not
-  supported"*, Copilot exposes chat models only. Use local `fastembed` for
-  embeddings (above), or an `openai/*` embedding model with an OpenAI key.
+- **Chat only.** Copilot exposes no embedding, vision, or transcription models,
+  a `github_copilot/*` embedding call returns *"Model is not supported"*. So only
+  `EXTRACTOR_MODEL` uses Copilot; use local `fastembed` for embeddings (above),
+  and for images/audio either set a real provider key or skip those memory types.
 - **Model names** follow Copilot's catalogue (`github_copilot/gpt-4.1`,
   `github_copilot/gpt-4o`, `github_copilot/claude-sonnet-4`, ...). Pick one your
   Copilot plan includes.
