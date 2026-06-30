@@ -23,7 +23,7 @@ uv run python scripts/install_clients.py             # apply
 This script:
 
 - Reads the token from `.env.local`
-- Detects Claude Code, Codex CLI, and Cursor on your machine
+- Detects Claude Code, Codex CLI, Cursor, and GitHub Copilot (VS Code) on your machine
 - Writes the MCP server config to each one's settings file
 - Appends the instruction snippet to each one's CLAUDE.md / AGENTS.md / rules
 - Backs up every file it touches (`<path>.bak.<timestamp>`)
@@ -60,6 +60,7 @@ beats a shared static token sitting in config files. Keep the bearer for a
 | [Claude Code (CLI)](claude-code.md) | bearer or OAuth | HTTP transport |
 | [Codex CLI](codex.md) | bearer or OAuth | `~/.codex/config.toml` |
 | [Cursor](cursor.md) | bearer or OAuth | `.cursor/mcp.json` |
+| [GitHub Copilot (VS Code)](copilot.md) | bearer or OAuth | VS Code user `mcp.json` (agent mode) |
 | [Claude.ai (web/desktop)](claude-ai.md) | OAuth | Custom Connector UI |
 | [ChatGPT (web)](chatgpt.md) | OAuth (plan-gated) | Connectors / Developer mode |
 | [Perplexity (web)](perplexity.md) | OAuth (plan-gated) | Connectors |

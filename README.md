@@ -80,7 +80,7 @@ uv run python -m afair
 ```
 
 The server comes up on `http://127.0.0.1:8765`. Point a CLI or desktop client
-(Claude Code, Codex, Cursor) at it, connect, and you are done. Web clients that
+(Claude Code, Codex, Cursor, GitHub Copilot) at it, connect, and you are done. Web clients that
 run in the cloud (Claude.ai, ChatGPT) instead need a public HTTPS deployment and
 a quick OAuth setup, covered in [docs/self-hosting.md](docs/self-hosting.md).
 Every environment variable is documented inline in `.env.example`; per-client
@@ -115,7 +115,9 @@ Instructions, or `.cursorrules`), and it will recall context at the start of a
 conversation, remember what's durable, and observe what it does, without you
 prompting it each time. The same snippet works for every client. For Claude
 Code, Codex, and Cursor, `scripts/install_clients.py` writes both the connection
-config and the snippet for you.
+config and the snippet for you; for GitHub Copilot it writes the connection
+config and prints the one per-repo snippet step (Copilot reads instructions per
+workspace).
 
 ## Works with
 
@@ -144,7 +146,7 @@ The complete design, and the eight invariants that hold it together, live in
 |---|---|
 | [VISION.md](VISION.md) | The full design and the eight invariants. Start here for the why. |
 | [docs/self-hosting.md](docs/self-hosting.md) | Run your own vault: local, Docker, or a public deployment, with the CLI-vs-web client and OAuth setup. |
-| [docs/clients](docs/clients) | Per-client connection guides (Claude Code, Codex, Cursor, Claude.ai, ChatGPT, Perplexity) and the one universal instruction snippet. |
+| [docs/clients](docs/clients) | Per-client connection guides (Claude Code, Codex, Cursor, GitHub Copilot, Claude.ai, ChatGPT, Perplexity) and the one universal instruction snippet. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, the four checks, and the invariants a change cannot break. |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability, and the security model to hold afair against. |
 | [docs/adr](docs/adr) | Architecture Decision Records: why the invariants exist, why the entity graph is a belief layer. |

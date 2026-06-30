@@ -94,6 +94,56 @@ def test_codex_with_token_includes_http_headers(installer: ModuleType, home: Pat
     assert 'Authorization = "Bearer tok123"' in text
 
 
+# ── GitHub Copilot (VS Code mcp.json) ────────────────────────────────────────
+
+
+def _vscode_mcp(home: Path) -> Path:
+    """The macOS VS Code user dir under the (fake) HOME. Creating it makes the
+    installer treat VS Code as detected regardless of the real OS."""
+    return home / "Library" / "Application Support" / "Code" / "User" / "mcp.json"
+
+
+def test_copilot_local_no_token_uses_servers_key_and_omits_auth(
+    installer: ModuleType, home: Path
+) -> None:
+    mcp = _vscode_mcp(home)
+    mcp.parent.mkdir(parents=True)  # so VS Code is "detected"
+    installer.install_copilot(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    cfg = json.loads(mcp.read_text())
+    # VS Code uses the top-level "servers" key, NOT "mcpServers" like Cursor.
+    assert "mcpServers" not in cfg
+    entry = cfg["servers"]["afair"]
+    assert entry == {"type": "http", "url": "http://127.0.0.1:8765/mcp"}
+    assert "headers" not in entry
+
+
+def test_copilot_with_token_includes_auth(installer: ModuleType, home: Path) -> None:
+    mcp = _vscode_mcp(home)
+    mcp.parent.mkdir(parents=True)
+    installer.install_copilot(token="tok123", url="https://x.fly.dev/mcp", dry=False)
+    entry = json.loads(mcp.read_text())["servers"]["afair"]
+    assert entry["url"] == "https://x.fly.dev/mcp"
+    assert entry["headers"] == {"Authorization": "Bearer tok123"}
+
+
+def test_copilot_preserves_existing_servers(installer: ModuleType, home: Path) -> None:
+    mcp = _vscode_mcp(home)
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text(json.dumps({"servers": {"other": {"type": "http", "url": "http://x/mcp"}}}))
+    installer.install_copilot(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    servers = json.loads(mcp.read_text())["servers"]
+    assert set(servers) == {"other", "afair"}  # existing entry untouched
+
+
+def test_copilot_skips_when_vscode_absent(installer: ModuleType, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No VS Code user dir (none created), no app bundle, no `code` on PATH.
+    monkeypatch.setattr(installer.shutil, "which", lambda _: None)
+    monkeypatch.setattr(installer, "VSCODE_APP", home / "nope" / "VSCode.app")
+    changes = installer.install_copilot(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    assert changes == []
+    assert not _vscode_mcp(home).exists()
+
+
 # ── token lookup ─────────────────────────────────────────────────────────────
 
 

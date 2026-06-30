@@ -3,10 +3,11 @@
 
 Detects and configures (only when the client looks installed):
 
-  - Claude Code  → ~/.claude/settings.json + ~/.claude/CLAUDE.md
-  - Codex CLI    → ~/.codex/config.toml    + ~/.codex/AGENTS.md
-  - Cursor       → ~/.cursor/mcp.json      + ~/.cursor/rules/afair.md
-  - Claude.ai    → UI only; prints manual steps
+  - Claude Code    → ~/.claude/settings.json + ~/.claude/CLAUDE.md
+  - Codex CLI      → ~/.codex/config.toml    + ~/.codex/AGENTS.md
+  - Cursor         → ~/.cursor/mcp.json      + ~/.cursor/rules/afair.md
+  - GitHub Copilot → VS Code user mcp.json   + prints per-repo snippet step
+  - Claude.ai      → UI only; prints manual steps
 
 Idempotent: running again replaces the existing afair entry and does
 not duplicate the instruction snippet. Always backs up any file it changes
@@ -422,6 +423,112 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
     return changes
 
 
+# ── GitHub Copilot (VS Code) ────────────────────────────────────────────────
+
+# macOS app bundle, checked as one of the VS Code detection signals. Module-
+# level so tests can point it at a nonexistent path.
+VSCODE_APP = Path("/Applications/Visual Studio Code.app")
+
+
+def _vscode_user_dir() -> Path | None:
+    """The VS Code (stable) user-profile dir, per OS, if it exists.
+
+    macOS:   ~/Library/Application Support/Code/User
+    Linux:   ~/.config/Code/User
+    Windows: %APPDATA%/Code/User
+
+    Returns the first that exists, else None (caller falls back to the
+    platform default when VS Code is detected another way).
+    """
+    home = Path.home()
+    candidates = [
+        home / "Library" / "Application Support" / "Code" / "User",
+        home / ".config" / "Code" / "User",
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "Code" / "User")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _vscode_user_dir_default() -> Path:
+    """Where VS Code's user mcp.json should live on this OS, even if the
+    profile dir doesn't exist yet (VS Code detected via app bundle / PATH)."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Code" / "User"
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "Code" / "User"
+    return home / ".config" / "Code" / "User"
+
+
+def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
+    """GitHub Copilot reads MCP servers through VS Code's agent mode from a
+    user-level ``mcp.json`` (VS Code 1.102+). Note the format differs from
+    Cursor: the top-level key is ``servers`` (not ``mcpServers``), and a remote
+    streamable-HTTP server uses ``"type": "http"``.
+
+    Copilot's *instructions* are per-workspace (``.github/copilot-instructions.md``
+    or a repo-root ``AGENTS.md``), so there is no global file to write the
+    snippet into. We configure the server globally and print the one manual
+    step, the same way Claude.ai is handled.
+    """
+    user_dir = _vscode_user_dir()
+    detected = user_dir is not None or VSCODE_APP.exists() or shutil.which("code") is not None
+    if not detected:
+        _skip("GitHub Copilot / VS Code not detected (no Code user dir, no app, no `code` in PATH)")
+        return []
+    if user_dir is None:
+        user_dir = _vscode_user_dir_default()
+    mcp_path = user_dir / "mcp.json"
+
+    changes: list[Change] = []
+
+    config: dict[str, Any] = {}
+    if mcp_path.exists():
+        existing_text = mcp_path.read_text().strip()
+        if existing_text:
+            try:
+                config = json.loads(existing_text)
+            except json.JSONDecodeError as e:
+                _err(f"GitHub Copilot: VS Code mcp.json is malformed: {e}")
+                return []
+
+    servers = config.setdefault("servers", {})
+    desired: dict[str, Any] = {"type": "http", "url": url}
+    if token:
+        desired["headers"] = {"Authorization": f"Bearer {token}"}
+
+    if servers.get(SERVER_NAME) == desired:
+        _ok("GitHub Copilot: VS Code mcp.json already up to date")
+    else:
+        backup = _backup(mcp_path, dry)
+        if not dry:
+            servers[SERVER_NAME] = desired
+            mcp_path.parent.mkdir(parents=True, exist_ok=True)
+            mcp_path.write_text(json.dumps(config, indent=2) + "\n")
+        action = "would write" if dry else "wrote"
+        msg = f"GitHub Copilot: {action} {mcp_path}"
+        if backup:
+            msg += f" (backup: {backup.name})"
+        _ok(msg)
+        changes.append(Change("config", mcp_path, action))
+
+    print()
+    _warn("GitHub Copilot: enable agent mode and add the snippet per repo:")
+    print("       1. VS Code → Copilot Chat → switch the mode dropdown to Agent.")
+    print("       2. The afair tools appear under the tools picker; enable them.")
+    print("       3. For autonomous recall/remember, add the instruction snippet to")
+    print("          your repo's .github/copilot-instructions.md (or a repo-root")
+    print("          AGENTS.md). The snippet is in docs/clients/_snippet.md.")
+
+    return changes
+
+
 # ── Claude.ai ───────────────────────────────────────────────────────────────
 
 
@@ -479,6 +586,7 @@ def main() -> int:
     changes += install_claude_code(token=token, url=url, dry=dry)
     changes += install_codex(token=token, url=url, dry=dry)
     changes += install_cursor(token=token, url=url, dry=dry)
+    changes += install_copilot(token=token, url=url, dry=dry)
     print_claude_ai_instructions(url)
 
     print()
