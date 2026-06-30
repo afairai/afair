@@ -135,7 +135,9 @@ def test_copilot_preserves_existing_servers(installer: ModuleType, home: Path) -
     assert set(servers) == {"other", "afair"}  # existing entry untouched
 
 
-def test_copilot_skips_when_vscode_absent(installer: ModuleType, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_copilot_skips_when_vscode_absent(
+    installer: ModuleType, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # No VS Code user dir (none created), no app bundle, no `code` on PATH.
     monkeypatch.setattr(installer.shutil, "which", lambda _: None)
     monkeypatch.setattr(installer, "VSCODE_APP", home / "nope" / "VSCode.app")
