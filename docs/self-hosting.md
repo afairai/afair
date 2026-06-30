@@ -23,11 +23,54 @@ uv run python -m afair
 ```
 
 The server listens on `http://127.0.0.1:8765`. Point a CLI or desktop MCP
-client at it (Claude Code, Codex, Cursor; see [docs/clients](clients)) and you
-are done. Locally you need no auth and no encryption key. Web clients
-(Claude.ai, ChatGPT) are a separate case: they run in the vendor's cloud, so a
-local server cannot serve them (see [Connecting clients](#connecting-clients-cli-vs-web)
-below).
+client at it (Claude Code, Codex, Cursor, GitHub Copilot; see
+[docs/clients](clients)) and you are done. Locally you need no auth and no
+encryption key. Web clients (Claude.ai, ChatGPT) are a separate case: they run
+in the vendor's cloud, so a local server cannot serve them (see
+[Connecting clients](#connecting-clients-cli-vs-web) below).
+
+## How many API keys do I need?
+
+**One is enough.** afair needs its own LLM key for the structuring layer (the
+cold-path agents that extract entities and decide salience), independent of
+whatever your coding agent signs in with. The MCP connection itself needs no key
+at all; without an LLM key afair still stores and recalls everything verbatim,
+it just doesn't auto-organize.
+
+afair has four model roles. Each points at a litellm model via a `*_MODEL`
+variable, and you only need keys for the providers those models actually use:
+
+| Role | Default model | Provider key | Needed when |
+|---|---|---|---|
+| `EXTRACTOR_MODEL` (text structuring) | `anthropic/claude-haiku-4-5` | `ANTHROPIC_API_KEY` | the core "organizes itself" |
+| `VISION_MODEL` (images) | `anthropic/claude-haiku-4-5` | `ANTHROPIC_API_KEY` (same) | only if you remember images |
+| `EMBEDDING_MODEL` (semantic recall) | `openai/text-embedding-3-small` | `OPENAI_API_KEY` | only if `SEMANTIC_RECALL_ENABLED=true` |
+| `TRANSCRIPTION_MODEL` (audio) | `openai/whisper-1` | `OPENAI_API_KEY` (same) | only if you remember audio |
+
+**With the defaults: two keys** (Anthropic for extraction + vision, OpenAI for
+embeddings + transcription). The one OpenAI key covers both OpenAI roles, and the
+one Anthropic key covers both Anthropic roles. This split is the quality default,
+not a requirement.
+
+**To run on a single key**, point every role at one provider:
+
+- **All OpenAI (simplest):** set `EXTRACTOR_MODEL` and `VISION_MODEL` to
+  `openai/gpt-4o-mini`. One `OPENAI_API_KEY` then covers text, vision, embeddings,
+  and audio, the whole product.
+- **All Anthropic:** one `ANTHROPIC_API_KEY` covers text + vision, but Anthropic
+  ships no embeddings, so set `SEMANTIC_RECALL_ENABLED=false` (recall falls back
+  to FTS/keyword) and skip audio.
+
+If your harness logs in with OAuth and you have no standalone API key, that's
+fine for the MCP connection, but the structuring stays off until you add one of
+the keys above. The cheapest path to the full experience is a single OpenAI key
+with every role pointed at OpenAI.
+
+**Zero keys, fully local:** point the roles at Ollama models (e.g.
+`EXTRACTOR_MODEL=ollama/llama3.3`) and run an [Ollama](https://ollama.com) server.
+litellm talks to it locally, so the structuring runs with no provider key and no
+data leaving your machine. Quality is lower than the hosted models, but nothing
+is sent to a vendor.
 
 ## What it stores, and where
 
