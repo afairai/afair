@@ -870,6 +870,39 @@ SCHEMA_DDL: tuple[str, ...] = (
            ) AS kind_slug
     FROM entities e
     """,
+    # ── proposed_ontology_revisions: the Schema-Evolver quarantine queue ─────
+    # ADR-0003 Phase 4. MUTABLE derived state by the same documented exception
+    # as proposed_corrections: a regenerable suggestion queue, not a belief —
+    # the evolver re-derives it from usage signals, a decision updates its
+    # status, and the *applied* revision (kind_registry / kind_revisions /
+    # entity_kind_assignments rows, Phase 5) is the append-only part. No I2
+    # trigger pair on purpose. proposed_corrections cannot host these rows:
+    # its CHECK (kind IN ('retype','merge','merge_review')) is frozen and its
+    # rows are entity-keyed, while these are ontology-keyed. Row ids carry an
+    # 'ont_' prefix so the Phase-5 decide loop can dispatch on id shape.
+    # One open proposal per (action, subject_slug) — re-running the evolver
+    # won't duplicate or overwrite a decided one (INSERT OR IGNORE on the
+    # UNIQUE), same discipline as proposed_corrections.
+    """
+    CREATE TABLE IF NOT EXISTS proposed_ontology_revisions (
+        id            TEXT PRIMARY KEY,
+        action        TEXT NOT NULL CHECK (action IN
+                          ('add','rename','merge','split','deprecate')),
+        subject_slug  TEXT NOT NULL,
+        detail        TEXT NOT NULL,
+        evidence      TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed','confirmed','rejected','applied')),
+        decided_at    TEXT,
+        decided_by    TEXT,
+        UNIQUE(action, subject_slug)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS proposed_ontology_revisions_status_idx "
+    "ON proposed_ontology_revisions(status, detected_at DESC)",
 )
 
 

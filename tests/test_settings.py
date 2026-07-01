@@ -152,6 +152,7 @@ _PER_AGENT_MODEL_FIELDS = (
     "consolidator_model",
     "entity_articles_model",
     "temporal_model",
+    "schema_evolver_model",
 )
 
 _PER_AGENT_ENV_VARS = (*(f.upper() for f in _PER_AGENT_MODEL_FIELDS), "JUDGE_PANEL")

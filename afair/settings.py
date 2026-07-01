@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     consolidator_model: str = ""
     entity_articles_model: str = ""
     temporal_model: str = ""
+    # Schema-Evolver (ADR-0003 Phase 4). VISION §6.5 earmarks this worker
+    # for a premium model — a Sonnet-class override is recommended once
+    # the proposals matter; the default keeps it on the cheap tier.
+    schema_evolver_model: str = ""
 
     # Judge panel for the self-improvement tuner (Phase B). Comma-separated
     # litellm model strings. Blank keeps the built-in three-vendor default
@@ -349,6 +353,7 @@ class Settings(BaseSettings):
             "consolidator_model",
             "entity_articles_model",
             "temporal_model",
+            "schema_evolver_model",
         )
         for field_name in per_agent_fields:
             value = getattr(self, field_name).strip()

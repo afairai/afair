@@ -178,6 +178,37 @@ REGISTRY: tuple[TunableSpec, ...] = (
         bounded_delta=0.20,
         rationale="Only events at or above this salience are included in the daily roundup.",
     ),
+    # ── schema evolver (ADR-0003 Phase 4) ─────────────────────────────
+    # Only the two signal THRESHOLDS are tunable. The evolver's guardrails
+    # (per-cycle caps, the 30-day cooldown, the slug format, sample
+    # binding) are hard constants in agents/schema_evolver.py — per I7 the
+    # worker's own fences stay off the self-modification surface.
+    TunableSpec(
+        worker="schema_evolver",
+        tunable="other_share_threshold",
+        kind="float",
+        default=0.20,
+        min_value=0.05,
+        max_value=0.60,
+        bounded_delta=0.20,
+        rationale=(
+            "Share of live entities in 'other' above which the evolver proposes "
+            "carving a new kind out of it."
+        ),
+    ),
+    TunableSpec(
+        worker="schema_evolver",
+        tunable="promote_min_entities",
+        kind="int",
+        default=10,
+        min_value=3,
+        max_value=100,
+        bounded_delta=0.30,
+        rationale=(
+            "Distinct entities a normalized-away raw kind must recur on before "
+            "the evolver proposes promoting it to a registry kind."
+        ),
+    ),
     # NOTE: extractor prompt-variant pools (per kind: text / pdf / audio
     # / vision) are intentionally NOT in the initial whitelist. They
     # need a separate "prompt variant pool" plumbing (Phase C) before

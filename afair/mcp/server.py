@@ -38,6 +38,7 @@ from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.rollback_monitor import RollbackMonitor
 from ..agents.salience import SalienceWorker
+from ..agents.schema_evolver import SchemaEvolver
 from ..agents.temporal import TemporalWorker
 from ..agents.tuner import Tuner
 from ..substrate import start_checkpoint_loop
@@ -132,6 +133,11 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityArticleWorker(),
                 TemporalWorker(),
                 SalienceWorker(),
+                # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
+                # kind-usage + kind_observations signals daily and drafts
+                # bounded ontology-revision proposals into the quarantine
+                # queue; nothing is applied without the operator (Phase 5).
+                SchemaEvolver(),
                 ModeSwitcher(),
                 # Self-improvement tuner — observation mode (Phase B
                 # held at promote_enabled=False until a ground-truth
