@@ -276,6 +276,126 @@ def test_prompt_reprompts_on_garbage_then_accepts(installer: ModuleType) -> None
     assert out == ["copilot"]
 
 
+# ── URL preservation (don't repoint a vault on a snippet refresh) ────────────
+
+
+def test_pick_url_keeps_existing_when_not_explicit(installer: ModuleType) -> None:
+    got = installer._pick_url(
+        "https://v.fly.dev/mcp", "http://127.0.0.1:8765/mcp", url_explicit=False, label="x"
+    )
+    assert got == "https://v.fly.dev/mcp"
+
+
+def test_pick_url_explicit_overrides(installer: ModuleType) -> None:
+    got = installer._pick_url(
+        "https://old.fly.dev/mcp", "https://new.fly.dev/mcp", url_explicit=True, label="x"
+    )
+    assert got == "https://new.fly.dev/mcp"
+
+
+def test_pick_url_uses_default_when_no_existing(installer: ModuleType) -> None:
+    got = installer._pick_url(None, "http://127.0.0.1:8765/mcp", url_explicit=False, label="x")
+    assert got == "http://127.0.0.1:8765/mcp"
+
+
+def test_cursor_keeps_vault_url_on_default_rerun(installer: ModuleType, home: Path) -> None:
+    # The real footgun: re-running with the localhost default must NOT reset a
+    # client that already points at a deployed vault.
+    mcp = home / ".cursor" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": {"afair": {"type": "http", "url": "https://myvault.fly.dev/mcp"}}}
+        )
+    )
+    installer.install_cursor(
+        token="", url="http://127.0.0.1:8765/mcp", dry=False, url_explicit=False
+    )
+    assert (
+        json.loads(mcp.read_text())["mcpServers"]["afair"]["url"] == "https://myvault.fly.dev/mcp"
+    )
+
+
+def test_cursor_explicit_url_overrides_existing(installer: ModuleType, home: Path) -> None:
+    mcp = home / ".cursor" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text(
+        json.dumps({"mcpServers": {"afair": {"type": "http", "url": "https://old.fly.dev/mcp"}}})
+    )
+    installer.install_cursor(token="", url="https://new.fly.dev/mcp", dry=False, url_explicit=True)
+    assert json.loads(mcp.read_text())["mcpServers"]["afair"]["url"] == "https://new.fly.dev/mcp"
+
+
+def test_gemini_cli_keeps_vault_url_field_on_default_rerun(
+    installer: ModuleType, home: Path
+) -> None:
+    # Same preservation, via the shared helper + a non-'url' field name.
+    (home / ".gemini").mkdir()
+    settings = home / ".gemini" / "settings.json"
+    settings.write_text(
+        json.dumps({"mcpServers": {"afair": {"httpUrl": "https://myvault.fly.dev/mcp"}}})
+    )
+    installer.install_gemini_cli(
+        token="", url="http://127.0.0.1:8765/mcp", dry=False, url_explicit=False
+    )
+    assert (
+        json.loads(settings.read_text())["mcpServers"]["afair"]["httpUrl"]
+        == "https://myvault.fly.dev/mcp"
+    )
+
+
+# ── snippet: append / current / update-or-ask ────────────────────────────────
+
+
+def test_ensure_snippet_appends_when_missing(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text("# My rules\n")
+    ch = installer._ensure_snippet(md, dry=False, update="no")
+    assert ch is not None
+    assert installer.SNIPPET_BODY in md.read_text()
+
+
+def test_ensure_snippet_noop_when_current(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text("# rules\n\n" + installer.SNIPPET_BODY + "\n")
+    assert installer._ensure_snippet(md, dry=False, update="no") is None
+
+
+def test_ensure_snippet_outdated_no_leaves_it(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text("## afair: Persistent Memory Across AI Tools\n\nOLD OUTDATED\n")
+    assert installer._ensure_snippet(md, dry=False, update="no") is None
+    assert "OLD OUTDATED" in md.read_text()  # untouched without consent
+
+
+def test_ensure_snippet_outdated_yes_replaces_block_only(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text(
+        "# top\n\n## afair: Persistent Memory Across AI Tools\n\nOLD\n\n## after\nkeep me\n"
+    )
+    ch = installer._ensure_snippet(md, dry=False, update="yes")
+    text = md.read_text()
+    assert ch is not None and ch.note == "updated"
+    assert "OLD" not in text
+    assert installer.SNIPPET_BODY in text
+    assert "## after\nkeep me" in text  # the sibling section survives
+
+
+def test_ensure_snippet_ask_declined_keeps(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text("## afair: Persistent Memory Across AI Tools\n\nOLD\n")
+    ch = installer._ensure_snippet(md, dry=False, update="ask", input_fn=lambda _: "n")
+    assert ch is None and "OLD" in md.read_text()
+
+
+def test_ensure_snippet_ask_accepted_updates(installer: ModuleType, home: Path) -> None:
+    md = home / "CLAUDE.md"
+    md.write_text("## afair: Persistent Memory Across AI Tools\n\nOLD\n")
+    ch = installer._ensure_snippet(md, dry=False, update="ask", input_fn=lambda _: "y")
+    assert ch is not None
+    assert "OLD" not in md.read_text() and installer.SNIPPET_BODY in md.read_text()
+
+
 # ── token lookup ─────────────────────────────────────────────────────────────
 
 

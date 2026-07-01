@@ -13,9 +13,11 @@ Detects and configures (only when the client looks installed):
   - Antigravity        → ~/.gemini/config/mcp_config.json    + snippet note
   - Claude.ai          → UI only; prints manual steps
 
-Idempotent: running again replaces the existing afair entry and does
-not duplicate the instruction snippet. Always backs up any file it changes
-to ``<path>.bak.<timestamp>`` so revert is one ``mv`` away.
+Idempotent and safe to re-run. Without an explicit --url it keeps whatever
+URL a client already points at (so refreshing the snippet never repoints your
+deployed vault); an outdated snippet is left alone unless you confirm (on a
+TTY) or pass --update-snippet. Always backs up any file it changes to
+``<path>.bak.<timestamp>`` so revert is one ``mv`` away.
 
 On a terminal it shows an interactive picker so it never lands everywhere by
 surprise. A piped / non-TTY run (e.g. `yes | ...`, CI) keeps the old "all
@@ -29,6 +31,8 @@ Usage:
     uv run python scripts/install_clients.py --only copilot   # just one
     uv run python scripts/install_clients.py --only claude-code,codex
     uv run python scripts/install_clients.py --skip cursor    # all but one
+    uv run python scripts/install_clients.py --update-snippet # refresh the prompt
+    URL=https://your-vault/mcp uv run python scripts/install_clients.py  # set/keep URL
     URL=... TOKEN=... uv run python scripts/install_clients.py
 """
 
@@ -185,27 +189,106 @@ def _load_token() -> str:
     return ""
 
 
-def _append_snippet_if_missing(path: Path, *, dry: bool) -> Change | None:
-    """Append the instruction block to a CLAUDE.md / AGENTS.md / rules file.
-
-    Idempotent: skips if any known snippet marker is already present. The block
-    is self-headed (it starts with its own H2), so it drops in as-is.
-    """
-    if path.exists() and any(m in path.read_text() for m in SNIPPET_MARKERS):
+def _read_json_url(path: Path, top_key: str, url_field: str = "url") -> str | None:
+    """The existing afair server URL in a JSON config (or None). ``url_field``
+    varies per client: 'url' (Claude/Cursor/VS Code/Copilot CLI), 'httpUrl'
+    (Gemini CLI), 'serverUrl' (Windsurf/Antigravity)."""
+    if not path.exists():
         return None
-    block = f"\n\n{SNIPPET_BODY}\n"
+    try:
+        cfg = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        return None
+    entry = cfg.get(top_key, {}).get(SERVER_NAME)
+    return entry.get(url_field) if isinstance(entry, dict) else None
+
+
+def _pick_url(existing_url: str | None, url: str, *, url_explicit: bool, label: str) -> str:
+    """The URL to write for a client. An explicit --url/URL always wins. Without
+    one, an existing non-matching URL is kept (and a warning printed) instead of
+    being reset to the localhost default, so re-running the installer just to
+    refresh the snippet never silently repoints your deployed vault."""
+    if not url_explicit and existing_url and existing_url != url:
+        _warn(f"{label}: keeping existing URL {existing_url} (pass --url to change it)")
+        return existing_url
+    return url
+
+
+def _replace_snippet_block(text: str) -> str:
+    """Swap an existing afair snippet section for the current SNIPPET_BODY. The
+    snippet is one self-headed H2; the block runs from its heading to the next
+    sibling H2 (``\\n## ``) or end of file."""
+    for marker in SNIPPET_MARKERS:
+        idx = text.find(marker)
+        if idx == -1:
+            continue
+        line_start = text.rfind("\n", 0, idx)
+        start = 0 if line_start == -1 else line_start + 1
+        nxt = text.find("\n## ", idx + len(marker))
+        end = len(text) if nxt == -1 else nxt + 1
+        return text[:start] + SNIPPET_BODY + "\n" + text[end:]
+    return text
+
+
+def _ensure_snippet(
+    path: Path,
+    *,
+    dry: bool,
+    update: str = "no",
+    input_fn: Callable[[str], str] = input,
+) -> Change | None:
+    """Keep the instruction snippet in a CLAUDE.md / AGENTS.md / rules file
+    present and current. Prints its own status; returns a Change for accounting.
+
+    - missing            -> append the current block.
+    - already current    -> no-op.
+    - present, outdated  -> refresh, gated by `update`: 'yes' rewrites, 'ask'
+      prompts (interactive), 'no' warns and leaves it, so a plain re-run never
+      rewrites the prompt without consent.
+    """
+    text = path.read_text() if path.exists() else ""
+    present = bool(text) and any(m in text for m in SNIPPET_MARKERS)
+
+    if not present:
+        if dry:
+            _ok(f"snippet: would append to {path}")
+            return Change("snippet", path, "would append")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(f"\n\n{SNIPPET_BODY}\n")
+        _ok(f"snippet: appended to {path}")
+        return Change("snippet", path, "appended")
+
+    if SNIPPET_BODY.strip() in text:
+        _ok(f"snippet: already current in {path}")
+        return None
+
+    # present but outdated
+    if update == "no":
+        _warn(
+            f"snippet: {path} is outdated (pass --update-snippet or run interactively to refresh)"
+        )
+        return None
+    if update == "ask":
+        ans = input_fn(f"  afair snippet in {path} is outdated. Update it? [y/N]: ").strip().lower()
+        if ans not in {"y", "yes"}:
+            _skip(f"snippet: left {path} unchanged")
+            return None
     if dry:
-        return Change("snippet", path, "would append")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
-        f.write(block)
-    return Change("snippet", path, "appended")
+        _ok(f"snippet: would update {path}")
+        return Change("snippet", path, "would update")
+    _backup(path, dry)
+    path.write_text(_replace_snippet_block(text))
+    _ok(f"snippet: updated {path}")
+    return Change("snippet", path, "updated")
 
 
 # ── Claude Code ─────────────────────────────────────────────────────────────
 
 
-def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_claude_code(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     # Recent Claude Code reads MCP servers from ~/.claude.json (the user-level
     # config). Older guidance also pointed at ~/.claude/settings.json. We
     # write the MCP entry into both so the server is picked up across
@@ -217,6 +300,9 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
     if not _detect_claude_code():
         _skip("Claude Code not detected (no ~/.claude.json, no settings.json, no `claude` in PATH)")
         return []
+
+    existing_url = _read_json_url(primary_path, "mcpServers")
+    url = _pick_url(existing_url, url, url_explicit=url_explicit, label="Claude Code")
 
     changes: list[Change] = []
     desired: dict[str, Any] = {"type": "http", "url": url}
@@ -251,12 +337,8 @@ def install_claude_code(*, token: str, url: str, dry: bool) -> list[Change]:
         _ok(msg)
         changes.append(Change("settings", path, action))
 
-    snippet_change = _append_snippet_if_missing(claude_md, dry=dry)
-    if snippet_change is None:
-        _ok(f"Claude Code: {claude_md} already contains the snippet")
-    else:
-        action = "would append" if dry else "appended"
-        _ok(f"Claude Code: {action} snippet to {claude_md}")
+    snippet_change = _ensure_snippet(claude_md, dry=dry, update=snippet_update)
+    if snippet_change is not None:
         changes.append(snippet_change)
 
     # Phase 2 #3: SessionStart lifecycle hook for auto-loaded vault context.
@@ -351,7 +433,9 @@ def _install_session_start_hook(*, token: str, url: str, dry: bool) -> list[Chan
 # ── Codex CLI ───────────────────────────────────────────────────────────────
 
 
-def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_codex(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     config_path = Path.home() / ".codex" / "config.toml"
     agents_md = Path.home() / ".codex" / "AGENTS.md"
 
@@ -371,10 +455,10 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
     marker = f"[mcp_servers.{SERVER_NAME}]"
 
     if marker in existing:
-        _ok(f"Codex: config.toml already has [{marker}] block")
-        # Note: we don't surgically replace an existing TOML block on this
-        # pass: leave it to the user to remove and re-run if they want a
-        # fresh value. Avoids brittle in-place TOML editing.
+        # We don't surgically rewrite an existing TOML block (avoids brittle
+        # in-place TOML editing), which also means Codex's URL is never
+        # clobbered on a re-run. To change it, remove the block and re-run.
+        _ok(f"Codex: config.toml already has [{marker}] block (url unchanged)")
     else:
         backup = _backup(config_path, dry)
         if not dry:
@@ -388,12 +472,8 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
         _ok(msg)
         changes.append(Change("config", config_path, action))
 
-    snippet_change = _append_snippet_if_missing(agents_md, dry=dry)
-    if snippet_change is None:
-        _ok(f"Codex: {agents_md} already contains the snippet")
-    else:
-        action = "would append" if dry else "appended"
-        _ok(f"Codex: {action} snippet to {agents_md}")
+    snippet_change = _ensure_snippet(agents_md, dry=dry, update=snippet_update)
+    if snippet_change is not None:
         changes.append(snippet_change)
 
     return changes
@@ -402,7 +482,9 @@ def install_codex(*, token: str, url: str, dry: bool) -> list[Change]:
 # ── Cursor ──────────────────────────────────────────────────────────────────
 
 
-def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_cursor(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     mcp_path = Path.home() / ".cursor" / "mcp.json"
     rule_path = Path.home() / ".cursor" / "rules" / "afair.md"
 
@@ -423,6 +505,13 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
                 return []
 
     mcp_servers = config.setdefault("mcpServers", {})
+    existing = mcp_servers.get(SERVER_NAME)
+    url = _pick_url(
+        existing.get("url") if isinstance(existing, dict) else None,
+        url,
+        url_explicit=url_explicit,
+        label="Cursor",
+    )
     desired: dict[str, Any] = {"type": "http", "url": url}
     if token:
         desired["headers"] = {"Authorization": f"Bearer {token}"}
@@ -442,12 +531,8 @@ def install_cursor(*, token: str, url: str, dry: bool) -> list[Change]:
         _ok(msg)
         changes.append(Change("config", mcp_path, action))
 
-    snippet_change = _append_snippet_if_missing(rule_path, dry=dry)
-    if snippet_change is None:
-        _ok(f"Cursor: {rule_path} already contains the snippet")
-    else:
-        action = "would write" if dry else "wrote"
-        _ok(f"Cursor: {action} snippet at {rule_path}")
+    snippet_change = _ensure_snippet(rule_path, dry=dry, update=snippet_update)
+    if snippet_change is not None:
         changes.append(snippet_change)
 
     return changes
@@ -496,7 +581,9 @@ def _vscode_user_dir_default() -> Path:
     return home / ".config" / "Code" / "User"
 
 
-def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_copilot(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     """GitHub Copilot reads MCP servers through VS Code's agent mode from a
     user-level ``mcp.json`` (VS Code 1.102+). Note the format differs from
     Cursor: the top-level key is ``servers`` (not ``mcpServers``), and a remote
@@ -528,6 +615,13 @@ def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
                 return []
 
     servers = config.setdefault("servers", {})
+    existing = servers.get(SERVER_NAME)
+    url = _pick_url(
+        existing.get("url") if isinstance(existing, dict) else None,
+        url,
+        url_explicit=url_explicit,
+        label="GitHub Copilot",
+    )
     desired: dict[str, Any] = {"type": "http", "url": url}
     if token:
         desired["headers"] = {"Authorization": f"Bearer {token}"}
@@ -575,13 +669,21 @@ ANTIGRAVITY_APP = Path("/Applications/Antigravity.app")
 
 
 def _write_mcpservers_entry(
-    *, label: str, path: Path, entry: dict[str, Any], dry: bool
+    *,
+    label: str,
+    path: Path,
+    entry: dict[str, Any],
+    url_field: str,
+    url_explicit: bool,
+    dry: bool,
 ) -> list[Change]:
     """Merge the afair entry into a ``{"mcpServers": {...}}`` JSON file.
 
     Shared by the clients that use that schema; only the per-client ``entry``
     shape (url vs httpUrl vs serverUrl, etc.) differs. Existing servers are
-    preserved, the file is backed up, and a matching entry is a no-op."""
+    preserved, the file is backed up, and a matching entry is a no-op. Without
+    an explicit --url, an existing non-matching URL under ``url_field`` is kept
+    rather than reset to the default."""
     config: dict[str, Any] = {}
     if path.exists():
         text = path.read_text().strip()
@@ -592,6 +694,13 @@ def _write_mcpservers_entry(
                 _err(f"{label}: {path} is malformed: {e}")
                 return []
     servers = config.setdefault("mcpServers", {})
+    existing = servers.get(SERVER_NAME)
+    entry[url_field] = _pick_url(
+        existing.get(url_field) if isinstance(existing, dict) else None,
+        entry[url_field],
+        url_explicit=url_explicit,
+        label=label,
+    )
     if servers.get(SERVER_NAME) == entry:
         _ok(f"{label}: {path.name} already up to date")
         return []
@@ -632,7 +741,9 @@ def _detect_antigravity() -> bool:
     return (Path.home() / ".gemini" / "config").exists() or ANTIGRAVITY_APP.exists()
 
 
-def install_copilot_cli(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_copilot_cli(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     if not _detect_copilot_cli():
         _skip("GitHub Copilot CLI not detected (no ~/.copilot, no `copilot` in PATH)")
         return []
@@ -640,12 +751,21 @@ def install_copilot_cli(*, token: str, url: str, dry: bool) -> list[Change]:
     entry: dict[str, Any] = {"type": "http", "url": url, "tools": ["*"]}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
-    changes = _write_mcpservers_entry(label="GitHub Copilot CLI", path=path, entry=entry, dry=dry)
+    changes = _write_mcpservers_entry(
+        label="GitHub Copilot CLI",
+        path=path,
+        entry=entry,
+        url_field="url",
+        url_explicit=url_explicit,
+        dry=dry,
+    )
     _snippet_note("GitHub Copilot CLI", "a repo .github/copilot-instructions.md or AGENTS.md")
     return changes
 
 
-def install_gemini_cli(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_gemini_cli(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     if not _detect_gemini_cli():
         _skip("Gemini CLI not detected (no ~/.gemini/settings.json, no `gemini` in PATH)")
         return []
@@ -654,12 +774,21 @@ def install_gemini_cli(*, token: str, url: str, dry: bool) -> list[Change]:
     entry: dict[str, Any] = {"httpUrl": url}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
-    changes = _write_mcpservers_entry(label="Gemini CLI", path=path, entry=entry, dry=dry)
+    changes = _write_mcpservers_entry(
+        label="Gemini CLI",
+        path=path,
+        entry=entry,
+        url_field="httpUrl",
+        url_explicit=url_explicit,
+        dry=dry,
+    )
     _snippet_note("Gemini CLI", "~/.gemini/GEMINI.md")
     return changes
 
 
-def install_windsurf(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_windsurf(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     if not _detect_windsurf():
         _skip("Windsurf not detected (no ~/.codeium/windsurf, no /Applications/Windsurf.app)")
         return []
@@ -668,12 +797,21 @@ def install_windsurf(*, token: str, url: str, dry: bool) -> list[Change]:
     entry: dict[str, Any] = {"serverUrl": url}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
-    changes = _write_mcpservers_entry(label="Windsurf", path=path, entry=entry, dry=dry)
+    changes = _write_mcpservers_entry(
+        label="Windsurf",
+        path=path,
+        entry=entry,
+        url_field="serverUrl",
+        url_explicit=url_explicit,
+        dry=dry,
+    )
     _snippet_note("Windsurf", "Windsurf → Settings → Rules (global rules)")
     return changes
 
 
-def install_antigravity(*, token: str, url: str, dry: bool) -> list[Change]:
+def install_antigravity(
+    *, token: str, url: str, dry: bool, url_explicit: bool = False, snippet_update: str = "no"
+) -> list[Change]:
     if not _detect_antigravity():
         _skip("Antigravity not detected (no ~/.gemini/config, no /Applications/Antigravity.app)")
         return []
@@ -682,7 +820,14 @@ def install_antigravity(*, token: str, url: str, dry: bool) -> list[Change]:
     entry: dict[str, Any] = {"serverUrl": url}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
-    changes = _write_mcpservers_entry(label="Antigravity", path=path, entry=entry, dry=dry)
+    changes = _write_mcpservers_entry(
+        label="Antigravity",
+        path=path,
+        entry=entry,
+        url_field="serverUrl",
+        url_explicit=url_explicit,
+        dry=dry,
+    )
     _snippet_note("Antigravity", "a repo-root AGENTS.md")
     return changes
 
@@ -898,6 +1043,12 @@ def main() -> int:
         action="store_true",
         help="Don't prompt; install into all detected clients (the old behaviour).",
     )
+    parser.add_argument(
+        "--update-snippet",
+        action="store_true",
+        help="Refresh an outdated instruction snippet without prompting. By "
+        "default an outdated snippet is left alone (or you're asked, on a TTY).",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -908,6 +1059,17 @@ def main() -> int:
 
     token = _load_token()
     url = args.url or os.environ.get("URL") or DEFAULT_URL
+    # Whether the URL was chosen explicitly (vs the localhost default). Without
+    # an explicit URL, installers keep whatever URL a client already has, so
+    # re-running just to refresh the snippet never repoints a deployed vault.
+    url_explicit = bool(args.url or os.environ.get("URL"))
+    # Snippet refresh policy for an already-present-but-outdated snippet.
+    if args.update_snippet:
+        snippet_update = "yes"
+    elif sys.stdin.isatty():
+        snippet_update = "ask"
+    else:
+        snippet_update = "no"
     dry = bool(args.dry_run)
 
     # Choose targets. Explicit --only/--skip wins. Otherwise prompt on a TTY
@@ -959,7 +1121,13 @@ def main() -> int:
         if key == "claude-ai":
             print_claude_ai_instructions(url)
         else:
-            changes += file_installers[key](token=token, url=url, dry=dry)
+            changes += file_installers[key](
+                token=token,
+                url=url,
+                dry=dry,
+                url_explicit=url_explicit,
+                snippet_update=snippet_update,
+            )
 
     print()
     if dry:
