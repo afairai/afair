@@ -776,6 +776,100 @@ SCHEMA_DDL: tuple[str, ...] = (
            ) AS is_live
     FROM kind_registry k
     """,
+    # ── entity_kind_assignments: kind as a mutable-by-append attribute ──────
+    # ADR-0003 Phase 2. An entity's kind stops being identity-bearing: the
+    # CURRENT kind is its latest assignment row, falling back to the immutable
+    # entities.kind every existing row already carries (see the
+    # entity_current_kind_v1 view below). That fallback IS the backfill — zero
+    # rows rewritten, zero rows copied; old vaults resolve identically until
+    # the first assignment overlays a row. A retype is ONE row here (anchored
+    # to an observe event via source_event_id, I7) instead of merge-chain
+    # surgery; a revert is just another assignment row.
+    """
+    CREATE TABLE IF NOT EXISTS entity_kind_assignments (
+        id              TEXT PRIMARY KEY,
+        entity_id       TEXT NOT NULL REFERENCES entities(id),
+        kind_slug       TEXT NOT NULL,
+        assigned_at     TEXT NOT NULL,
+        assigned_by     TEXT NOT NULL,
+        confidence      REAL NOT NULL,
+        reason          TEXT NOT NULL,
+        source_event_id TEXT REFERENCES events(id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_kind_assignments_entity_idx "
+    "ON entity_kind_assignments(entity_id, assigned_at DESC)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_kind_assignments_no_update
+    BEFORE UPDATE ON entity_kind_assignments
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_kind_assignments is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_kind_assignments_no_delete
+    BEFORE DELETE ON entity_kind_assignments
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_kind_assignments is append-only (Invariant I2)');
+    END
+    """,
+    # ── entity_identities: the v2 name-first identity ledger ────────────────
+    # ADR-0003 Phase 2. NEW entities derive their id as
+    # ``entity:v2:<sha256(lower(name)|disambiguator)>`` where the
+    # disambiguator is an ordinal that starts at "0" and increments ONLY on a
+    # deliberate homonym split (the LLM/operator rules a new "Apple" is a
+    # different thing from every existing live "Apple"). Each v2 identity is
+    # recorded here for introspection and for the ordinal computation — the
+    # ordinal is the count of prior v2 rows for the name, a pure function of
+    # prior graph state, so a rebuild that replays the same canonical
+    # decisions in the same event order reproduces the same IDs. EXISTING v1
+    # ids (kind-in-hash) are never recomputed; v1 rows may be backfilled
+    # lazily but are never required.
+    """
+    CREATE TABLE IF NOT EXISTS entity_identities (
+        entity_id      TEXT PRIMARY KEY REFERENCES entities(id),
+        name_lower     TEXT NOT NULL,
+        disambiguator  TEXT NOT NULL,
+        id_scheme      TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        UNIQUE(name_lower, disambiguator, id_scheme)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS entity_identities_name_idx ON entity_identities(name_lower)",
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_identities_no_update
+    BEFORE UPDATE ON entity_identities
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_identities is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entity_identities_no_delete
+    BEFORE DELETE ON entity_identities
+    BEGIN
+        SELECT RAISE(ABORT, 'entity_identities is append-only (Invariant I2)');
+    END
+    """,
+    # ── entity_current_kind_v1: the backward-compatible kind read path ──────
+    # COALESCE(latest assignment, entities.kind): an existing entity with no
+    # assignment row resolves to its stored kind byte-identically (ZERO
+    # backfill); the first assignment overlays it at read time. Hot paths use
+    # the Python batch helper (entities.resolve_entity_kind_batch) which
+    # additionally pipes the slug through the kind-registry revision chain so
+    # a registry-level merge retypes every affected entity at read time with
+    # a single revision row. Views are versioned by name (I3): a changed
+    # definition ships as entity_current_kind_v2, never a redefinition.
+    """
+    CREATE VIEW IF NOT EXISTS entity_current_kind_v1 AS
+    SELECT e.id AS entity_id,
+           COALESCE(
+               (SELECT ka.kind_slug FROM entity_kind_assignments ka
+                WHERE ka.entity_id = e.id
+                ORDER BY ka.assigned_at DESC, ka.id DESC LIMIT 1),
+               e.kind
+           ) AS kind_slug
+    FROM entities e
+    """,
 )
 
 

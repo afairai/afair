@@ -305,11 +305,15 @@ def _candidate_keys(conn: sqlite3.Connection) -> list[str]:
 
 
 def _load_members(conn: sqlite3.Connection, key: str) -> list[_Member]:
+    # ADR-0003 Phase 2: members carry their CURRENT resolved kind (the
+    # assignment overlay), so the LLM judges — and the merge reason records —
+    # what the graph believes now, not the immutable creation-time label.
     rows = conn.execute(
         """
-        SELECT e.id, e.canonical_name, e.kind, e.created_at, e.created_by,
+        SELECT e.id, e.canonical_name, ck.kind_slug AS kind, e.created_at, e.created_by,
                e.confidence, e.source_event_id, COUNT(m.id) AS mention_count
         FROM entities e
+        JOIN entity_current_kind_v1 ck ON ck.entity_id = e.id
         LEFT JOIN entity_mentions m ON m.entity_id = e.id
         WHERE LOWER(e.canonical_name) = ?
           AND e.id NOT IN (SELECT entity_id FROM entity_retractions)

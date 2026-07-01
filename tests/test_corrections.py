@@ -18,10 +18,10 @@ from afair.mcp.schemas import CorrectionDecision
 from afair.settings import Settings
 from afair.substrate import (
     decide_correction,
-    entity_id,
     open_db,
     read_pending_corrections,
     resolve_canonical,
+    resolve_entity_kind,
     write_entity,
     write_entity_merge,
     write_event,
@@ -106,18 +106,31 @@ def test_pending_prompt_for_merge_review_describes_the_auto_merge(
 
 
 def test_confirm_retype_retypes_the_entity(db: sqlite3.Connection, settings: Settings) -> None:
+    """ADR-0003 Phase 2: a retype is ONE entity_kind_assignments row — the
+    entity's resolved kind changes while its identity stays the same. No
+    merge-chain surgery."""
     _seed_proposals(db, settings)
     retype = next(p for p in read_pending_corrections(db) if p.kind == "retype")
-    person_id = entity_id("maxime.team", "person")
-    product_id = entity_id("maxime.team", "product")
+    person_id = retype.entity_id
 
     out = decide_correction(db, proposal_id=retype.id, verdict="confirm")
     assert out.status == "applied"
-    # The old person entity now resolves to the product-typed entity (a merge).
-    assert resolve_canonical(db, person_id) == product_id
-    # An observe event anchors the change (I7 — recorded).
+    # Identity unchanged: still its own canonical, no merge row written.
+    assert resolve_canonical(db, person_id) == person_id
+    assert db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0] == 1  # only the seed one
+    # The resolved kind flipped via exactly ONE assignment row.
+    assert resolve_entity_kind(db, person_id) == "product"
+    rows = db.execute(
+        "SELECT kind_slug, source_event_id FROM entity_kind_assignments WHERE entity_id = ?",
+        (person_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["kind_slug"] == "product"
+    # An observe event anchors the change (I7 — recorded) and the assignment
+    # references it.
     n_observe = db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0]
     assert n_observe == 1
+    assert rows[0]["source_event_id"] is not None
     # The proposal is closed and no longer surfaces.
     assert all(p.id != retype.id for p in read_pending_corrections(db))
 
@@ -128,12 +141,13 @@ def test_confirm_retype_retypes_the_entity(db: sqlite3.Connection, settings: Set
 def test_merge_review_confirm_keeps_the_kind(db: sqlite3.Connection, settings: Settings) -> None:
     _seed_proposals(db, settings)
     mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
-    product_id = entity_id("Clario", "product")
+    product_id = mr.detail["into_entity_id"]
 
     out = decide_correction(db, proposal_id=mr.id, verdict="confirm")
     assert out.status == "confirmed"
     # Nothing applied — the merged canonical stays the product it was.
-    assert resolve_canonical(db, product_id) == product_id
+    assert resolve_entity_kind(db, product_id) == "product"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 0
     assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 0
     assert all(p.id != mr.id for p in read_pending_corrections(db))
 
@@ -141,34 +155,41 @@ def test_merge_review_confirm_keeps_the_kind(db: sqlite3.Connection, settings: S
 def test_merge_review_reject_with_to_kind_retypes(
     db: sqlite3.Connection, settings: Settings
 ) -> None:
+    """ADR-0003 Phase 2: reverting the auto-picked kind is ONE assignment row
+    on the merged canonical — no fresh entity, no merge cycle, no
+    merge-invalidation dance."""
     _seed_proposals(db, settings)
     mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
-    product_id = entity_id("Clario", "product")
-    project_id = entity_id("Clario", "project")
+    project_id = mr.entity_id  # the merge's from-side (Clario project)
+    product_id = mr.detail["into_entity_id"]  # the merged canonical
 
     out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="project")
     assert out.status == "applied"
-    # Reverting to the origin kind must NOT create a merge cycle: BOTH sides
-    # resolve to the SAME project canonical, not to each other (split-brain).
-    assert resolve_canonical(db, product_id) == project_id
-    assert resolve_canonical(db, project_id) == project_id
+    # The merge stays live; BOTH sides resolve to the same canonical, whose
+    # resolved kind is now the operator's choice.
+    assert resolve_canonical(db, project_id) == product_id
+    assert resolve_canonical(db, product_id) == product_id
+    assert resolve_entity_kind(db, product_id) == "project"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 1
+    # No cycle-avoidance machinery fired: zero merge invalidations.
+    assert db.execute("SELECT COUNT(*) FROM merge_invalidations").fetchone()[0] == 0
 
 
 def test_merge_review_reject_to_third_kind_retypes_cleanly(
     db: sqlite3.Connection, settings: Settings
 ) -> None:
-    """Correcting to a kind that isn't the origin needs no merge-invalidation —
-    the fresh target entity can't cycle. Everything resolves to it."""
+    """Correcting to a kind that is neither side of the merge is the same
+    single assignment row — everything keeps resolving to the canonical."""
     _seed_proposals(db, settings)
     mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
-    product_id = entity_id("Clario", "product")
-    project_id = entity_id("Clario", "project")
-    concept_id = entity_id("Clario", "concept")
+    project_id = mr.entity_id
+    product_id = mr.detail["into_entity_id"]
 
     out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="concept")
     assert out.status == "applied"
-    assert resolve_canonical(db, product_id) == concept_id
-    assert resolve_canonical(db, project_id) == concept_id
+    assert resolve_canonical(db, project_id) == product_id
+    assert resolve_entity_kind(db, product_id) == "concept"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 1
 
 
 def test_merge_review_reject_without_to_kind_only_flags(
@@ -176,11 +197,12 @@ def test_merge_review_reject_without_to_kind_only_flags(
 ) -> None:
     _seed_proposals(db, settings)
     mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
-    product_id = entity_id("Clario", "product")
+    product_id = mr.detail["into_entity_id"]
 
     out = decide_correction(db, proposal_id=mr.id, verdict="reject")
     assert out.status == "rejected"
-    assert resolve_canonical(db, product_id) == product_id  # untouched
+    assert resolve_entity_kind(db, product_id) == "product"  # untouched
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 0
 
 
 def test_decide_rejects_bad_to_kind(db: sqlite3.Connection, settings: Settings) -> None:
@@ -236,9 +258,13 @@ def test_decide_resolves_renamed_slug_to_live_successor(
 
     out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="organization")
     assert out.status == "applied"
-    # The retype landed on the resolved live kind, not the dead slug.
-    company_id = entity_id("Clario", "company")
-    assert resolve_canonical(db, entity_id("Clario", "product")) == company_id
+    # The assignment landed on the resolved live kind, not the dead slug.
+    product_id = mr.detail["into_entity_id"]
+    assert resolve_entity_kind(db, product_id) == "company"
+    row = db.execute(
+        "SELECT kind_slug FROM entity_kind_assignments WHERE entity_id = ?", (product_id,)
+    ).fetchone()
+    assert row["kind_slug"] == "company"
 
 
 def test_merge_review_retract_withdraws_the_entity(
@@ -279,12 +305,13 @@ def test_merge_review_retract_withdraws_the_entity(
 def test_reject_closes_without_applying(db: sqlite3.Connection, settings: Settings) -> None:
     _seed_proposals(db, settings)
     retype = next(p for p in read_pending_corrections(db) if p.kind == "retype")
-    person_id = entity_id("maxime.team", "person")
+    person_id = retype.entity_id
 
     out = decide_correction(db, proposal_id=retype.id, verdict="reject")
     assert out.status == "rejected"
-    # Not re-typed — still its own canonical.
-    assert resolve_canonical(db, person_id) == person_id
+    # Not re-typed — kind unchanged, no assignment row.
+    assert resolve_entity_kind(db, person_id) == "person"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 0
     # No observe event written on a reject.
     assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 0
     assert all(p.id != retype.id for p in read_pending_corrections(db))
@@ -299,12 +326,13 @@ def test_decide_twice_is_a_no_op(db: sqlite3.Connection, settings: Settings) -> 
 
     first = decide_correction(db, proposal_id=retype.id, verdict="confirm")
     assert first.status == "applied"
-    merges_after_first = db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0]
+    rows_after_first = db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0]
+    assert rows_after_first == 1
     second = decide_correction(db, proposal_id=retype.id, verdict="confirm")
     assert second.status == "already_decided"
-    # The second confirm applies nothing — no extra merge from a re-run.
-    merges_after_second = db.execute("SELECT COUNT(*) FROM entity_merges").fetchone()[0]
-    assert merges_after_second == merges_after_first
+    # The second confirm applies nothing — no extra assignment from a re-run.
+    rows_after_second = db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0]
+    assert rows_after_second == rows_after_first
 
 
 def test_decide_unknown_proposal_reports_not_found(db: sqlite3.Connection) -> None:
@@ -375,10 +403,10 @@ def test_recall_decide_applies_and_reports(ctx: object) -> None:
     result = handlers.recall(decide=CorrectionDecision(proposal_id=retype.id, verdict="confirm"))
     assert result.note is not None
     assert "confirm" in result.note
-    person_id = entity_id("maxime.team", "person")
-    product_id = entity_id("maxime.team", "product")
     db = ctx.db  # type: ignore[attr-defined]
-    assert resolve_canonical(db, person_id) == product_id
+    # One assignment row; identity unchanged; the resolved kind flipped.
+    assert resolve_canonical(db, retype.entity_id) == retype.entity_id
+    assert resolve_entity_kind(db, retype.entity_id) == "product"
     # The decided proposal is gone from the remaining queue echoed back.
     assert all(p.id != retype.id for p in result.pending_corrections)
 

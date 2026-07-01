@@ -9,14 +9,16 @@ read-and-decide side the MCP ``recall`` verb rides on:
   name is a domain — re-type it to a product?");
 - :func:`decide_correction` records the operator's confirm/reject and, on
   confirm, applies the correction through the existing append-only primitives
-  (:func:`~afair.substrate.entities.retype_entity` /
+  (:func:`~afair.substrate.entities.assign_entity_kind` /
   :func:`~afair.substrate.entities.write_entity_merge`).
 
 Deciding is the ONLY place a ``proposed_corrections`` row mutates (that table
 is deliberately non-substrate, no I2 trigger). The *applied* correction stays
-append-only: a retype is a merge into a freshly-typed entity, a merge is a new
-``entity_merges`` row, and the confirm itself is recorded as an ``observe``
-event — so the change is recorded and reversible (I7).
+append-only: a retype is ONE ``entity_kind_assignments`` row (ADR-0003
+Phase 2 — identity unchanged, no merge-chain surgery; a revert is just
+another assignment row), a merge is a new ``entity_merges`` row, and the
+confirm itself is recorded as an ``observe`` event — so the change is
+recorded and reversible (I7).
 
 Riding on the frozen verb: confirmation is NOT a new MCP tool (I1 forbids
 that). It is an optional typed argument on ``recall``, exactly like the
@@ -32,12 +34,11 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from .entities import (
-    entity_id,
-    find_live_merge_from,
+    assign_entity_kind,
+    resolve_canonical,
+    resolve_entity_kind,
     retract_entity,
-    retype_entity,
     write_entity_merge,
-    write_merge_invalidation,
 )
 from .events import write_event
 from .kinds import live_kind_slugs, resolve_to_live_kind
@@ -153,17 +154,16 @@ def _apply_correction(
     """Apply a confirmed correction through the append-only primitives.
 
     Returns a human-readable note describing what changed. Reuses the tested
-    ``retype_entity`` / ``write_entity_merge`` paths rather than inlining their
-    writes: a confirm that half-commits leaves the graph in a MORE-correct or
-    equal state (the proposal simply stays open and re-confirms cleanly), never
-    a falsely-reported one — so the multi-statement window is safe here, unlike
-    edge-review reject.
+    ``assign_entity_kind`` / ``write_entity_merge`` paths rather than inlining
+    their writes: a confirm that half-commits leaves the graph in a
+    MORE-correct or equal state (the proposal simply stays open and
+    re-confirms cleanly), never a falsely-reported one — so the
+    multi-statement window is safe here, unlike edge-review reject.
     """
     reason = f"operator-confirmed audit proposal {proposal_id}"
     if kind == "retype":
-        # A new typed entity needs a real source event (entities.source_event_id
-        # is a FK into events) — record the confirm as an observe event and
-        # anchor the re-type to it, which also satisfies I7 (recorded change).
+        # Record the confirm as an observe event and anchor the assignment to
+        # it (entity_kind_assignments.source_event_id) — I7 (recorded change).
         ev = write_event(
             conn,
             origin="user",
@@ -175,18 +175,24 @@ def _apply_correction(
                 "name": detail["name"],
             },
         )
-        merge = retype_entity(
+        # ADR-0003 Phase 2: a retype is ONE kind-assignment row on the
+        # entity's live canonical — identity unchanged, no merge chain.
+        target = resolve_canonical(conn, entity_id)
+        current_kind = resolve_entity_kind(conn, target)
+        if current_kind is None:
+            return "no-op (entity not found)"
+        if current_kind == detail["to_kind"]:
+            return "no-op (already the target kind)"
+        assign_entity_kind(
             conn,
-            canonical_name=detail["name"],
-            from_kind=detail["from_kind"],
-            to_kind=detail["to_kind"],
-            reviewed_by=decided_by,
-            source_event_id=ev.id,
+            entity_id=target,
+            kind_slug=detail["to_kind"],
+            assigned_by=decided_by,
             reason=reason,
+            confidence=1.0,
+            source_event_id=ev.id,
         )
-        if merge is None:
-            return "no-op (entity not found or already the target kind)"
-        return f"re-typed '{detail['name']}': {detail['from_kind']} → {detail['to_kind']}"
+        return f"re-typed '{detail['name']}': {current_kind} → {detail['to_kind']}"
     if kind == "merge":
         into_id = detail["into_entity_id"]
         write_entity_merge(
@@ -210,7 +216,12 @@ def _retype_merged_entity(
     proposal_id: str,
 ) -> str:
     """Correct the kind an auto-merge picked: re-type the canonical (``into``)
-    entity from the merged kind to the operator's chosen kind."""
+    entity from the merged kind to the operator's chosen kind.
+
+    ADR-0003 Phase 2: one kind-assignment row on the merged canonical. The
+    v1-era cycle dance (invalidate the original merge before re-typing, or
+    ``project → product → project`` closed a loop) is gone — kind no longer
+    forks identity, so no fresh entity and no back-edge exist to cycle."""
     into_name = detail["into_name"]
     merged_kind = detail["merged_kind"]
     ev = write_event(
@@ -224,34 +235,22 @@ def _retype_merged_entity(
             "name": into_name,
         },
     )
-    # Reverting to the kind the merge came FROM: the (name, to_kind) entity
-    # already exists and still merges INTO the current canonical, so a plain
-    # re-type would close a cycle (project→product→project) and split the
-    # canonical. Invalidate that original merge first so resolve_canonical drops
-    # the back-edge — then the re-type's product→project becomes the only live
-    # direction and (name, to_kind) is cleanly canonical.
-    if to_kind == detail.get("from_kind"):
-        original = find_live_merge_from(conn, entity_id(into_name, to_kind))
-        if original is not None:
-            write_merge_invalidation(
-                conn,
-                merge_id=original,
-                invalidated_by=decided_by,
-                reason=f"merge-review revert to {to_kind} (proposal {proposal_id})",
-                source_event_id=ev.id,
-            )
-    merge = retype_entity(
+    target = resolve_canonical(conn, detail["into_entity_id"])
+    current_kind = resolve_entity_kind(conn, target)
+    if current_kind is None:
+        return f"no-op ('{into_name}' not found)"
+    if current_kind == to_kind:
+        return f"no-op ('{into_name}' already {to_kind})"
+    assign_entity_kind(
         conn,
-        canonical_name=into_name,
-        from_kind=merged_kind,
-        to_kind=to_kind,
-        reviewed_by=decided_by,
-        source_event_id=ev.id,
+        entity_id=target,
+        kind_slug=to_kind,
+        assigned_by=decided_by,
         reason=f"operator-corrected merge-review proposal {proposal_id}",
+        confidence=1.0,
+        source_event_id=ev.id,
     )
-    if merge is None:
-        return f"no-op ('{into_name}' not found or already {to_kind})"
-    return f"re-typed '{into_name}': {merged_kind} → {to_kind}"
+    return f"re-typed '{into_name}': {current_kind} → {to_kind}"
 
 
 def _retract_proposal_target(

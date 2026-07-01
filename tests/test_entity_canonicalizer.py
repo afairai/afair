@@ -155,13 +155,16 @@ def test_exact_match_links_second_event_to_same_canonical(
 def test_exact_match_distinguishes_by_kind(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Apple-the-org and apple-the-concept become two distinct entities."""
+    """Apple-the-org and apple-the-concept become two distinct entities.
+
+    ADR-0003 Phase 2: identity is name-first, so the separation the v1
+    kind-in-ID hash used to give for free is now the Stage-1 kind-agreement
+    guard's job — the same-name/different-kind mention is a homonym question
+    routed to the LLM (which correctly answers "none of these") instead of
+    an auto-link at confidence 1.0."""
     _no_sleep(monkeypatch)
-    monkeypatch.setattr(
-        ec,
-        "call_tool",
-        lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected")),
-    )
+    # The homonym judge rules them different things (the correct verdict).
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
 
     _write_event_with_extraction(
         db,
@@ -175,6 +178,9 @@ def test_exact_match_distinguishes_by_kind(
     stats = EntityCanonicalizer().run(db, settings)
     assert stats["entities_created"] == 2
     assert stats["entities_matched_exact"] == 0
+    assert stats["homonym_splits"] == 1
+    ids = {r["id"] for r in db.execute("SELECT id FROM entities").fetchall()}
+    assert len(ids) == 2
 
 
 # ── Stage 2: LLM match ────────────────────────────────────────────────────

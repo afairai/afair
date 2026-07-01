@@ -308,10 +308,14 @@ def _article_worthy_groups(conn: sqlite3.Connection) -> list[_EntityGroup]:
     groups: list[_EntityGroup] = []
     for row in rows:
         key = row["entity_key"]
+        # ADR-0003 Phase 2: article groups snapshot each member's CURRENT
+        # resolved kind (assignment overlay) — a retype flows into the next
+        # article synthesis and, through the payload, into the gazetteer.
         member_rows = conn.execute(
             """
-            SELECT e.id, e.canonical_name, e.kind, COUNT(m.id) AS c
+            SELECT e.id, e.canonical_name, ck.kind_slug AS kind, COUNT(m.id) AS c
             FROM entities e
+            JOIN entity_current_kind_v1 ck ON ck.entity_id = e.id
             LEFT JOIN entity_mentions m ON m.entity_id = e.id
             WHERE LOWER(e.canonical_name) = ?
               AND e.id NOT IN (SELECT entity_id FROM entity_retractions)

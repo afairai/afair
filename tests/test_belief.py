@@ -223,23 +223,26 @@ def test_reject_is_atomic_no_half_commit(db: sqlite3.Connection) -> None:
 
 
 def test_retype_entity_redirects_via_merge(db: sqlite3.Connection) -> None:
-    """Re-typing Maxime person→product merges the old into the new, so the old
-    entity's identity resolves to the correctly-typed one (Maxime is a tool,
-    not a person)."""
-    from afair.substrate import entity_id, read_entity_by_id, retype_entity, write_entity
+    """The DEPRECATED v1-era merge-based retype still redirects a v1 entity
+    (whose identity encodes its kind) to a correctly-typed one — kept for
+    reading history and v1 vaults mid-transition (ADR-0003 Phase 2). New
+    code retypes with one assign_entity_kind row, identity unchanged."""
+    from afair.substrate import entity_id, read_entity_by_id, retype_entity
     from afair.substrate.entities import resolve_canonical
 
     ev = write_event(
         db, origin="user", kind="remember", payload={"content_type": "text", "text": "maxime"}
     )
-    person = write_entity(
-        db,
-        canonical_name="Maxime",
-        kind="person",
-        created_by="x",
-        source_event_id=ev.id,
-        confidence=0.8,
-    )
+    # Seed the entity under the v1 identity scheme, exactly as a pre-Phase-2
+    # vault carries it (write_entity mints v2 name-first IDs today).
+    person_id = entity_id("Maxime", "person")
+    with db:
+        db.execute(
+            "INSERT INTO entities (id, canonical_name, kind, created_at, created_by, "
+            "confidence, source_event_id) VALUES (?, 'Maxime', 'person', "
+            "'2026-01-01T00:00:00+00:00', 'x', 0.8, ?)",
+            (person_id, ev.id),
+        )
 
     merge = retype_entity(
         db,
@@ -252,10 +255,9 @@ def test_retype_entity_redirects_via_merge(db: sqlite3.Connection) -> None:
     )
     assert merge is not None
 
-    product_id = entity_id("Maxime", "product")
-    # The old person-entity now resolves to the product-entity.
-    assert resolve_canonical(db, person.id) == product_id
-    assert read_entity_by_id(db, product_id).kind == "product"
+    # The old person-entity now resolves to the product-typed entity.
+    assert resolve_canonical(db, person_id) == merge.into_entity_id
+    assert read_entity_by_id(db, merge.into_entity_id).kind == "product"
 
 
 def test_retype_noops_on_same_kind_or_missing(db: sqlite3.Connection) -> None:

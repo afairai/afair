@@ -111,15 +111,20 @@ def find_cross_kind_auto_merges(
     once. ``detail`` carries everything the surface needs to ask the question
     and apply a correction (the canonical ``into`` entity + the kind it picked).
     """
+    # ADR-0003 Phase 2: compare CURRENT kinds through the resolution view —
+    # a merge whose kind conflict the operator already fixed with an
+    # assignment row stops surfacing as cross-kind.
     rows = conn.execute(
         """
         SELECT mg.from_entity_id, mg.into_entity_id, mg.merged_by, mg.confidence,
-               a.canonical_name AS from_name, a.kind AS from_kind,
-               b.canonical_name AS into_name, b.kind AS into_kind
+               a.canonical_name AS from_name, ka.kind_slug AS from_kind,
+               b.canonical_name AS into_name, kb.kind_slug AS into_kind
         FROM entity_merges mg
         JOIN entities a ON a.id = mg.from_entity_id
         JOIN entities b ON b.id = mg.into_entity_id
-        WHERE a.kind != b.kind
+        JOIN entity_current_kind_v1 ka ON ka.entity_id = a.id
+        JOIN entity_current_kind_v1 kb ON kb.entity_id = b.id
+        WHERE ka.kind_slug != kb.kind_slug
           AND b.id NOT IN (SELECT entity_id FROM entity_retractions)
         """
     ).fetchall()
@@ -189,11 +194,14 @@ class EntityAuditWorker(ColdPathWorker):
         from datetime import UTC, datetime
 
         now = datetime.now(UTC)
-        # Current entities only (not merged away).
+        # Current entities only (not merged away), with their CURRENT kind
+        # through the resolution view (ADR-0003 Phase 2) — a retyped entity
+        # is audited under its assigned kind, not its immutable initial one.
         rows = conn.execute(
             """
-            SELECT e.id, e.canonical_name, e.kind
+            SELECT e.id, e.canonical_name, ck.kind_slug AS kind
             FROM entities e
+            JOIN entity_current_kind_v1 ck ON ck.entity_id = e.id
             LEFT JOIN entity_merges m ON m.from_entity_id = e.id
             WHERE m.id IS NULL
               AND e.id NOT IN (SELECT entity_id FROM entity_retractions)

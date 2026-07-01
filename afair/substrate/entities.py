@@ -8,13 +8,22 @@ decisions.
 
 Identity convention
 -------------------
-Entity IDs are content-derived:
+Entity IDs are content-derived. Two schemes coexist (ADR-0003 Phase 2):
 
-    entity:<sha256(lowercase(canonical_name)|kind)>
+    v1 (existing rows, frozen): entity:<sha256(lower(canonical_name)|kind)>
+    v2 (new rows):              entity:v2:<sha256(lower(canonical_name)|disambiguator)>
 
-so a rebuild of the entity graph from substrate is deterministic — the
-same canonical decisions yield the same IDs. Mention / edge / merge /
-invalidation rows use ULIDs for stable time-ordered IDs.
+v1 baked the kind into the hash, so a kind could never change without an
+identity change. v2 is name-first: the ``disambiguator`` is an ordinal
+that starts at "0" and increments ONLY on a deliberate homonym split
+(recorded in ``entity_identities``, so the ordinal is a pure function of
+prior graph state and a rebuild that replays the same canonical
+decisions yields the same IDs). Existing v1 IDs are never recomputed or
+rewritten; every read path handles both schemes transparently. An
+entity's CURRENT kind is resolved through ``entity_kind_assignments``
+(latest row wins) falling back to the immutable ``entities.kind`` — see
+:func:`resolve_entity_kind_batch`. Mention / edge / merge /
+invalidation / assignment rows use ULIDs for stable time-ordered IDs.
 
 Append-only contract
 --------------------
@@ -34,6 +43,8 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 from ulid import ULID
 
+from .kinds import resolve_kind_batch, resolve_kind_slug
+
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Iterable
@@ -42,16 +53,58 @@ if TYPE_CHECKING:
 # ── identity ──────────────────────────────────────────────────────────────
 
 
+ENTITY_ID_V2_PREFIX = "entity:v2:"
+"""Prefix distinguishing v2 (name-first) IDs from v1 (kind-in-hash) IDs."""
+
+ID_SCHEME_V2 = "v2"
+"""``entity_identities.id_scheme`` stamp for v2 rows (v1 rows may be
+backfilled lazily with 'v1'; nothing requires them)."""
+
+
 def entity_id(canonical_name: str, kind: str) -> str:
-    """Compute the content-derived ID for a (canonical_name, kind) pair.
+    """Compute the content-derived v1 ID for a (canonical_name, kind) pair.
 
     Normalization: case-insensitive on the name, exact match on kind. The
     same human reference written ``Sajinth`` and ``sajinth`` both produce
     the same ID; ``Sajinth`` as person vs project produces two.
+
+    v1 scheme — kept for reading and matching EXISTING rows (every entity
+    created before ADR-0003 Phase 2 carries a v1 ID, forever). New entities
+    derive their ID via :func:`entity_id_v2`.
     """
     payload = f"{canonical_name.strip().lower()}|{kind}"
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"entity:{digest}"
+
+
+def entity_id_v2(canonical_name: str, disambiguator: str = "0") -> str:
+    """Compute the content-derived v2 ID (ADR-0003 Phase 2, name-first).
+
+    The ``disambiguator`` is an ordinal string ("0" by default) that
+    increments only on a deliberate homonym split — the LLM judge (or the
+    operator) ruling that a new mention of "Apple" is a different thing
+    from every existing live "Apple". Kind is deliberately NOT part of the
+    hash: an entity's kind can now change (one ``entity_kind_assignments``
+    row) without changing its identity.
+    """
+    payload = f"{canonical_name.strip().lower()}|{disambiguator}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{ENTITY_ID_V2_PREFIX}{digest}"
+
+
+def next_disambiguator(conn: sqlite3.Connection, canonical_name: str) -> str:
+    """The ordinal the NEXT v2 identity for this name receives.
+
+    Defined as the count of existing v2 ``entity_identities`` rows for the
+    lowercased name — a pure function of prior graph state, so a rebuild
+    that replays the same canonical decisions in the same event order
+    reproduces the same ordinals (the determinism property v1 had).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM entity_identities WHERE name_lower = ? AND id_scheme = ?",
+        (canonical_name.strip().lower(), ID_SCHEME_V2),
+    ).fetchone()
+    return str(row["n"])
 
 
 def _now_iso() -> str:
@@ -131,6 +184,23 @@ class EdgeReview(BaseModel):
     reviewed_at: str
 
 
+class EntityKindAssignment(BaseModel):
+    """One append-only kind (re)assignment for an entity (ADR-0003 Phase 2).
+
+    An entity's CURRENT kind is its latest assignment, falling back to the
+    immutable ``entities.kind`` when no assignment exists — see
+    :func:`resolve_entity_kind_batch`."""
+
+    id: str
+    entity_id: str
+    kind_slug: str
+    assigned_at: str
+    assigned_by: str
+    confidence: float
+    reason: str
+    source_event_id: str | None = None
+
+
 # ── writes ────────────────────────────────────────────────────────────────
 
 
@@ -142,20 +212,58 @@ def write_entity(
     created_by: str,
     source_event_id: str,
     confidence: float,
+    split_homonym: bool = False,
 ) -> Entity:
     """Insert (or return existing) a canonical entity row.
 
-    Idempotent on the derived entity_id. Two calls with the same
-    (canonical_name, kind) return the original row — neither the
+    Idempotent on (canonical_name, kind), preserving the pre-v2 contract:
+    two calls with the same pair return the original row — neither the
     confidence nor source_event_id is updated, by design: per I2, the
-    first creation context is preserved.
-    """
-    eid = entity_id(canonical_name, kind)
-    existing = read_entity_by_id(conn, eid)
-    if existing is not None:
-        return existing
+    first creation context is preserved. The reuse checks, in order:
 
+    1. A v1 entity with the derived ``entity_id(name, kind)`` — every row
+       created before ADR-0003 Phase 2. Existing vaults keep matching their
+       v1 rows; no v2 duplicate is ever created beside a v1 original.
+    2. A v2 entity for this name whose *initial* kind (``entities.kind``,
+       the immutable creation-time signal) equals ``kind`` — the v2
+       equivalent of the v1 hash collision. Skipped when
+       ``split_homonym=True``.
+
+    With no reusable row (or on a deliberate split), a NEW v2 entity is
+    created at the next disambiguator ordinal for this name, and its
+    identity is recorded in ``entity_identities`` in the same transaction.
+    ``split_homonym=True`` is the caller's statement that an explicit
+    homonym judgment ruled this a DIFFERENT thing from EVERY existing
+    same-name entity — it skips BOTH reuse checks (linking back to a
+    candidate the judge just rejected would undo the split) and mints the
+    next ordinal.
+    """
+    name_lower = canonical_name.strip().lower()
+    if not split_homonym:
+        v1_existing = read_entity_by_id(conn, entity_id(canonical_name, kind))
+        if v1_existing is not None:
+            return v1_existing
+        # v2 reuse: same name + same initial kind → same entity. Initial
+        # kind (not the resolved current kind) keeps the check a pure
+        # function of prior creations, replay-deterministic like v1.
+        row = conn.execute(
+            """
+            SELECT e.* FROM entity_identities i
+            JOIN entities e ON e.id = i.entity_id
+            WHERE i.name_lower = ? AND i.id_scheme = ? AND e.kind = ?
+            ORDER BY CAST(i.disambiguator AS INTEGER) ASC LIMIT 1
+            """,
+            (name_lower, ID_SCHEME_V2, kind),
+        ).fetchone()
+        if row is not None:
+            return _row_to_entity(row)
+
+    disambiguator = next_disambiguator(conn, canonical_name)
+    eid = entity_id_v2(canonical_name, disambiguator)
     created_at = _now_iso()
+    # Entity row + identity row in ONE transaction — the ordinal computation
+    # depends on the identity ledger being exactly as complete as the entity
+    # set, so a half-commit would corrupt determinism.
     with conn:
         conn.execute(
             """
@@ -165,6 +273,14 @@ def write_entity(
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (eid, canonical_name, kind, created_at, created_by, confidence, source_event_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO entity_identities (
+                entity_id, name_lower, disambiguator, id_scheme, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (eid, name_lower, disambiguator, ID_SCHEME_V2, created_at),
         )
     return Entity(
         id=eid,
@@ -355,6 +471,60 @@ def write_entity_merge(
     )
 
 
+def assign_entity_kind(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    kind_slug: str,
+    assigned_by: str,
+    reason: str,
+    confidence: float = 1.0,
+    source_event_id: str | None = None,
+) -> EntityKindAssignment:
+    """Append one kind assignment — the ADR-0003 Phase 2 retype primitive.
+
+    The entity's identity does not change; its CURRENT kind becomes
+    ``kind_slug`` at read time (latest assignment wins, see
+    :func:`resolve_entity_kind_batch`). Works identically for v1 and v2
+    entities — this is what replaced the v1-era merge-chain retype. A
+    revert is just another assignment row (I7: recorded + reversible).
+    """
+    if conn.execute("SELECT 1 FROM entities WHERE id = ?", (entity_id,)).fetchone() is None:
+        msg = f"entity not found: {entity_id!r}"
+        raise ValueError(msg)
+    row_id = _new_row_id()
+    assigned_at = _now_iso()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO entity_kind_assignments (
+                id, entity_id, kind_slug, assigned_at, assigned_by,
+                confidence, reason, source_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_id,
+                entity_id,
+                kind_slug,
+                assigned_at,
+                assigned_by,
+                confidence,
+                reason,
+                source_event_id,
+            ),
+        )
+    return EntityKindAssignment(
+        id=row_id,
+        entity_id=entity_id,
+        kind_slug=kind_slug,
+        assigned_at=assigned_at,
+        assigned_by=assigned_by,
+        confidence=confidence,
+        reason=reason,
+        source_event_id=source_event_id,
+    )
+
+
 def retype_entity(
     conn: sqlite3.Connection,
     *,
@@ -365,16 +535,14 @@ def retype_entity(
     source_event_id: str,
     reason: str = "operator re-typed",
 ) -> EntityMerge | None:
-    """Re-type an entity append-only — the operator correction for a
-    miscategorised entity (e.g. "Maxime" extracted as a person when it is a
-    product). ADR-0002 belief-correction.
+    """DEPRECATED (ADR-0003 Phase 2) — the v1-era merge-based retype.
 
-    An entity's identity encodes its kind (``entity:<sha256(name|kind)>``), so
-    re-typing cannot be an in-place edit (I2 forbids it anyway). It is a MERGE:
-    the old ``(name, from_kind)`` is merged into a fresh ``(name, to_kind)``.
-    ``resolve_canonical`` then redirects the old entity's mentions and edges to
-    the correctly-typed one, while the old entity stays as history. Reuses the
-    existing, tested merge machinery rather than a bespoke path.
+    A v1 entity's identity encodes its kind (``entity:<sha256(name|kind)>``),
+    so this path re-typed by MERGE: the old ``(name, from_kind)`` merged into
+    a fresh ``(name, to_kind)`` entity, growing a merge chain per correction.
+    Retype is now ONE :func:`assign_entity_kind` row — identity unchanged,
+    no merge. This function stays for reading history and for tooling that
+    still walks v1 vaults mid-transition; new code must not call it.
 
     Returns the merge row, or None if ``from_kind == to_kind`` or the source
     entity does not exist (nothing to re-type).
@@ -917,6 +1085,52 @@ def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> 
     # canonical (deepest-reached) ID. IDs with no merges resolve to
     # themselves via the seed row at depth 0.
     return {row["start_id"]: row["current_id"] for row in rows}
+
+
+def resolve_entity_kind_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, str]:
+    """The CURRENT kind slug per entity, in one query (ADR-0003 Phase 2).
+
+    Full resolution order (the backward-compatible read path):
+
+        entities.kind  →  latest entity_kind_assignments row (if any)
+                       →  kind_revisions chain (rename/merge, latest wins)
+                       →  the slug served
+
+    Step 1+2 come from the ``entity_current_kind_v1`` view — an existing
+    entity with no assignment row resolves to its stored ``entities.kind``
+    byte-identically (zero backfill). Step 3 pipes the slug through the
+    kind-registry revision chain so a registry-level merge (``organization``
+    → ``company``) retypes every affected entity at read time with a single
+    revision row and no per-entity writes. Unknown IDs are absent from the
+    result (mirrors ``read_entities_batch``).
+    """
+    unique = list({e for e in entity_ids if isinstance(e, str) and e})
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    rows = conn.execute(
+        f"SELECT entity_id, kind_slug FROM entity_current_kind_v1 "
+        f"WHERE entity_id IN ({placeholders})",
+        unique,
+    ).fetchall()
+    slugs = {row["entity_id"]: row["kind_slug"] for row in rows}
+    chain = resolve_kind_batch(conn, list(slugs.values()))
+    return {eid: chain.get(slug, slug) for eid, slug in slugs.items()}
+
+
+def resolve_entity_kind(conn: sqlite3.Connection, eid: str) -> str | None:
+    """Single-entity variant of :func:`resolve_entity_kind_batch`.
+
+    Returns None when the entity does not exist. Prefer the batch helper on
+    hot paths (recall) — this one is for corrections and tests.
+    """
+    row = conn.execute(
+        "SELECT kind_slug FROM entity_current_kind_v1 WHERE entity_id = ?",
+        (eid,),
+    ).fetchone()
+    if row is None:
+        return None
+    return resolve_kind_slug(conn, row["kind_slug"])
 
 
 # ── row mappers ───────────────────────────────────────────────────────────

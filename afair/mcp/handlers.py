@@ -71,6 +71,7 @@ from ..substrate import (
     read_object,
     read_pending_corrections,
     resolve_canonical_batch,
+    resolve_entity_kind_batch,
     retracted_entity_ids,
     rrf_merge,
     search_fts,
@@ -532,6 +533,10 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
 
     resolved_map = resolve_canonical_batch(db, list(raw_ids))
     canonical_entities = read_entities_batch(db, resolved_map.values())
+    # ADR-0003 Phase 2: serve each entity's CURRENT kind (latest assignment,
+    # else its immutable stored kind, piped through the registry chain) — a
+    # retype is one assignment row and recall reflects it immediately.
+    kind_by_entity = resolve_entity_kind_batch(db, list(canonical_entities.keys()))
     # Retracted (noise) entities are withdrawn from the live graph — never
     # surface them, nor edges that touch them, even though their rows + mentions
     # remain as history (I2).
@@ -580,7 +585,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                 {
                     "id": entity.id,
                     "canonical_name": entity.canonical_name,
-                    "kind": entity.kind,
+                    "kind": kind_by_entity.get(entity.id, entity.kind),
                     "surface_form": m.surface_form,
                     "match_method": m.match_method,
                 }
