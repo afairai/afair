@@ -62,7 +62,7 @@ The substrate lives on disk under the user's control. Self-hosting is first-clas
 No code path may privilege one AI provider. The architecture must function with Claude, GPT, Gemini, Mistral, and local models, with feature parity where the model class allows.
 
 ### I6. Emergent Over Imposed
-No fixed ontology of memory types ships with the system. A minimal bootstrap scaffold is acceptable; the system must be able to revise, merge, split, and discard categories based on usage. Forever.
+No fixed ontology of memory types ships with the system. A minimal bootstrap scaffold is acceptable; the system must be able to revise, merge, split, and discard categories based on usage. Forever. (Implementation status: event-level typing is free-text today, while entity kinds still use a fixed seven-value bootstrap enum that the system does not yet revise.)
 
 ### I7. Recursive Self-Modification with Rollback
 The system may revise its own extraction rules, retrieval strategies, and agent compositions at runtime. Every modification is recorded in the substrate. Every modification is reversible. Invariants I1–I6 are exempt, they are the irreducible kernel.
@@ -257,9 +257,9 @@ This is what makes recursive self-improvement safe: the substrate is invariant, 
 
 **Warm path (async, seconds).** A new observation arrives: from a user `remember` call, or from a Salience-routed `sense` event. Observer logs to substrate. Extractor processes async. By the time the user calls back, the new info is integrated. Caller never waits.
 
-**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology. Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
+**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology (planned; not yet implemented, the entity dedup and audit workers are its v0). Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
 
-Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
+Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). This is the design target; today every cold-path worker shares one configured model and only the judge panel is multi-model. Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
 
 User queries and external sensing events share the same event schema with different `origin` tags. The Salience Agent routes them through the appropriate path based on content, priority, and current mode. No separate ingestion pipeline.
 
@@ -430,7 +430,7 @@ Six points, each correspondingly hard to replicate.
 2. **Single-tenant by design.** Every user instance is physically isolated: own machine, own SQLite, own state. Cannot be matched by venture-funded competitors whose margins depend on multi-tenancy.
 3. **EU-native compliance.** Designed for GDPR + AI Act from day one. Data residency, audit trails, right-to-erasure built into the substrate model and deployment topology (destroy a machine = full deletion). US-first players retrofit; this starts there.
 4. **Emergent ontology.** No two users' vaults look alike after a few months. The system becomes a cognitive fingerprint. Generic "memory layers" cannot compete on personalization because they are statically schemaed.
-5. **Society-of-Mind swarm.** Each memory operation is handled by the right specialist at the right cost. Heterogeneous models per agent. Independent A/B testing. Orchestration is the IP; models are commoditized.
+5. **Society-of-Mind swarm.** Each memory operation is handled by the right specialist at the right cost. Heterogeneous models per agent (roadmap; today only the judge panel is multi-model). Independent A/B testing. Orchestration is the IP; models are commoditized.
 6. **User-owned as political position.** Not just architecture: a stance: *your cognition belongs to you, not to your AI provider*. That position becomes a brand, a community, and a long-term moat. The same logic that made 1Password and Fastmail durable.
 
 ---

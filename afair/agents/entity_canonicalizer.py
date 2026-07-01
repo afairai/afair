@@ -187,7 +187,7 @@ Guidance:
 - Different person/org/place that happens to share a name → no match;
   return null and explain why in the reason.
 - When in doubt, prefer null (a new entity) — false merges are harder to
-  undo than false splits. The system's Schema-Evolver later cleans up.
+  undo than false splits. A later dedup pass cleans up.
 - Use the record_entity_match tool exactly once.
 """
 
