@@ -58,6 +58,13 @@ def enforce_write_scope() -> None:
     ASGI scope (set by ``BearerOrJwtMiddleware``). Fails OPEN when there is no
     HTTP request context — that path is direct/in-process invocation (unit
     tests, the cold-path workers) which is implicitly full-access. (Security L2.)
+
+    Missing-scope handling: every successful auth path in
+    ``BearerOrJwtMiddleware`` stamps BOTH ``SCOPE_IDENTITY_KEY`` and
+    ``SCOPE_TOKEN_SCOPE_KEY``; local self-host / no-auth mode stamps
+    neither. So "identity present but scope absent" is anomalous
+    (auth ran but no scope was recorded) and fails CLOSED, while
+    "no identity" is the local no-auth path and stays allowed.
     """
     from fastmcp.exceptions import ToolError
     from fastmcp.server.dependencies import get_http_request
@@ -66,7 +73,16 @@ def enforce_write_scope() -> None:
         request = get_http_request()
     except Exception:
         return  # no HTTP context — direct/in-process call, allow
-    token_scope = request.scope.get(SCOPE_TOKEN_SCOPE_KEY, "full")
+    token_scope = request.scope.get(SCOPE_TOKEN_SCOPE_KEY)
+    if token_scope is None:
+        if request.scope.get(SCOPE_IDENTITY_KEY) is not None:
+            # Authenticated request without a stamped scope — should be
+            # impossible; deny writes rather than fail open.
+            raise ToolError(
+                "authenticated credential carries no permission scope; "
+                "write operations (remember, observe) are denied"
+            )
+        return  # no auth configured (local self-host) — allow
     if token_scope == "read":
         raise ToolError(
             "this token has read-only scope; write operations (remember, "

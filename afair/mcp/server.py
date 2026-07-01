@@ -204,6 +204,12 @@ def build_server(settings: Settings) -> FastMCP:
         feedback: schemas.RecallFeedback | None = None,
         decide: schemas.CorrectionDecision | None = None,
     ) -> schemas.RecallResult:
+        # decide= applies corrections (entity merges/retractions, observe
+        # events) — a write, so it needs write scope like remember/observe.
+        # feedback= only writes a best-effort tuner_state telemetry row
+        # (no user-facing state), so read-only tokens may still give it.
+        if decide is not None:
+            enforce_write_scope()
         return handlers.recall(
             query=query,
             scope=scope,
