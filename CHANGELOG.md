@@ -10,6 +10,26 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.4](https://github.com/afairai/afair/compare/v0.1.3...v0.1.4) (2026-07-01)
+
+
+### Features
+
+* **agents:** per-agent model configuration (heterogeneous models per agent) ([27b0300](https://github.com/afairai/afair/commit/27b030087cadbf765d1e989c472b2cfdda8f7c46))
+
+
+### Bug Fixes
+
+* **auth:** enforce write-scope on recall(decide) and fail closed on missing scope ([4392d0c](https://github.com/afairai/afair/commit/4392d0c96a9c1a9897bebd2b91b07aa27e6f5bf4))
+* **installer:** preserve a client's existing URL + safe snippet refresh ([0b45725](https://github.com/afairai/afair/commit/0b4572505e10b3cdfffd1bbe039c34138b3a28f3))
+* **substrate:** recall must honor operator merge-invalidations; observe cannot spoof reserved payload keys ([7aaf063](https://github.com/afairai/afair/commit/7aaf06329216377f784d77625993f1df33190f05))
+* **tuner:** default promotion off; keep raw event text out of the judge panel ([1380114](https://github.com/afairai/afair/commit/1380114592fa09f486ad48827bbc0694b01db3cd))
+
+
+### Documentation
+
+* **vision:** mark Schema-Evolver, per-agent models, entity-kind enum as roadmap not current ([86c8a79](https://github.com/afairai/afair/commit/86c8a799f5c5393a195b77f04e5bb74beb3ee30f))
+
 ## [0.1.3](https://github.com/afairai/afair/compare/v0.1.2...v0.1.3) (2026-07-01)
 
 
