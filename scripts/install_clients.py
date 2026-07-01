@@ -3,11 +3,15 @@
 
 Detects and configures (only when the client looks installed):
 
-  - Claude Code    → ~/.claude/settings.json + ~/.claude/CLAUDE.md
-  - Codex CLI      → ~/.codex/config.toml    + ~/.codex/AGENTS.md
-  - Cursor         → ~/.cursor/mcp.json      + ~/.cursor/rules/afair.md
-  - GitHub Copilot → VS Code user mcp.json   + prints per-repo snippet step
-  - Claude.ai      → UI only; prints manual steps
+  - Claude Code        → ~/.claude/settings.json + ~/.claude/CLAUDE.md
+  - Codex CLI          → ~/.codex/config.toml    + ~/.codex/AGENTS.md
+  - Cursor             → ~/.cursor/mcp.json      + ~/.cursor/rules/afair.md
+  - GitHub Copilot     → VS Code user mcp.json   + prints per-repo snippet step
+  - GitHub Copilot CLI → ~/.copilot/mcp-config.json          + snippet note
+  - Gemini CLI         → ~/.gemini/settings.json             + snippet note
+  - Windsurf           → ~/.codeium/windsurf/mcp_config.json + snippet note
+  - Antigravity        → ~/.gemini/config/mcp_config.json    + snippet note
+  - Claude.ai          → UI only; prints manual steps
 
 Idempotent: running again replaces the existing afair entry and does
 not duplicate the instruction snippet. Always backs up any file it changes
@@ -54,7 +58,17 @@ DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 
 # Selectable client keys, in install order. `claude-ai` is print-only (its setup
 # is a UI walk-through, not a file write). Used by --only / --skip.
-CLIENT_KEYS: tuple[str, ...] = ("claude-code", "codex", "cursor", "copilot", "claude-ai")
+CLIENT_KEYS: tuple[str, ...] = (
+    "claude-code",
+    "codex",
+    "cursor",
+    "copilot",
+    "copilot-cli",
+    "gemini-cli",
+    "windsurf",
+    "antigravity",
+    "claude-ai",
+)
 
 # Idempotency markers: the current snippet heading, plus the legacy wrapper
 # older installs wrote, so re-running never double-appends.
@@ -544,6 +558,135 @@ def install_copilot(*, token: str, url: str, dry: bool) -> list[Change]:
     return changes
 
 
+# ── other terminal MCP clients (shared "mcpServers" JSON shape) ──────────────
+#
+# These all store remote MCP servers in a JSON file with a top-level
+# "mcpServers" object, but each names the URL field differently (verified
+# against each tool's docs, 2026-07):
+#   - GitHub Copilot CLI  ~/.copilot/mcp-config.json           type:http + url + tools
+#   - Gemini CLI          ~/.gemini/settings.json              httpUrl
+#   - Windsurf            ~/.codeium/windsurf/mcp_config.json  serverUrl
+#   - Antigravity         ~/.gemini/config/mcp_config.json     serverUrl
+# Their per-tool instruction files differ and are easy to get wrong, so we write
+# the server wiring (the part that matters) and print one snippet pointer.
+
+WINDSURF_APP = Path("/Applications/Windsurf.app")
+ANTIGRAVITY_APP = Path("/Applications/Antigravity.app")
+
+
+def _write_mcpservers_entry(
+    *, label: str, path: Path, entry: dict[str, Any], dry: bool
+) -> list[Change]:
+    """Merge the afair entry into a ``{"mcpServers": {...}}`` JSON file.
+
+    Shared by the clients that use that schema; only the per-client ``entry``
+    shape (url vs httpUrl vs serverUrl, etc.) differs. Existing servers are
+    preserved, the file is backed up, and a matching entry is a no-op."""
+    config: dict[str, Any] = {}
+    if path.exists():
+        text = path.read_text().strip()
+        if text:
+            try:
+                config = json.loads(text)
+            except json.JSONDecodeError as e:
+                _err(f"{label}: {path} is malformed: {e}")
+                return []
+    servers = config.setdefault("mcpServers", {})
+    if servers.get(SERVER_NAME) == entry:
+        _ok(f"{label}: {path.name} already up to date")
+        return []
+    backup = _backup(path, dry)
+    if not dry:
+        servers[SERVER_NAME] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+    action = "would write" if dry else "wrote"
+    msg = f"{label}: {action} {path}"
+    if backup:
+        msg += f" (backup: {backup.name})"
+    _ok(msg)
+    return [Change("config", path, action)]
+
+
+def _snippet_note(label: str, where: str) -> None:
+    _warn(f"{label}: add the instruction snippet to {where}")
+    print("       (the snippet is in docs/clients/_snippet.md), so the agent")
+    print("       reaches for recall/remember/observe on its own.")
+
+
+def _detect_copilot_cli() -> bool:
+    return (Path.home() / ".copilot").exists() or shutil.which("copilot") is not None
+
+
+def _detect_gemini_cli() -> bool:
+    return (Path.home() / ".gemini" / "settings.json").exists() or shutil.which(
+        "gemini"
+    ) is not None
+
+
+def _detect_windsurf() -> bool:
+    return (Path.home() / ".codeium" / "windsurf").exists() or WINDSURF_APP.exists()
+
+
+def _detect_antigravity() -> bool:
+    return (Path.home() / ".gemini" / "config").exists() or ANTIGRAVITY_APP.exists()
+
+
+def install_copilot_cli(*, token: str, url: str, dry: bool) -> list[Change]:
+    if not _detect_copilot_cli():
+        _skip("GitHub Copilot CLI not detected (no ~/.copilot, no `copilot` in PATH)")
+        return []
+    path = Path.home() / ".copilot" / "mcp-config.json"
+    entry: dict[str, Any] = {"type": "http", "url": url, "tools": ["*"]}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
+    changes = _write_mcpservers_entry(label="GitHub Copilot CLI", path=path, entry=entry, dry=dry)
+    _snippet_note("GitHub Copilot CLI", "a repo .github/copilot-instructions.md or AGENTS.md")
+    return changes
+
+
+def install_gemini_cli(*, token: str, url: str, dry: bool) -> list[Change]:
+    if not _detect_gemini_cli():
+        _skip("Gemini CLI not detected (no ~/.gemini/settings.json, no `gemini` in PATH)")
+        return []
+    path = Path.home() / ".gemini" / "settings.json"
+    # Gemini CLI uses `httpUrl` (not `url`) for the Streamable HTTP transport.
+    entry: dict[str, Any] = {"httpUrl": url}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
+    changes = _write_mcpservers_entry(label="Gemini CLI", path=path, entry=entry, dry=dry)
+    _snippet_note("Gemini CLI", "~/.gemini/GEMINI.md")
+    return changes
+
+
+def install_windsurf(*, token: str, url: str, dry: bool) -> list[Change]:
+    if not _detect_windsurf():
+        _skip("Windsurf not detected (no ~/.codeium/windsurf, no /Applications/Windsurf.app)")
+        return []
+    path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+    # Windsurf uses `serverUrl` (not `url`) for remote HTTP servers.
+    entry: dict[str, Any] = {"serverUrl": url}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
+    changes = _write_mcpservers_entry(label="Windsurf", path=path, entry=entry, dry=dry)
+    _snippet_note("Windsurf", "Windsurf → Settings → Rules (global rules)")
+    return changes
+
+
+def install_antigravity(*, token: str, url: str, dry: bool) -> list[Change]:
+    if not _detect_antigravity():
+        _skip("Antigravity not detected (no ~/.gemini/config, no /Applications/Antigravity.app)")
+        return []
+    path = Path.home() / ".gemini" / "config" / "mcp_config.json"
+    # Antigravity also uses `serverUrl` for remote HTTP servers.
+    entry: dict[str, Any] = {"serverUrl": url}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
+    changes = _write_mcpservers_entry(label="Antigravity", path=path, entry=entry, dry=dry)
+    _snippet_note("Antigravity", "a repo-root AGENTS.md")
+    return changes
+
+
 # ── Claude.ai ───────────────────────────────────────────────────────────────
 
 
@@ -613,6 +756,10 @@ CLIENT_LABELS: dict[str, str] = {
     "codex": "Codex CLI",
     "cursor": "Cursor",
     "copilot": "GitHub Copilot (VS Code)",
+    "copilot-cli": "GitHub Copilot CLI",
+    "gemini-cli": "Gemini CLI",
+    "windsurf": "Windsurf",
+    "antigravity": "Antigravity",
     "claude-ai": "Claude.ai (web)",
 }
 
@@ -654,6 +801,10 @@ def detect_clients(url: str) -> dict[str, bool]:
         "codex": _detect_codex(),
         "cursor": _detect_cursor(),
         "copilot": _detect_copilot(),
+        "copilot-cli": _detect_copilot_cli(),
+        "gemini-cli": _detect_gemini_cli(),
+        "windsurf": _detect_windsurf(),
+        "antigravity": _detect_antigravity(),
         "claude-ai": not _is_loopback(url),
     }
 
@@ -798,6 +949,10 @@ def main() -> int:
         "codex": install_codex,
         "cursor": install_cursor,
         "copilot": install_copilot,
+        "copilot-cli": install_copilot_cli,
+        "gemini-cli": install_gemini_cli,
+        "windsurf": install_windsurf,
+        "antigravity": install_antigravity,
     }
     changes: list[Change] = []
     for key in selected:

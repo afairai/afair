@@ -178,6 +178,54 @@ def test_select_clients_only_and_skip_conflict(installer: ModuleType) -> None:
         installer.select_clients("codex", "cursor")
 
 
+# ── other terminal clients (Copilot CLI / Gemini CLI / Windsurf / Antigravity) ─
+
+
+def test_copilot_cli_uses_type_http_url_and_tools(installer: ModuleType, home: Path) -> None:
+    (home / ".copilot").mkdir()  # detected
+    installer.install_copilot_cli(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    entry = json.loads((home / ".copilot" / "mcp-config.json").read_text())["mcpServers"]["afair"]
+    assert entry == {"type": "http", "url": "http://127.0.0.1:8765/mcp", "tools": ["*"]}
+
+
+def test_gemini_cli_uses_httpurl_field(installer: ModuleType, home: Path) -> None:
+    (home / ".gemini").mkdir()
+    (home / ".gemini" / "settings.json").write_text("{}")  # detected
+    installer.install_gemini_cli(token="tok", url="https://v.fly.dev/mcp", dry=False)
+    entry = json.loads((home / ".gemini" / "settings.json").read_text())["mcpServers"]["afair"]
+    # Gemini CLI's streamable-HTTP field is httpUrl, not url.
+    assert entry == {"httpUrl": "https://v.fly.dev/mcp", "headers": {"Authorization": "Bearer tok"}}
+
+
+def test_windsurf_uses_serverurl_field(installer: ModuleType, home: Path) -> None:
+    (home / ".codeium" / "windsurf").mkdir(parents=True)  # detected
+    installer.install_windsurf(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    cfg = json.loads((home / ".codeium" / "windsurf" / "mcp_config.json").read_text())
+    assert cfg["mcpServers"]["afair"] == {"serverUrl": "http://127.0.0.1:8765/mcp"}
+
+
+def test_antigravity_uses_serverurl_field(installer: ModuleType, home: Path) -> None:
+    (home / ".gemini" / "config").mkdir(parents=True)  # detected
+    installer.install_antigravity(token="", url="http://127.0.0.1:8765/mcp", dry=False)
+    cfg = json.loads((home / ".gemini" / "config" / "mcp_config.json").read_text())
+    assert cfg["mcpServers"]["afair"] == {"serverUrl": "http://127.0.0.1:8765/mcp"}
+
+
+def test_new_clients_skip_when_absent(
+    installer: ModuleType, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(installer.shutil, "which", lambda _: None)
+    monkeypatch.setattr(installer, "WINDSURF_APP", home / "nope1")
+    monkeypatch.setattr(installer, "ANTIGRAVITY_APP", home / "nope2")
+    for fn in (
+        installer.install_copilot_cli,
+        installer.install_gemini_cli,
+        installer.install_windsurf,
+        installer.install_antigravity,
+    ):
+        assert fn(token="", url="http://127.0.0.1:8765/mcp", dry=False) == []
+
+
 # ── loopback / web-client gating ─────────────────────────────────────────────
 
 
