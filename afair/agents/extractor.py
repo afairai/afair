@@ -42,8 +42,8 @@ from .prompts import (
     EXTRACTOR_SYSTEM_PROMPT,
     EXTRACTOR_TOOL_DESCRIPTION,
     EXTRACTOR_TOOL_NAME,
-    EXTRACTOR_TOOL_SCHEMA,
     build_user_message,
+    extractor_tool_schema,
 )
 
 # Thread-local DB connection for the extractor pool. See
@@ -401,7 +401,7 @@ def _run_extraction(
                 system_prompt=EXTRACTOR_SYSTEM_PROMPT,
                 tool_name=EXTRACTOR_TOOL_NAME,
                 tool_description=EXTRACTOR_TOOL_DESCRIPTION,
-                tool_schema=EXTRACTOR_TOOL_SCHEMA,
+                tool_schema=extractor_tool_schema(db),
                 model=vision_model,
                 api_key=vision_api_key,
             )
@@ -428,7 +428,7 @@ def _run_extraction(
                 user=build_user_message(event, extracted_text=extracted_text),
                 tool_name=EXTRACTOR_TOOL_NAME,
                 tool_description=EXTRACTOR_TOOL_DESCRIPTION,
-                tool_schema=EXTRACTOR_TOOL_SCHEMA,
+                tool_schema=extractor_tool_schema(db),
                 api_key=api_key,
             )
         except LLMError as e:

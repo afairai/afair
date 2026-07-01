@@ -12,12 +12,16 @@ how to handle ambiguity); shape enforcement is handled by tool-use.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..substrate.kinds import BOOTSTRAP_KIND_SLUGS, live_kind_slugs
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from ..substrate.events import Event
 
 
@@ -84,15 +88,11 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
                     "name": {"type": "string"},
                     "type": {
                         "type": "string",
-                        "enum": [
-                            "person",
-                            "organization",
-                            "place",
-                            "project",
-                            "product",
-                            "concept",
-                            "other",
-                        ],
+                        # The bootstrap seven — the registry-unavailable
+                        # fallback. Live extraction renders the current
+                        # kind set via extractor_tool_schema() below
+                        # (ADR-0003 Phase 1: kinds are data, not code).
+                        "enum": list(BOOTSTRAP_KIND_SLUGS),
                     },
                 },
                 "required": ["name", "type"],
@@ -164,6 +164,24 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
     },
     "required": ["best_guess_kind", "summary"],
 }
+
+
+def extractor_tool_schema(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Render the extractor tool schema with the entity-kind enum read from
+    the kind registry at prompt-build time (ADR-0003 Phase 1).
+
+    The static :data:`EXTRACTOR_TOOL_SCHEMA` carries the bootstrap seven;
+    this renderer swaps in the registry's current live kinds so an ontology
+    revision reaches the extractor without a code change. Falls back to the
+    bootstrap seven when the registry is unavailable (``conn=None`` or a
+    bare test DB) — with an unrevised registry the result is byte-identical
+    to the static constant. Deep-copied: mutating the returned dict never
+    touches the shared constant.
+    """
+    schema = copy.deepcopy(EXTRACTOR_TOOL_SCHEMA)
+    kind_property = schema["properties"]["entities"]["items"]["properties"]["type"]
+    kind_property["enum"] = list(live_kind_slugs(conn))
+    return schema
 
 
 EXTRACTOR_SYSTEM_PROMPT = f"""\

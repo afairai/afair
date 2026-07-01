@@ -40,6 +40,7 @@ from .entities import (
     write_merge_invalidation,
 )
 from .events import write_event
+from .kinds import live_kind_slugs, resolve_to_live_kind
 
 if TYPE_CHECKING:
     import sqlite3
@@ -81,13 +82,6 @@ class CorrectionOutcome(BaseModel):
 def _entity_name(conn: sqlite3.Connection, entity_id: str) -> str:
     row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?", (entity_id,)).fetchone()
     return row["canonical_name"] if row is not None else entity_id
-
-
-# The emergent kinds the extractor assigns (relations.type enum). A reject
-# correction's target kind must be one of these — parse, don't cast.
-ENTITY_KINDS = frozenset(
-    {"person", "organization", "place", "project", "product", "concept", "other"}
-)
 
 
 def _prompt_for(conn: sqlite3.Connection, kind: str, name: str, detail: dict[str, Any]) -> str:
@@ -356,8 +350,9 @@ def decide_correction(
     (or a corrective reject) implies a change.
 
     ``to_kind`` carries the corrected kind for a ``merge_review`` reject ("no,
-    Clario is a project, not a product"). It's validated against the known
-    entity kinds — a bad value is a ValueError, not a silently-stored cast.
+    Clario is a project, not a product"). It's validated against the kind
+    registry (ADR-0003 Phase 1): the slug must resolve to a live registry
+    kind — a bad value is a ValueError, not a silently-stored cast.
 
     Idempotent against a decided proposal: a second decision on an
     already-decided row reports the prior status, so a double-click or retry
@@ -366,9 +361,14 @@ def decide_correction(
     if verdict not in ("confirm", "reject", "retract"):
         msg = f"verdict must be 'confirm', 'reject' or 'retract', got {verdict!r}"
         raise ValueError(msg)
-    if to_kind is not None and to_kind not in ENTITY_KINDS:
-        msg = f"to_kind must be one of {sorted(ENTITY_KINDS)}, got {to_kind!r}"
-        raise ValueError(msg)
+    if to_kind is not None:
+        resolved_kind = resolve_to_live_kind(conn, to_kind)
+        if resolved_kind is None:
+            msg = f"to_kind must be one of {sorted(live_kind_slugs(conn))}, got {to_kind!r}"
+            raise ValueError(msg)
+        # A slug renamed/merged in the registry resolves to its live
+        # successor; with no revisions (the Phase 1 state) this is identity.
+        to_kind = resolved_kind
 
     row = conn.execute(
         "SELECT kind, entity_id, detail, status FROM proposed_corrections WHERE id = ?",

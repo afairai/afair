@@ -190,6 +190,57 @@ def test_decide_rejects_bad_to_kind(db: sqlite3.Connection, settings: Settings) 
         decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="banana")
 
 
+def _append_kind_revision(
+    conn: sqlite3.Connection, *, action: str, from_slug: str, to_slug: str | None = None
+) -> None:
+    """Append a raw kind_revisions row (what a Phase-5 apply path will write)."""
+    from ulid import ULID
+
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO kind_revisions (
+                id, action, from_slug, to_slug, detail,
+                revised_at, revised_by, reason, source_event_id
+            ) VALUES (?, ?, ?, ?, NULL, ?, 'test', 'test revision', NULL)
+            """,
+            (str(ULID()), action, from_slug, to_slug, "2026-07-01T00:00:00+00:00"),
+        )
+
+
+def test_decide_rejects_dead_slug(db: sqlite3.Connection, settings: Settings) -> None:
+    """to_kind validation reads the kind registry (ADR-0003 Phase 1): a
+    deprecated slug is no longer a valid target, exactly like an unknown one."""
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    _append_kind_revision(db, action="deprecate", from_slug="concept")
+    with pytest.raises(ValueError, match="to_kind must be one of"):
+        decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="concept")
+
+
+def test_decide_resolves_renamed_slug_to_live_successor(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A slug renamed away in the registry resolves through the revision chain
+    to its live successor before the retype is applied."""
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    with db:
+        db.execute(
+            "INSERT INTO kind_registry (id, slug, label, description, created_at, "
+            "created_by, source_event_id) "
+            "VALUES ('kind:company', 'company', 'Company', NULL, "
+            "'2026-07-01T00:00:00+00:00', 'test', NULL)"
+        )
+    _append_kind_revision(db, action="rename", from_slug="organization", to_slug="company")
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="organization")
+    assert out.status == "applied"
+    # The retype landed on the resolved live kind, not the dead slug.
+    company_id = entity_id("Clario", "company")
+    assert resolve_canonical(db, entity_id("Clario", "product")) == company_id
+
+
 def test_merge_review_retract_withdraws_the_entity(
     db: sqlite3.Connection, settings: Settings
 ) -> None:

@@ -62,6 +62,7 @@ from ..substrate.entities import (
     write_entity_mention,
 )
 from ..substrate.events import read_event_by_hash
+from ..substrate.kinds import live_kind_slugs, resolve_kind_slug
 from .cold_path import ColdPathWorker
 from .entity_articles import ENTITY_ARTICLE_KIND
 from .interpretation import write_interpretation
@@ -477,7 +478,7 @@ def _canonicalize_one_event(
             continue
         surface_form = str(entity_dict.get("name") or "").strip()
         kind_raw = str(entity_dict.get("type") or "other").strip()
-        kind = _normalize_kind(kind_raw)
+        kind = _normalize_kind(kind_raw, conn)
         if not surface_form:
             continue
         if surface_form in resolved:
@@ -940,26 +941,35 @@ def _cascade_invalidation(conn: sqlite3.Connection, invalidate_event: Event) -> 
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
-_VALID_KINDS = {"person", "organization", "place", "project", "product", "concept", "other"}
 
+def _normalize_kind(kind_raw: str, conn: sqlite3.Connection | None = None) -> str:
+    """Map extractor kind strings to the current registry kind set.
 
-def _normalize_kind(kind_raw: str) -> str:
-    """Map extractor kind strings to the substrate's canonical set.
-
-    The Extractor's tool schema enums to a fixed list (see prompts.py),
-    but we accept upstream variants (singular/plural, case) defensively.
-    Unknown values fall back to 'other'.
+    The valid kinds live in the ``kind_registry`` (ADR-0003 Phase 1),
+    read via :func:`live_kind_slugs` — which falls back to the bootstrap
+    seven when no connection is available, preserving the pre-registry
+    behavior byte-for-byte. The hardcoded variant map (singular/plural,
+    case, org → organization) stays as a deterministic first pass. A slug
+    the registry once knew but has since renamed/merged resolves through
+    the revision chain. Unknown values fall back to 'other'.
     """
     k = kind_raw.strip().lower()
-    if k in _VALID_KINDS:
+    valid = set(live_kind_slugs(conn))
+    if k in valid:
         return k
-    # Common variants.
+    # Common variants — kept from the enum era, still deterministic.
     if k in {"org", "organisation"}:
-        return "organization"
-    if k in {"people", "human", "individual"}:
-        return "person"
-    if k in {"places", "location", "city", "country"}:
-        return "place"
+        k = "organization"
+    elif k in {"people", "human", "individual"}:
+        k = "person"
+    elif k in {"places", "location", "city", "country"}:
+        k = "place"
+    if k in valid:
+        return k
+    if conn is not None:
+        resolved = resolve_kind_slug(conn, k)
+        if resolved in valid:
+            return resolved
     return "other"
 
 

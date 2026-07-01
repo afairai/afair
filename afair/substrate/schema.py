@@ -654,6 +654,128 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'event_temporal is append-only (Invariant I2)');
     END
     """,
+    # ── kind_registry: the emergent ontology's kind set (ADR-0003 Phase 1) ──
+    # Entity kinds become data instead of a hardcoded enum (I6). The current
+    # seven kinds are seeded at init with created_by='bootstrap:v1' (see
+    # substrate/kinds.py) — the "minimal bootstrap scaffold" I6 permits, a
+    # starting point rather than law. Append-only per I2: a kind is never
+    # edited or removed; its lifecycle is expressed as kind_revisions rows.
+    """
+    CREATE TABLE IF NOT EXISTS kind_registry (
+        id              TEXT PRIMARY KEY,
+        slug            TEXT NOT NULL UNIQUE,
+        label           TEXT NOT NULL,
+        description     TEXT,
+        created_at      TEXT NOT NULL,
+        created_by      TEXT NOT NULL,
+        source_event_id TEXT REFERENCES events(id)
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_registry_no_update
+    BEFORE UPDATE ON kind_registry
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_registry is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_registry_no_delete
+    BEFORE DELETE ON kind_registry
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_registry is append-only (Invariant I2)');
+    END
+    """,
+    # ── kind_revisions: the ontology's append-only revision history ─────────
+    # Latest-row-wins resolution (the tuner_state pattern): a slug's current
+    # successor is the to_slug of its latest 'rename'/'merge' row; a later
+    # 'restore' row terminates the chain at the slug itself (that is how a
+    # rename or merge is reversed — a compensating row, never a mutation, I7).
+    # A slug is live unless its latest revision row is deprecate/rename/merge.
+    """
+    CREATE TABLE IF NOT EXISTS kind_revisions (
+        id              TEXT PRIMARY KEY,
+        action          TEXT NOT NULL CHECK (action IN
+                            ('add','rename','merge','split','deprecate','restore')),
+        from_slug       TEXT,
+        to_slug         TEXT,
+        detail          TEXT,
+        revised_at      TEXT NOT NULL,
+        revised_by      TEXT NOT NULL,
+        reason          TEXT NOT NULL,
+        source_event_id TEXT REFERENCES events(id)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS kind_revisions_from_idx "
+    "ON kind_revisions(from_slug, revised_at DESC)",
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_revisions_no_update
+    BEFORE UPDATE ON kind_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_revisions is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_revisions_no_delete
+    BEFORE DELETE ON kind_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_revisions is append-only (Invariant I2)');
+    END
+    """,
+    # ── kind_observations: raw extractor kind proposals, preserved ──────────
+    # Free-text kinds never auto-register: the write path normalizes them
+    # deterministically (variant map, else 'other') so intake never blocks on
+    # ontology questions. The raw proposal is preserved here — the usage
+    # signal a future Schema-Evolver mines (when 'research_paper' shows up 40
+    # times squashed into 'concept', the promotion evidence sits in this
+    # table). Written from Phase 3 onward; the DDL ships in Phase 1 so the
+    # substrate shape is settled before any writer exists.
+    """
+    CREATE TABLE IF NOT EXISTS kind_observations (
+        id               TEXT PRIMARY KEY,
+        raw_kind         TEXT NOT NULL,
+        normalized_slug  TEXT NOT NULL,
+        entity_id        TEXT NOT NULL REFERENCES entities(id),
+        event_id         TEXT NOT NULL REFERENCES events(id),
+        observed_at      TEXT NOT NULL,
+        observed_by      TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS kind_observations_raw_idx ON kind_observations(raw_kind)",
+    "CREATE INDEX IF NOT EXISTS kind_observations_slug_idx "
+    "ON kind_observations(normalized_slug, observed_at)",
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_observations_no_update
+    BEFORE UPDATE ON kind_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_observations is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS kind_observations_no_delete
+    BEFORE DELETE ON kind_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'kind_observations is append-only (Invariant I2)');
+    END
+    """,
+    # ── kind_current_v1: SQL-inspectable view of the live ontology ──────────
+    # sqlite3 users can see the current kind set without Python. Views are
+    # versioned by name (I3): a changed definition ships as kind_current_v2,
+    # never a redefinition of _v1.
+    """
+    CREATE VIEW IF NOT EXISTS kind_current_v1 AS
+    SELECT k.slug,
+           k.label,
+           k.description,
+           NOT EXISTS (
+               SELECT 1 FROM kind_revisions r
+               WHERE r.from_slug = k.slug
+                 AND r.id = (SELECT r2.id FROM kind_revisions r2
+                             WHERE r2.from_slug = k.slug
+                             ORDER BY r2.revised_at DESC, r2.id DESC LIMIT 1)
+                 AND r.action IN ('deprecate','rename','merge')
+           ) AS is_live
+    FROM kind_registry k
+    """,
 )
 
 

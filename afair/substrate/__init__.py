@@ -61,6 +61,16 @@ from .events import (
     write_event,
     write_event_with_status,
 )
+from .kinds import (
+    BOOTSTRAP_KIND_SLUGS,
+    KindRow,
+    live_kind_slugs,
+    live_kinds,
+    resolve_kind_batch,
+    resolve_kind_slug,
+    resolve_to_live_kind,
+    seed_bootstrap_kinds,
+)
 from .objects import (
     StreamingObjectWriter,
     object_exists,
@@ -94,6 +104,7 @@ from .temporal import (
 )
 
 __all__ = [
+    "BOOTSTRAP_KIND_SLUGS",
     "SCHEMA_VERSION",
     "TEMPORAL_CLASSES",
     "CorrectionOutcome",
@@ -105,6 +116,7 @@ __all__ = [
     "EntityMerge",
     "Event",
     "EventTemporal",
+    "KindRow",
     "PendingCorrection",
     "StreamingObjectWriter",
     "build_binary_payload",
@@ -126,6 +138,8 @@ __all__ = [
     "iter_mentions_for_event",
     "latest_edge_review",
     "latest_edge_reviews_batch",
+    "live_kind_slugs",
+    "live_kinds",
     "next_occurrence",
     "next_relevant_moment",
     "object_exists",
@@ -148,12 +162,16 @@ __all__ = [
     "record_edge_review",
     "resolve_canonical",
     "resolve_canonical_batch",
+    "resolve_kind_batch",
+    "resolve_kind_slug",
+    "resolve_to_live_kind",
     "retract_entity",
     "retracted_entity_ids",
     "retype_entity",
     "rrf_merge",
     "search_fts",
     "search_vec",
+    "seed_bootstrap_kinds",
     "start_checkpoint_loop",
     "temporal_relevance",
     "upcoming_temporal",
