@@ -20,7 +20,13 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    WrapValidator,
+    model_validator,
+)
 
 
 def _canon_json(obj: Any) -> str:
@@ -162,6 +168,57 @@ RememberContent = Annotated[
     TextContent | BinaryContent | BlobRefContent | CompoundContent,
     Field(discriminator="type"),
 ]
+
+_CONTENT_TAGS = {"text", "binary", "blob-ref", "compound"}
+
+
+def _coerce_remember_content(v: Any, handler: Any) -> Any:
+    """Write-first intake: a ``remember`` is never rejected on content shape.
+
+    afair's substrate is append-only and re-interpretable (I2/I3), so the intake
+    priority is to accept and persist; the extractor then derives structure from
+    the raw event (I6). This normalises the client mistakes we actually see into
+    the canonical union instead of raising a ValidationError that would silently
+    drop the memory:
+
+    - a bare string -> a text event.
+    - a dict whose ``type`` isn't a content tag (e.g. an agent put its
+      ``type_hint`` value like 'fact' into ``content.type``) but that carries
+      ``text`` -> a text event with that text.
+    - anything else that still fails to validate (e.g. ``type: 'binary'`` with no
+      data) -> the raw payload serialised as text, so nothing is ever lost.
+
+    A well-formed call passes straight through, so the frozen contract and the
+    advertised JSON schema are unchanged (WrapValidator keeps the wrapped
+    schema); this only widens what is accepted. `handler` runs the normal
+    discriminated-union validation.
+    """
+    if isinstance(v, str):
+        v = {"type": "text", "text": v}
+    elif isinstance(v, dict) and v.get("type") not in _CONTENT_TAGS:
+        text = v.get("text")
+        v = {
+            "type": "text",
+            "text": text
+            if isinstance(text, str)
+            else json.dumps(v, ensure_ascii=False, sort_keys=True),
+        }
+    try:
+        return handler(v)
+    except ValidationError:
+        raw = (
+            v
+            if isinstance(v, str)
+            else json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
+        )
+        return handler({"type": "text", "text": raw})
+
+
+RememberContentInput = Annotated[RememberContent, WrapValidator(_coerce_remember_content)]
+"""The `remember` tool parameter type: the canonical union, wrapped in a
+write-first coercion so malformed content is normalised (worst case: stored as
+text) instead of rejected. The generated JSON schema is still
+``RememberContent``'s, so the advertised tool contract (I1) is unchanged."""
 
 
 class RememberResult(BaseModel):
@@ -479,14 +536,26 @@ class ObserveEvent(BaseModel):
     subject: str | None = Field(default=None, max_length=MAX_OBSERVE_SUBJECT_CHARS)
     result: str | None = Field(default=None, max_length=MAX_OBSERVE_RESULT_CHARS)
 
-    @field_validator("action")
+    @model_validator(mode="before")
     @classmethod
-    def _action_not_blank(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
-            msg = "event.action must be a non-empty string"
-            raise ValueError(msg)
-        return stripped
+    def _accept_first(cls, data: Any) -> Any:
+        """Write-first intake: an ``observe`` is never rejected for a missing
+        action. ``action`` is the only hard requirement, so we default it rather
+        than drop the event (same principle as remember's content coercion).
+
+        - a dict without a usable ``action`` -> action defaults to 'observed'.
+        - a bare string -> that string becomes the action.
+        - anything else -> kept under a default action so it is still logged.
+        """
+        if isinstance(data, dict):
+            action = data.get("action")
+            if not isinstance(action, str) or not action.strip():
+                return {**data, "action": "observed"}
+            return data
+        if isinstance(data, str):
+            return {"action": data.strip() or "observed"}
+        dump = json.dumps(data, ensure_ascii=False, default=str)
+        return {"action": "observed", "result": dump[:MAX_OBSERVE_RESULT_CHARS]}
 
     @model_validator(mode="after")
     def _bound_extras(self) -> ObserveEvent:

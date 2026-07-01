@@ -176,7 +176,7 @@ def build_server(settings: Settings) -> FastMCP:
 
     @mcp.tool(description=descriptions.REMEMBER, version="1")
     def remember(
-        content: schemas.RememberContent,
+        content: schemas.RememberContentInput,
         context: str | None = None,
         type_hint: str | None = None,
         parent_hashes: list[str] | None = None,

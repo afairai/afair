@@ -6,7 +6,7 @@ import base64
 from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from afair.mcp import handlers
 from afair.mcp.context import ServerContext, clear_context, set_context
@@ -15,6 +15,7 @@ from afair.mcp.schemas import (
     MAX_REMEMBER_BYTES,
     BinaryContent,
     ObserveEvent,
+    RememberContentInput,
     TextContent,
 )
 from afair.substrate import open_db
@@ -314,14 +315,52 @@ def test_observe_basic(ctx: ServerContext) -> None:
     assert r.content_hash.startswith("sha256:")
 
 
-def test_observe_action_required() -> None:
-    with pytest.raises(ValidationError):
-        ObserveEvent(action="")
+def test_observe_missing_action_defaults_not_rejected() -> None:
+    # Write-first intake: a blank/missing action is defaulted, never rejected,
+    # so the event (subject/result/extras) is still logged instead of dropped.
+    assert ObserveEvent(action="").action == "observed"
+    assert ObserveEvent(action="   ").action == "observed"
+    e = ObserveEvent.model_validate({"subject": "file.py", "result": "edited"})
+    assert e.action == "observed"
+    assert e.subject == "file.py"
 
 
-def test_observe_action_whitespace_only() -> None:
-    with pytest.raises(ValidationError):
-        ObserveEvent(action="   ")
+def test_observe_bare_string_becomes_action() -> None:
+    assert ObserveEvent.model_validate("did a thing").action == "did a thing"
+
+
+# ── remember: write-first content coercion (never lose a memory) ─────────────
+
+_content = TypeAdapter(RememberContentInput)
+
+
+def test_remember_content_stray_type_coerced_to_text() -> None:
+    # The AFAIR-H shape: an agent put its type_hint value into content.type.
+    # Old behaviour raised union_tag_invalid and the memory was lost; now it is
+    # coerced to a text event instead.
+    out = _content.validate_python({"text": "AUFLOESUNG der Sache", "type": "fact"})
+    assert isinstance(out, TextContent)
+    assert out.text == "AUFLOESUNG der Sache"
+
+
+def test_remember_content_bare_string_becomes_text() -> None:
+    out = _content.validate_python("just a note")
+    assert isinstance(out, TextContent)
+    assert out.text == "just a note"
+
+
+def test_remember_content_unsalvageable_stored_as_raw_text() -> None:
+    # A valid tag but missing required fields (type:binary, no data) can't be a
+    # binary event; rather than reject, the raw payload is kept as text.
+    out = _content.validate_python({"type": "binary"})
+    assert isinstance(out, TextContent)
+    assert "binary" in out.text  # the raw payload survived, serialized
+
+
+def test_remember_valid_content_passes_through_unchanged() -> None:
+    out = _content.validate_python({"type": "text", "text": "hi"})
+    assert isinstance(out, TextContent)
+    assert out.text == "hi"
 
 
 def test_observe_preserves_extra_fields(ctx: ServerContext) -> None:
