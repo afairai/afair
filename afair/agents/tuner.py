@@ -5,10 +5,17 @@ Closes the recursive self-improvement loop: generate
 hypotheses, run replay + invariant guards + LLM-judge panel, and
 PROMOTE the variant when judge majority + guards both pass.
 
+Promotion is OPT-IN and off by default: ``promote_enabled=False``
+(the default) keeps the tuner observe-only — hypotheses + replay +
+guards run, but the judge panel is skipped and no promote rows are
+ever written. Production runs in this observe mode until a
+ground-truth eval-set exists to validate the judge.
+
 Phase B adds (over Phase A's observe-only behavior):
   * Real LLM-judge integration when a worker has a replay+judge
     shape registered.
-  * ``promote_enabled=True`` actually writes promote rows.
+  * ``promote_enabled=True`` (explicit opt-in) actually writes
+    promote rows.
   * Cooldown per tunable: after a rollback, the tunable is locked
     for ``ROLLBACK_COOLDOWN_DAYS``.
   * Halt conditions: if more than ``MAX_ROLLBACKS_PER_WEEK`` have
@@ -220,17 +227,19 @@ class Tuner(ColdPathWorker):
     Cold-path. Runs after the traffic trigger fires. One hypothesis
     per cycle.
 
-    ``promote_enabled`` defaults to True in Phase B. The flag still
-    exists so:
-      * Tests can disable promotion explicitly.
-      * Operators can fall back to observe-only by setting the flag
-        without redeploying the worker.
+    ``promote_enabled`` defaults to False (safe-by-default): a bare
+    ``Tuner()`` is observe-only — it generates hypotheses and runs
+    replay + invariant guards, but returns before the judge panel
+    and never writes promote rows. Promotion is opt-in via
+    ``Tuner(promote_enabled=True)``, held until a ground-truth
+    eval-set exists to validate the judge (see the 2026-06-03 audit
+    note in mcp/server.py).
     """
 
     name = "tuner"
     interval_seconds = 10 * 60
 
-    def __init__(self, *, promote_enabled: bool = True) -> None:
+    def __init__(self, *, promote_enabled: bool = False) -> None:
         self.promote_enabled = promote_enabled
 
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:

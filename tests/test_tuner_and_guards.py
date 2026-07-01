@@ -146,6 +146,19 @@ def conn(tmp_path):
     c.close()
 
 
+def test_tuner_promote_disabled_by_default() -> None:
+    """Safe-by-default: a bare ``Tuner()`` must never promote.
+
+    Production wires ``Tuner(promote_enabled=False)`` explicitly; the
+    class default has to match so a direct ``Tuner()`` (a test, a
+    self-hoster script, a future refactor) can't silently get live
+    promotion. Opt-in stays possible via the explicit flag.
+    """
+    assert Tuner().promote_enabled is False
+    assert Tuner(promote_enabled=True).promote_enabled is True
+    assert Tuner(promote_enabled=False).promote_enabled is False
+
+
 def test_tuner_first_boot_triggers(conn) -> None:
     """No prior cycle → the tuner must bootstrap and fire its first cycle.
 

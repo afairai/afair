@@ -35,7 +35,7 @@ class ReplayPair:
 
     event_id: str
     content_hash: str
-    input_summary: str  # short human-readable preview of the input
+    input_summary: str  # content-free structural summary of the input
     output_current: Any
     output_variant: Any
 
@@ -123,22 +123,23 @@ def replay_with_variants(
 
 
 def _summarize_event(event: Any) -> str:
-    """Short human-readable preview of an event for the judge prompt."""
-    payload = event.payload or {}
+    """Content-free structural summary of an event for the judge prompt.
+
+    Deliberately carries NO raw event content: no text snippets, no
+    entity surface forms, no action/subject strings, no type-hint
+    values (all user-authored, all potentially personal). This string
+    is sent verbatim to every third-party judge-panel member, so it
+    may only describe the SHAPE of the event — which is all the judge
+    needs to compare two scorings of the same input.
+    """
+    payload = event.payload if isinstance(event.payload, dict) else {}
     content_type = payload.get("content_type", "unknown")
     parts = [f"kind={event.kind}", f"content_type={content_type}"]
-    if hint := payload.get("type_hint"):
-        parts.append(f"type_hint={hint}")
-    # Add a snippet of the actual content for context.
-    text = payload.get("text") if isinstance(payload, dict) else None
-    if isinstance(text, str) and text:
-        snippet = text[:200].replace("\n", " ")
-        parts.append(f"text={snippet!r}")
-    elif content_type == "event":
-        action = payload.get("action")
-        subject = payload.get("subject")
-        if action:
-            parts.append(f"action={action}")
-        if subject:
-            parts.append(f"subject={subject}")
+    text = payload.get("text")
+    parts.append(f"text_chars={len(text) if isinstance(text, str) else 0}")
+    parts.append(f"type_hint_present={'yes' if payload.get('type_hint') else 'no'}")
+    parts.append(f"payload_field_count={len(payload)}")
+    created_at = getattr(event, "created_at", None)
+    if created_at:
+        parts.append(f"created_at={created_at}")
     return " | ".join(parts)

@@ -418,3 +418,59 @@ def test_replay_report_tracks_failures(conn) -> None:
     assert report.failed_current_count >= 1
     assert report.sample_size_kept == 0
     assert report.pairs == []
+
+
+# ─── Privacy: no raw event content reaches the judge panel ───────────────
+
+
+def test_summarize_event_carries_no_raw_content(conn) -> None:
+    """The judge-facing input summary must be content-free.
+
+    ``input_summary`` is sent verbatim to every judge-panel vendor
+    (including Gemini); the privacy policy promises them no raw event
+    text. Assert the summary carries neither text snippets nor entity
+    surface forms nor observe action/subject strings — only structural
+    metadata (kind, char counts, hint presence, timestamp).
+    """
+    from afair.agents.replay import _summarize_event, replay_with_variants
+    from afair.substrate.events import iter_events, write_event_with_status
+
+    secret_text = "Sajinth's diagnosis was discussed at Klinik Nordwest"
+    write_event_with_status(
+        conn,
+        kind="remember",
+        origin="agent",
+        payload={"content_type": "text", "text": secret_text, "type_hint": "fact"},
+    )
+    write_event_with_status(
+        conn,
+        kind="observe",
+        origin="agent",
+        payload={
+            "content_type": "event",
+            "action": "edited",
+            "subject": "Sajinth salary spreadsheet",
+            "result": "saved",
+        },
+    )
+
+    summaries = [_summarize_event(e) for e in iter_events(conn, limit=10)]
+    assert len(summaries) == 2
+    joined = " ".join(summaries)
+    for leaked in ("Sajinth", "diagnosis", "Klinik Nordwest", "salary", "spreadsheet", "edited"):
+        assert leaked not in joined, f"raw content {leaked!r} leaked into judge input"
+    # Structural metadata IS present.
+    assert any(f"text_chars={len(secret_text)}" in s for s in summaries)
+    assert any("type_hint_present=yes" in s for s in summaries)
+
+    # End-to-end: replay's judge-facing pairs carry none of it either.
+    report = replay_with_variants(
+        conn,
+        scoring_fn=lambda c, e, p: {"value": p["v"]},
+        current_params={"v": 1},
+        variant_params={"v": 2},
+    )
+    assert report.pairs
+    for pair in report.pairs:
+        assert "Sajinth" not in pair.input_summary
+        assert secret_text[:40] not in pair.input_summary

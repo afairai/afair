@@ -138,11 +138,13 @@ def build_server(settings: Settings) -> FastMCP:
                 # eval-set lands, per the audit pass on 2026-06-03).
                 # Without an eval-set, the LLM judge is the only gate,
                 # and judge-judging-judge is research-grade dubious.
-                # The tuner still generates hypotheses + runs replay
-                # + asks the judge panel + writes verdicts to
-                # tuner_state, so we accumulate telemetry without
-                # mutating any tuned value in production. Flip back
-                # to True once the eval framework is wired in.
+                # In observe mode the tuner still generates hypotheses
+                # and runs replay + invariant guards, writing
+                # hypothesis/observation rows to tuner_state — but it
+                # returns BEFORE the judge panel, so no judge verdicts
+                # (and no 3-vendor LLM cost) accumulate, and no tuned
+                # value is ever mutated in production. Flip to True
+                # once the eval framework is wired in.
                 # RollbackMonitor stays registered but is effectively
                 # vestigial while no promotes happen.
                 Tuner(promote_enabled=False),
