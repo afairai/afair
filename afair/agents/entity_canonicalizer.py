@@ -31,6 +31,17 @@ Three-stage match per surface form (ADR-0003 Phase 2: name-first)
    entity (provisional 0.5 confidence, v2 name-first ID) and link the
    mention.
 
+Free-text kinds (ADR-0003 Phase 3)
+----------------------------------
+The extractor's entity ``type`` is a free string (registry kinds are
+preferred labels, never a hard enum). Normalization is deterministic:
+live-set membership → variant map → registry revision chain → ``other``.
+A raw kind that maps to nothing is a NOVEL proposal: the entity still
+lands on a live kind so the graph stays consistent, and the raw string
+is preserved in the append-only ``kind_observations`` ledger — the usage
+signal the Schema-Evolver (Phase 4) mines for promotion proposals.
+Nothing auto-registers a kind.
+
 Cascade invalidation
 --------------------
 Decision #5: ``remember(content, invalidates=[hash])`` writes an
@@ -75,7 +86,12 @@ from ..substrate.entities import (
     write_entity_mention,
 )
 from ..substrate.events import read_event_by_hash
-from ..substrate.kinds import live_kind_slugs, resolve_kind_batch, resolve_kind_slug
+from ..substrate.kinds import (
+    live_kind_slugs,
+    resolve_kind_batch,
+    resolve_kind_slug,
+    write_kind_observation,
+)
 from .cold_path import ColdPathWorker
 from .entity_articles import ENTITY_ARTICLE_KIND
 from .interpretation import write_interpretation
@@ -237,6 +253,7 @@ class EntityCanonicalizer(ColdPathWorker):
             "edges_invalidated": 0,
             "edges_rejected_both_new": 0,
             "homonym_splits": 0,
+            "kind_observations": 0,
             "llm_calls": 0,
             "llm_errors": 0,
             "sonnet_escalations": 0,
@@ -275,6 +292,7 @@ class EntityCanonicalizer(ColdPathWorker):
             stats["edges_skipped_unresolved"] += result["edges_skipped"]
             stats["edges_rejected_both_new"] += result.get("edges_rejected_both_new", 0)
             stats["homonym_splits"] += result.get("homonym_splits", 0)
+            stats["kind_observations"] += result.get("kind_observations", 0)
             stats["llm_calls"] += result["llm_calls"]
             stats["llm_errors"] += result["llm_errors"]
             stats["sonnet_escalations"] += result["sonnet_escalations"]
@@ -483,6 +501,7 @@ def _canonicalize_one_event(
         "matched_llm": 0,
         "edges_created": 0,
         "edges_skipped": 0,
+        "kind_observations": 0,
         "llm_calls": 0,
         "llm_errors": 0,
         "sonnet_escalations": 0,
@@ -492,6 +511,11 @@ def _canonicalize_one_event(
     # Used both to dedupe within-event repeats AND to resolve relation
     # subjects/objects against entities we just canonicalized.
     resolved: dict[str, Entity] = {}
+
+    # Raw extractor kinds that did NOT map to a live registry kind — one
+    # per surface form, written to the kind_observations ledger once the
+    # surface form has resolved to an entity (ADR-0003 Phase 3).
+    novel_kind_raw: dict[str, str] = {}
 
     # ── entities[]
     raw_entities = extraction.get("entities") or []
@@ -508,11 +532,13 @@ def _canonicalize_one_event(
             continue
         surface_form = str(entity_dict.get("name") or "").strip()
         kind_raw = str(entity_dict.get("type") or "other").strip()
-        kind = _normalize_kind(kind_raw, conn)
+        kind, kind_is_novel = _normalize_kind_with_novelty(kind_raw, conn)
         if not surface_form:
             continue
         if surface_form in resolved:
             continue  # already handled this surface form in the same event
+        if kind_is_novel:
+            novel_kind_raw[surface_form] = kind_raw
 
         # Stage 1: name-first exact match with the kind-agreement guard
         # (ADR-0003 Phase 2). Identity no longer forks on kind, so the lookup
@@ -726,6 +752,28 @@ def _canonicalize_one_event(
             match_method="new",
             confidence=PROVISIONAL_NEW_ENTITY_CONFIDENCE,
         )
+
+    # ── kind_observations ledger (ADR-0003 Phase 3). A raw kind that did
+    # not resolve to a live registry kind was flattened deterministically
+    # (variant map, else 'other') so the write path never blocks on ontology
+    # questions — but the raw proposal is preserved here as the usage signal
+    # the Schema-Evolver (Phase 4) mines. Nothing auto-registers a kind.
+    # normalized_slug records the kind the mention actually LANDED under —
+    # the resolved current kind of the entity it attached to (the ADR's
+    # "'research_paper' squashed into 'concept'"), not merely the fallback.
+    for surface_form, raw_kind in novel_kind_raw.items():
+        observed_entity = resolved.get(surface_form)
+        if observed_entity is None:
+            continue  # every stage above resolves the form; defensive only
+        write_kind_observation(
+            conn,
+            raw_kind=raw_kind,
+            normalized_slug=resolve_entity_kind(conn, observed_entity.id) or "other",
+            entity_id=observed_entity.id,
+            event_id=event.id,
+            observed_by=CANONICALIZER_PRODUCED_BY,
+        )
+        stats["kind_observations"] += 1
 
     # ── relations[] — emit edges only when both ends resolve to entities
     # we've seen in THIS event. We don't try to look up entities by name
@@ -1141,35 +1189,61 @@ def _cascade_invalidation(conn: sqlite3.Connection, invalidate_event: Event) -> 
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
-def _normalize_kind(kind_raw: str, conn: sqlite3.Connection | None = None) -> str:
-    """Map extractor kind strings to the current registry kind set.
+# Common variants — kept from the enum era, still deterministic. These are
+# true synonyms of registry kinds, not semantic children: a raw kind that a
+# variant maps away writes NO kind_observations row, so over-mapping here
+# would erase exactly the usage signal the Schema-Evolver needs (Phase 3).
+_KIND_VARIANTS: dict[str, str] = {
+    "org": "organization",
+    "organisation": "organization",
+    "people": "person",
+    "human": "person",
+    "individual": "person",
+    "places": "place",
+    "location": "place",
+    "city": "place",
+    "country": "place",
+}
+
+
+def _normalize_kind_with_novelty(
+    kind_raw: str, conn: sqlite3.Connection | None = None
+) -> tuple[str, bool]:
+    """Map an extractor kind string to the current registry kind set, and
+    say whether it was NOVEL (ADR-0003 Phase 3).
 
     The valid kinds live in the ``kind_registry`` (ADR-0003 Phase 1),
     read via :func:`live_kind_slugs` — which falls back to the bootstrap
     seven when no connection is available, preserving the pre-registry
-    behavior byte-for-byte. The hardcoded variant map (singular/plural,
-    case, org → organization) stays as a deterministic first pass. A slug
-    the registry once knew but has since renamed/merged resolves through
-    the revision chain. Unknown values fall back to 'other'.
+    behavior byte-for-byte. Resolution order: live-set membership, the
+    variant map (:data:`_KIND_VARIANTS`), then the registry revision chain
+    (a slug the registry once knew but has since renamed/merged resolves
+    to its live successor). None of those is a novel kind.
+
+    A raw kind that maps to nothing falls back to ``'other'`` and returns
+    ``novel=True`` — the caller's cue to preserve the raw proposal in the
+    ``kind_observations`` ledger. An empty raw kind is "the extractor said
+    nothing", not a proposal: ``('other', False)``.
     """
     k = kind_raw.strip().lower()
+    if not k:
+        return "other", False
     valid = set(live_kind_slugs(conn))
     if k in valid:
-        return k
-    # Common variants — kept from the enum era, still deterministic.
-    if k in {"org", "organisation"}:
-        k = "organization"
-    elif k in {"people", "human", "individual"}:
-        k = "person"
-    elif k in {"places", "location", "city", "country"}:
-        k = "place"
+        return k, False
+    k = _KIND_VARIANTS.get(k, k)
     if k in valid:
-        return k
+        return k, False
     if conn is not None:
         resolved = resolve_kind_slug(conn, k)
         if resolved in valid:
-            return resolved
-    return "other"
+            return resolved, False
+    return "other", True
+
+
+def _normalize_kind(kind_raw: str, conn: sqlite3.Connection | None = None) -> str:
+    """Normalized slug only — see :func:`_normalize_kind_with_novelty`."""
+    return _normalize_kind_with_novelty(kind_raw, conn)[0]
 
 
 def _api_key_for_model(model: str, settings: Settings) -> str | None:

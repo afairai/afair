@@ -56,6 +56,32 @@ EXTRACTOR_TOOL_DESCRIPTION = (
 )
 
 
+def _entity_kind_property(slugs: tuple[str, ...] | list[str]) -> dict[str, Any]:
+    """The ``entities.items.type`` property: a FREE string steered toward
+    the current registry kinds (ADR-0003 Phase 3).
+
+    Mirrors ``best_guess_kind``: no ``enum``, so the model may propose a
+    kind outside the registry when nothing fits — normalization decides
+    what lands (variant map, else ``other``) and the raw proposal is
+    preserved in ``kind_observations`` as the Schema-Evolver's usage
+    signal. The description lists the live kinds as preferred labels so
+    the common case still resolves deterministically without an LLM
+    judgment or a ledger row.
+    """
+    return {
+        "type": "string",
+        "description": (
+            "Entity kind. Strongly prefer one of the existing kinds: "
+            + ", ".join(slugs)
+            + ". Coin a new short lowercase label (e.g. 'recipe', 'song') "
+            "ONLY when none of the existing kinds fits — the system learns "
+            "its own ontology from usage; an unregistered kind is stored "
+            "under the closest existing kind and recorded as a promotion "
+            "signal."
+        ),
+    }
+
+
 # JSON Schema for the extraction tool. Kept as a plain dict so we can
 # ship it directly to litellm; no Pydantic round-trip needed at the
 # call site. Mirrors the previous EXTRACTOR_SYSTEM_PROMPT's "Required
@@ -86,14 +112,12 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "type": {
-                        "type": "string",
-                        # The bootstrap seven — the registry-unavailable
-                        # fallback. Live extraction renders the current
-                        # kind set via extractor_tool_schema() below
-                        # (ADR-0003 Phase 1: kinds are data, not code).
-                        "enum": list(BOOTSTRAP_KIND_SLUGS),
-                    },
+                    # The bootstrap seven — the registry-unavailable
+                    # fallback. Live extraction renders the current
+                    # kind set via extractor_tool_schema() below
+                    # (ADR-0003 Phase 1: kinds are data, not code;
+                    # Phase 3: free string, registry kinds preferred).
+                    "type": _entity_kind_property(BOOTSTRAP_KIND_SLUGS),
                 },
                 "required": ["name", "type"],
             },
@@ -167,20 +191,23 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
 
 
 def extractor_tool_schema(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
-    """Render the extractor tool schema with the entity-kind enum read from
-    the kind registry at prompt-build time (ADR-0003 Phase 1).
+    """Render the extractor tool schema with the entity-kind guidance read
+    from the kind registry at prompt-build time (ADR-0003 Phases 1 + 3).
 
-    The static :data:`EXTRACTOR_TOOL_SCHEMA` carries the bootstrap seven;
-    this renderer swaps in the registry's current live kinds so an ontology
-    revision reaches the extractor without a code change. Falls back to the
-    bootstrap seven when the registry is unavailable (``conn=None`` or a
-    bare test DB) — with an unrevised registry the result is byte-identical
-    to the static constant. Deep-copied: mutating the returned dict never
-    touches the shared constant.
+    The static :data:`EXTRACTOR_TOOL_SCHEMA` steers toward the bootstrap
+    seven; this renderer swaps in the registry's current live kinds so an
+    ontology revision reaches the extractor without a code change. The
+    ``type`` stays a free string either way (Phase 3): the registry kinds
+    are *preferred labels* in the description, never a hard ``enum``.
+    Falls back to the bootstrap seven when the registry is unavailable
+    (``conn=None`` or a bare test DB) — with an unrevised registry the
+    result is byte-identical to the static constant. Deep-copied: mutating
+    the returned dict never touches the shared constant.
     """
     schema = copy.deepcopy(EXTRACTOR_TOOL_SCHEMA)
-    kind_property = schema["properties"]["entities"]["items"]["properties"]["type"]
-    kind_property["enum"] = list(live_kind_slugs(conn))
+    schema["properties"]["entities"]["items"]["properties"]["type"] = _entity_kind_property(
+        live_kind_slugs(conn)
+    )
     return schema
 
 

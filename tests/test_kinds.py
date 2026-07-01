@@ -17,7 +17,7 @@ SQLite, real triggers, real view.
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from ulid import ULID
@@ -379,36 +379,40 @@ def test_normalize_kind_follows_registry_revisions(db: sqlite3.Connection) -> No
     assert _normalize_kind("org", db) == "company"
 
 
-def test_extractor_tool_schema_renders_the_seven(db: sqlite3.Connection) -> None:
-    static_enum = EXTRACTOR_TOOL_SCHEMA["properties"]["entities"]["items"]["properties"]["type"][
-        "enum"
-    ]
-    assert static_enum == list(THE_SEVEN)
-    rendered = extractor_tool_schema(db)
-    rendered_enum = rendered["properties"]["entities"]["items"]["properties"]["type"]["enum"]
-    # Behavior preserved: registry render == static constant, and the
-    # fallback render (no conn) too.
-    assert rendered_enum == static_enum
-    fallback = extractor_tool_schema(None)
-    assert fallback == EXTRACTOR_TOOL_SCHEMA
-    # Everything except the enum source is the same schema.
-    assert rendered == EXTRACTOR_TOOL_SCHEMA
+def _schema_kind_property(schema: dict[str, Any]) -> dict[str, Any]:
+    return schema["properties"]["entities"]["items"]["properties"]["type"]
+
+
+def test_extractor_tool_schema_type_is_free_text_steering_the_seven(
+    db: sqlite3.Connection,
+) -> None:
+    """ADR-0003 Phase 3: the entity ``type`` is a free string — no hard
+    enum — while the description still steers toward the live registry
+    kinds as preferred labels."""
+    for prop in (
+        _schema_kind_property(EXTRACTOR_TOOL_SCHEMA),
+        _schema_kind_property(extractor_tool_schema(db)),
+        _schema_kind_property(extractor_tool_schema(None)),
+    ):
+        assert "enum" not in prop
+        assert prop["type"] == "string"
+        for slug in THE_SEVEN:
+            assert slug in prop["description"]
+    # With an unrevised registry the render — and the no-conn fallback —
+    # is byte-identical to the static constant.
+    assert extractor_tool_schema(db) == EXTRACTOR_TOOL_SCHEMA
+    assert extractor_tool_schema(None) == EXTRACTOR_TOOL_SCHEMA
 
 
 def test_extractor_tool_schema_is_a_deep_copy(db: sqlite3.Connection) -> None:
     rendered = extractor_tool_schema(db)
-    rendered["properties"]["entities"]["items"]["properties"]["type"]["enum"].append("mutant")
-    static_enum = EXTRACTOR_TOOL_SCHEMA["properties"]["entities"]["items"]["properties"]["type"][
-        "enum"
-    ]
-    assert "mutant" not in static_enum
+    _schema_kind_property(rendered)["description"] = "mutant"
+    assert _schema_kind_property(EXTRACTOR_TOOL_SCHEMA)["description"] != "mutant"
 
 
 def test_extractor_tool_schema_tracks_registry_revisions(db: sqlite3.Connection) -> None:
     _register_kind(db, "company")
     _revise(db, action="rename", from_slug="organization", to_slug="company")
-    enum = extractor_tool_schema(db)["properties"]["entities"]["items"]["properties"]["type"][
-        "enum"
-    ]
-    assert "organization" not in enum
-    assert "company" in enum
+    description = _schema_kind_property(extractor_tool_schema(db))["description"]
+    assert "organization" not in description
+    assert "company" in description

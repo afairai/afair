@@ -8,6 +8,9 @@ module moves it into the substrate:
 - ``kind_registry`` holds every kind ever registered (append-only, I2);
 - ``kind_revisions`` holds the lifecycle history (rename / merge /
   deprecate / restore ... — appended, never edited, I7);
+- ``kind_observations`` (written from Phase 3) preserves every raw
+  extractor kind proposal that did not resolve to a live kind — the
+  usage signal the Schema-Evolver mines;
 - the *current* ontology is resolved latest-row-wins at read time,
   mirroring the ``tuner_state`` / ``resolve_canonical`` patterns.
 
@@ -29,6 +32,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from ulid import ULID
 
 if TYPE_CHECKING:
     import sqlite3
@@ -223,3 +227,50 @@ def resolve_to_live_kind(conn: sqlite3.Connection | None, slug: str) -> str | No
         # unavailable registry means "no chain to follow", not a crash.
         return None
     return resolved if resolved in valid else None
+
+
+# ── observations ledger (ADR-0003 Phase 3) ─────────────────────────────────
+
+
+def write_kind_observation(
+    conn: sqlite3.Connection,
+    *,
+    raw_kind: str,
+    normalized_slug: str,
+    entity_id: str,
+    event_id: str,
+    observed_by: str,
+) -> str:
+    """Preserve one raw extractor kind proposal that did NOT resolve to a
+    live registry kind (ADR-0003 Phase 3).
+
+    Free-text kinds never auto-register: the write path flattens an unknown
+    proposal deterministically so intake never blocks on ontology questions,
+    and this row keeps what the extractor actually said. It is the usage
+    signal the Schema-Evolver (Phase 4) mines — when ``research_paper``
+    shows up 40 times squashed into ``concept``, the promotion evidence
+    sits in ``kind_observations``. ``normalized_slug`` records the kind the
+    mention actually landed under (the resolved current kind of the entity
+    it attached to), not merely the fallback.
+
+    Append-only per I2 (trigger-enforced). Returns the new row's id.
+    """
+    observation_id = str(ULID())
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO kind_observations (
+                id, raw_kind, normalized_slug, entity_id, event_id, observed_at, observed_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation_id,
+                raw_kind,
+                normalized_slug,
+                entity_id,
+                event_id,
+                _now_iso(),
+                observed_by,
+            ),
+        )
+    return observation_id

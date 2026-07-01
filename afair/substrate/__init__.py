@@ -76,6 +76,7 @@ from .kinds import (
     resolve_kind_slug,
     resolve_to_live_kind,
     seed_bootstrap_kinds,
+    write_kind_observation,
 )
 from .objects import (
     StreamingObjectWriter,
@@ -195,6 +196,7 @@ __all__ = [
     "write_event",
     "write_event_temporal",
     "write_event_with_status",
+    "write_kind_observation",
     "write_merge_invalidation",
     "write_object",
 ]
