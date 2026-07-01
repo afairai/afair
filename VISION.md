@@ -259,7 +259,7 @@ This is what makes recursive self-improvement safe: the substrate is invariant, 
 
 **Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology (planned; not yet implemented, the entity dedup and audit workers are its v0). Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
 
-Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). This is the design target; today every cold-path worker shares one configured model and only the judge panel is multi-model. Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
+Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). Each agent's model is independently configurable: all default to a shared model, and per-agent overrides run premium models where they earn their keep. The judge panel is multi-vendor by default. Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
 
 User queries and external sensing events share the same event schema with different `origin` tags. The Salience Agent routes them through the appropriate path based on content, priority, and current mode. No separate ingestion pipeline.
 
@@ -430,7 +430,7 @@ Six points, each correspondingly hard to replicate.
 2. **Single-tenant by design.** Every user instance is physically isolated: own machine, own SQLite, own state. Cannot be matched by venture-funded competitors whose margins depend on multi-tenancy.
 3. **EU-native compliance.** Designed for GDPR + AI Act from day one. Data residency, audit trails, right-to-erasure built into the substrate model and deployment topology (destroy a machine = full deletion). US-first players retrofit; this starts there.
 4. **Emergent ontology.** No two users' vaults look alike after a few months. The system becomes a cognitive fingerprint. Generic "memory layers" cannot compete on personalization because they are statically schemaed.
-5. **Society-of-Mind swarm.** Each memory operation is handled by the right specialist at the right cost. Heterogeneous models per agent (roadmap; today only the judge panel is multi-model). Independent A/B testing. Orchestration is the IP; models are commoditized.
+5. **Society-of-Mind swarm.** Each memory operation is handled by the right specialist at the right cost. Heterogeneous models per agent (each worker's model independently configurable; the judge panel multi-vendor by default). Independent A/B testing. Orchestration is the IP; models are commoditized.
 6. **User-owned as political position.** Not just architecture: a stance: *your cognition belongs to you, not to your AI provider*. That position becomes a brand, a community, and a long-term moat. The same logic that made 1Password and Fastmail durable.
 
 ---

@@ -244,7 +244,7 @@ class ConflictResolver(ColdPathWorker):
             "skipped_already_judged": 0,
         }
 
-        model = settings.extractor_model
+        model = settings.conflict_resolver_model
         api_key = _api_key_for_model(model, settings)
 
         pairs = _enumerate_candidate_pairs(conn, max_pairs=MAX_PAIRS_PER_CYCLE)

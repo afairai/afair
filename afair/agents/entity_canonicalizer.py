@@ -227,7 +227,7 @@ class EntityCanonicalizer(ColdPathWorker):
             "sonnet_escalations": 0,
         }
 
-        model = settings.extractor_model
+        model = settings.canonicalizer_model
         api_key = _api_key_for_model(model, settings)
         sonnet_model = _sonnet_for(model)
         llm_budget = MAX_LLM_CALLS_PER_CYCLE

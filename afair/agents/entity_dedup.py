@@ -147,7 +147,7 @@ class EntityDeduplicator(ColdPathWorker):
             "skipped_not_same": 0,
             "llm_errors": 0,
         }
-        model = settings.extractor_model
+        model = settings.entity_dedup_model
         api_key = _api_key_for_model(model, settings)
 
         for key in _candidate_keys(conn):

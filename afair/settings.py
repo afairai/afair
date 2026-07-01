@@ -79,6 +79,26 @@ class Settings(BaseSettings):
     # via the model string.
     transcription_model: str = "openai/whisper-1"
 
+    # ── Per-agent model overrides (VISION §6.5 — heterogeneous models per agent)
+    # Each cold-path LLM worker can run its own model class: cheap models for
+    # the routine agents, a premium model where reasoning earns its keep.
+    # Unset (or blank) falls back to ``extractor_model``, so behavior is
+    # byte-identical to the single-model setup unless an operator configures
+    # an override. Same "<provider>/<model>" litellm format as everything
+    # else (Invariant I5 — vendor-neutral).
+    canonicalizer_model: str = ""
+    entity_dedup_model: str = ""
+    conflict_resolver_model: str = ""
+    consolidator_model: str = ""
+    entity_articles_model: str = ""
+    temporal_model: str = ""
+
+    # Judge panel for the self-improvement tuner (Phase B). Comma-separated
+    # litellm model strings. Blank keeps the built-in three-vendor default
+    # panel (see agents/llm_judge.py DEFAULT_PANEL) — cross-vendor on purpose
+    # so no single provider's stylistic bias decides promotions.
+    judge_panel: str = ""
+
     # Provider keys — set whichever your selected model needs. Adding a
     # provider here + a model-prefix branch in handlers._api_key_for_embedding
     # is the only code change to switch embedding/LLM vendors (I5).
@@ -312,6 +332,52 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
+    def _resolve_per_agent_models(self) -> Settings:
+        """Resolve unset per-agent model overrides to ``extractor_model``.
+
+        Resolution happens once at boot so every worker reads a plain,
+        always-populated string field. Deriving from ``extractor_model``
+        (instead of hardcoding a default string per field) means a single
+        EXTRACTOR_MODEL override still cascades to every agent that has
+        no override of its own. An explicitly set override must carry a
+        provider prefix, same as EXTRACTOR_MODEL (Invariant I5).
+        """
+        per_agent_fields = (
+            "canonicalizer_model",
+            "entity_dedup_model",
+            "conflict_resolver_model",
+            "consolidator_model",
+            "entity_articles_model",
+            "temporal_model",
+        )
+        for field_name in per_agent_fields:
+            value = getattr(self, field_name).strip()
+            if not value:
+                # extractor_model already passed its own provider check.
+                setattr(self, field_name, self.extractor_model)
+            elif "/" not in value:
+                msg = (
+                    f"{field_name.upper()} must be in '<provider>/<model>' form "
+                    f"(e.g. 'anthropic/claude-sonnet-4-5'); got {value!r}"
+                )
+                raise ValueError(msg)
+            else:
+                setattr(self, field_name, value)
+        return self
+
+    @field_validator("judge_panel")
+    @classmethod
+    def _judge_panel_entries_have_provider(cls, v: str) -> str:
+        for entry in (s.strip() for s in v.split(",") if s.strip()):
+            if "/" not in entry:
+                msg = (
+                    f"Every JUDGE_PANEL entry must be in '<provider>/<model>' "
+                    f"form (comma-separated); got {entry!r}"
+                )
+                raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
     def _auth_required_in_prod(self) -> Settings:
         """Fail boot if production environment lacks an auth token.
 
@@ -397,6 +463,20 @@ class Settings(BaseSettings):
         regardless of source.
         """
         return _normalize_allowlist(self.identity_allowlist)
+
+    @property
+    def judge_panel_models(self) -> tuple[str, ...]:
+        """Parsed judge panel — configured models, or the built-in default.
+
+        The default panel lives in ``agents/llm_judge.py`` (single source of
+        truth); imported lazily here to keep settings import-cycle-free.
+        """
+        parsed = tuple(s.strip() for s in self.judge_panel.split(",") if s.strip())
+        if parsed:
+            return parsed
+        from .agents.llm_judge import DEFAULT_PANEL
+
+        return DEFAULT_PANEL
 
     @property
     def effective_oauth_issuer(self) -> str:

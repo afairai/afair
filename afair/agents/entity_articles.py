@@ -212,7 +212,7 @@ class EntityArticleWorker(ColdPathWorker):
             "llm_errors": 0,
             "capped": False,
         }
-        model = settings.extractor_model
+        model = settings.entity_articles_model
         api_key = _api_key_for_model(model, settings)
 
         groups = _article_worthy_groups(conn)

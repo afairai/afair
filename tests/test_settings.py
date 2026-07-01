@@ -138,3 +138,135 @@ def test_short_nonempty_vault_key_still_rejected(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(ValidationError, match="too short"):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+# ── per-agent model overrides (VISION §6.5 — heterogeneous models per agent) ──
+# Each cold-path LLM worker reads its own model field; unset overrides resolve
+# to extractor_model at boot so the single-model behavior is preserved
+# byte-identically unless an operator configures a per-agent model.
+
+_PER_AGENT_MODEL_FIELDS = (
+    "canonicalizer_model",
+    "entity_dedup_model",
+    "conflict_resolver_model",
+    "consolidator_model",
+    "entity_articles_model",
+    "temporal_model",
+)
+
+_PER_AGENT_ENV_VARS = (*(f.upper() for f in _PER_AGENT_MODEL_FIELDS), "JUDGE_PANEL")
+
+
+def _clear_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("EXTRACTOR_MODEL", *_PER_AGENT_ENV_VARS):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_per_agent_models_default_to_extractor_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset overrides → every worker model resolves to extractor_model.
+
+    Behavior-preservation guarantee: with nothing configured, the
+    heterogeneous-models feature is invisible and every cold-path worker
+    runs the exact model it ran before the feature existed.
+    """
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("EXTRACTOR_MODEL", "openai/gpt-4o-mini")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    for field in _PER_AGENT_MODEL_FIELDS:
+        assert getattr(s, field) == "openai/gpt-4o-mini", field
+
+
+def test_single_agent_override_leaves_others_on_extractor_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CONSOLIDATOR_MODEL override applies to the consolidator only."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("EXTRACTOR_MODEL", "anthropic/claude-haiku-4-5")
+    monkeypatch.setenv("CONSOLIDATOR_MODEL", "anthropic/claude-sonnet-4-5")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.consolidator_model == "anthropic/claude-sonnet-4-5"
+    for field in _PER_AGENT_MODEL_FIELDS:
+        if field == "consolidator_model":
+            continue
+        assert getattr(s, field) == "anthropic/claude-haiku-4-5", field
+
+
+def test_blank_agent_override_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present-but-empty override (the .env.example shape) → extractor_model."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("EXTRACTOR_MODEL", "anthropic/claude-haiku-4-5")
+    monkeypatch.setenv("CANONICALIZER_MODEL", "  ")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.canonicalizer_model == "anthropic/claude-haiku-4-5"
+
+
+def test_agent_override_requires_provider_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invariant I5 enforcement — an override without a provider is rejected."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("CONFLICT_RESOLVER_MODEL", "claude-sonnet-4-5")
+
+    with pytest.raises(ValidationError, match="CONFLICT_RESOLVER_MODEL"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_extractor_model_override_cascades_to_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single EXTRACTOR_MODEL change moves every non-overridden agent with it."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("EXTRACTOR_MODEL", "ollama/qwen2.5:7b")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.temporal_model == "ollama/qwen2.5:7b"
+    assert s.entity_articles_model == "ollama/qwen2.5:7b"
+
+
+# ── judge panel configuration ─────────────────────────────────────────────────
+
+
+def test_judge_panel_defaults_to_builtin_panel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset JUDGE_PANEL → the built-in three-vendor DEFAULT_PANEL."""
+    from afair.agents.llm_judge import DEFAULT_PANEL
+
+    _clear_model_env(monkeypatch)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.judge_panel_models == DEFAULT_PANEL
+
+
+def test_judge_panel_override_parses_comma_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """JUDGE_PANEL env var replaces the default panel, whitespace-tolerant."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv(
+        "JUDGE_PANEL",
+        "anthropic/claude-opus-4-5, openai/gpt-5 ,gemini/gemini-2.5-pro",
+    )
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.judge_panel_models == (
+        "anthropic/claude-opus-4-5",
+        "openai/gpt-5",
+        "gemini/gemini-2.5-pro",
+    )
+
+
+def test_judge_panel_entry_requires_provider_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant I5 — every panel entry needs the '<provider>/<model>' form."""
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("JUDGE_PANEL", "anthropic/claude-sonnet-4-5,gpt-5")
+
+    with pytest.raises(ValidationError, match="JUDGE_PANEL"):
+        Settings(_env_file=None)  # type: ignore[call-arg]

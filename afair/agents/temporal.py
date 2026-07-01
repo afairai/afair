@@ -155,7 +155,7 @@ class TemporalWorker(ColdPathWorker):
             "llm_errors": 0,
             "by_class": {},
         }
-        model = settings.extractor_model
+        model = settings.temporal_model
         api_key = _api_key_for_model(model, settings)
         budget = MAX_LLM_CALLS_PER_CYCLE
         last_llm_call: float | None = None

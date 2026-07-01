@@ -169,7 +169,7 @@ class Consolidator(ColdPathWorker):
             "days_skipped_already_done": 0,
             "llm_errors": 0,
         }
-        model = settings.extractor_model
+        model = settings.consolidator_model
         api_key = _api_key_for_model(model, settings)
 
         today = datetime.now(UTC).date()

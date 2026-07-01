@@ -243,7 +243,6 @@ class Tuner(ColdPathWorker):
         self.promote_enabled = promote_enabled
 
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
-        _ = settings
         stats: dict[str, Any] = {
             "triggered": False,
             "halted": False,
@@ -384,7 +383,9 @@ class Tuner(ColdPathWorker):
             stats["verdict"] = verdict_record
             return stats
 
-        judge_report = self._run_judge_panel(replay, worker)
+        # Panel is env-configurable (JUDGE_PANEL); defaults to the built-in
+        # three-vendor panel so promotions stay cross-vendor by default.
+        judge_report = self._run_judge_panel(replay, worker, panel=settings.judge_panel_models)
         verdict_record["judge_panel"] = {
             "panel": list(judge_report.panel),
             "pair_count": judge_report.pair_count,

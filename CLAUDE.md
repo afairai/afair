@@ -87,7 +87,7 @@ planned.
 | MCP transport | Streamable HTTP only | Required for Claude.ai connectivity; works equally well on localhost |
 | HTTP layer | FastAPI (under FastMCP) | Non-MCP endpoints (health) |
 | Storage | SQLite + FTS5 + sqlite-vec, plus a filesystem blob store | Transactional, portable, inspectable; blobs hold large/binary content |
-| LLM | litellm wrapper, default `anthropic/claude-haiku-4-5` | I5 vendor neutrality from day one |
+| LLM | litellm wrapper, default `anthropic/claude-haiku-4-5`; per-agent overrides (`CANONICALIZER_MODEL`, `ENTITY_DEDUP_MODEL`, `CONFLICT_RESOLVER_MODEL`, `CONSOLIDATOR_MODEL`, `ENTITY_ARTICLES_MODEL`, `TEMPORAL_MODEL`, `JUDGE_PANEL`) fall back to `EXTRACTOR_MODEL` / the built-in judge panel | I5 vendor neutrality; VISION §6.5 heterogeneous models per agent |
 | Replication (managed) | LiteFS | Deferred to Phase 8 |
 | Validation | Pydantic v2 | At every boundary, parse-don't-cast |
 | Logging | structlog | JSON with PII redaction |
