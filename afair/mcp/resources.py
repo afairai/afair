@@ -119,7 +119,11 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     # Imported lazily to avoid the agents → mcp circular at import time.
     from ..agents.mode_switcher import read_current_mode
     from ..agents.salience import SALIENCE_PRODUCED_BY
-    from ..substrate import read_pending_corrections
+    from ..substrate import (
+        live_kind_slugs,
+        read_pending_corrections,
+        read_pending_ontology_proposals,
+    )
 
     mode = read_current_mode(conn)
     salient = _read_top_salient(conn, limit=_SALIENT_LIMIT)
@@ -130,6 +134,18 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
         for p in read_pending_corrections(conn, limit=_PENDING_CORRECTIONS_LIMIT)
     ]
+    # Ontology proposals (ADR-0003 Phase 5) join the same pending list —
+    # same surface, same decide loop, no new mechanism (I1).
+    ontology_pending = [
+        {
+            "id": p.id,
+            "kind": f"ontology_{p.action}",
+            "prompt": p.prompt,
+            "confidence": p.confidence,
+        }
+        for p in read_pending_ontology_proposals(conn, limit=_PENDING_CORRECTIONS_LIMIT)
+    ]
+    pending += ontology_pending
     upcoming = _read_upcoming(conn)
 
     instructions = (
@@ -144,6 +160,7 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "no-op."
     )
     if pending:
+        kinds_hint = "/".join(live_kind_slugs(conn))
         instructions += (
             " pending_corrections lists entity-graph fixes the audit "
             "proposed — most are cross-kind auto-merges where the system "
@@ -152,11 +169,21 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             "the conversation, ask the user, then apply their answer with "
             'afair.recall(decide={"proposal_id":"<id>","verdict":"confirm"|'
             '"reject"|"retract"}). If they say the kind is wrong, pass the '
-            "corrected one as to_kind (person/organization/place/project/"
-            'product/concept/other), e.g. verdict="reject", to_kind="project". '
+            f"corrected one as to_kind ({kinds_hint}), "
+            'e.g. verdict="reject", to_kind="project". '
             "If they say it isn't a real entity at all (a file path, a test "
             'artifact), use verdict="retract" to withdraw it. Never apply '
             "without asking."
+        )
+    if ontology_pending:
+        instructions += (
+            " Entries whose kind starts with 'ontology_' revise the vault's "
+            "kind system itself (add/rename/merge/split/deprecate an entity "
+            "kind, proposed by the Schema-Evolver from observed usage). "
+            'Decide them the same way: verdict="confirm" applies the '
+            'revision, verdict="reject" leaves the ontology unchanged, and '
+            'verdict="revert" on a previously applied one undoes it with a '
+            "compensating revision. Never apply without asking."
         )
     if upcoming:
         instructions += (

@@ -25,7 +25,9 @@ All of this is in daily real-world use.
   async vault export.
 - **Cold-path agents** (`afair/agents/`): extractor, salience, mode-switcher,
   surprise, temporal (relevance-decay), entity canonicalizer + emergent entity
-  graph (5 substrate tables), conflict resolver, consolidator, and the
+  graph (5 substrate tables), schema evolver (emergent ontology, ADR-0003:
+  proposes kind revisions from usage; the operator confirms/rejects/reverts
+  through `recall(decide=)`), conflict resolver, consolidator, and the
   recursive self-improvement loop (tuner + multi-vendor judge + rollback
   monitor).
 - **Hosted layer**: per-user single-tenant Fly machines (I8), provisioned and

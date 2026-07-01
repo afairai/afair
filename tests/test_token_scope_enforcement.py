@@ -142,3 +142,58 @@ async def test_recall_without_decide_allowed_for_read_scope(_mcp_server) -> None
         result = await _mcp_server.call_tool("recall", {"query": "anything"})
     data = result.data if hasattr(result, "data") else result.structured_content
     assert data["hits"] == []
+
+
+@pytest.mark.asyncio
+async def test_recall_decide_ontology_blocked_for_read_scope(_mcp_server) -> None:  # type: ignore[no-untyped-def]
+    # Ontology proposals (ADR-0003 Phase 5) ride the same decide argument and
+    # apply registry revisions — a write. The scope gate is id-agnostic, so an
+    # ont_-prefixed decision from a read-scoped token must be blocked too.
+    from fastmcp.exceptions import ToolError
+
+    with (
+        patch(
+            "fastmcp.server.dependencies.get_http_request",
+            return_value=_FakeRequest("read"),
+        ),
+        pytest.raises(ToolError, match="read-only scope"),
+    ):
+        await _mcp_server.call_tool(
+            "recall",
+            {"decide": {"proposal_id": "ont_01TEST", "verdict": "confirm"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_recall_decide_ontology_revert_blocked_for_read_scope(_mcp_server) -> None:  # type: ignore[no-untyped-def]
+    # The additive 'revert' verdict is a write like any other decision.
+    from fastmcp.exceptions import ToolError
+
+    with (
+        patch(
+            "fastmcp.server.dependencies.get_http_request",
+            return_value=_FakeRequest("read"),
+        ),
+        pytest.raises(ToolError, match="read-only scope"),
+    ):
+        await _mcp_server.call_tool(
+            "recall",
+            {"decide": {"proposal_id": "ont_01TEST", "verdict": "revert"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_recall_decide_ontology_allowed_for_write_scope(_mcp_server) -> None:  # type: ignore[no-untyped-def]
+    # A write-scoped token reaches the ontology decide path (not_found for an
+    # id that doesn't exist — proof the dispatch ran, not the gate).
+    with patch(
+        "fastmcp.server.dependencies.get_http_request",
+        return_value=_FakeRequest("write"),
+    ):
+        result = await _mcp_server.call_tool(
+            "recall",
+            {"decide": {"proposal_id": "ont_01TEST", "verdict": "confirm"}},
+        )
+    data = result.data if hasattr(result, "data") else result.structured_content
+    assert "ontology revision confirm" in data["note"]
+    assert "no proposal" in data["note"]

@@ -62,7 +62,7 @@ The substrate lives on disk under the user's control. Self-hosting is first-clas
 No code path may privilege one AI provider. The architecture must function with Claude, GPT, Gemini, Mistral, and local models, with feature parity where the model class allows.
 
 ### I6. Emergent Over Imposed
-No fixed ontology of memory types ships with the system. A minimal bootstrap scaffold is acceptable; the system must be able to revise, merge, split, and discard categories based on usage. Forever. (Implementation status: event-level typing is free-text today, while entity kinds still use a fixed seven-value bootstrap enum that the system does not yet revise.)
+No fixed ontology of memory types ships with the system. A minimal bootstrap scaffold is acceptable; the system must be able to revise, merge, split, and discard categories based on usage. Forever.
 
 ### I7. Recursive Self-Modification with Rollback
 The system may revise its own extraction rules, retrieval strategies, and agent compositions at runtime. Every modification is recorded in the substrate. Every modification is reversible. Invariants I1–I6 are exempt, they are the irreducible kernel.
@@ -257,7 +257,7 @@ This is what makes recursive self-improvement safe: the substrate is invariant, 
 
 **Warm path (async, seconds).** A new observation arrives: from a user `remember` call, or from a Salience-routed `sense` event. Observer logs to substrate. Extractor processes async. By the time the user calls back, the new info is integrated. Caller never waits.
 
-**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology (planned; not yet implemented, the entity dedup and audit workers are its v0). Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
+**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology: it mines observed kind usage, drafts revision proposals, and the operator confirms or rejects each one before it takes effect. Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
 
 Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). Each agent's model is independently configurable: all default to a shared model, and per-agent overrides run premium models where they earn their keep. The judge panel is multi-vendor by default. Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
 

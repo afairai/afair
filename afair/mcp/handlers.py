@@ -70,6 +70,7 @@ from ..substrate import (
     read_mentions_batch,
     read_object,
     read_pending_corrections,
+    read_pending_ontology_proposals,
     resolve_canonical_batch,
     resolve_entity_kind_batch,
     retracted_entity_ids,
@@ -82,6 +83,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate.belief import Entrenchment, auto_confirm, resolve_trust
 from ..substrate.corrections import decide_correction
 from ..substrate.events import row_to_event
+from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
 from ..substrate.search import FTS5_SPECIALS_RE
 from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
@@ -1245,7 +1247,14 @@ def recall(
             verdict=decide.verdict,
             to_kind=decide.to_kind,
         )
-        decide_note = f"correction {decide.verdict}: {outcome.note}"
+        # decide_correction dispatches ont_-prefixed ids to the ontology
+        # queue (ADR-0003 Phase 5); the note labels which queue acted.
+        label = (
+            "ontology revision"
+            if decide.proposal_id.startswith(ONTOLOGY_PROPOSAL_ID_PREFIX)
+            else "correction"
+        )
+        decide_note = f"{label} {decide.verdict}: {outcome.note}"
 
     summary: ContextSummary | None = None
     if stats:
@@ -1449,8 +1458,11 @@ def _combine_notes(*parts: str | None) -> str | None:
 
 
 def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorrectionView]:
-    """Open entity-audit proposals, mapped to the recall wire model."""
-    return [
+    """Open entity-audit AND ontology proposals, mapped to the recall wire
+    model. One list, one decide loop (ADR-0003 Phase 5): ontology proposals
+    carry ``kind='ontology_<action>'`` and dispatch on their ``ont_`` id
+    prefix server-side, so the client treats every row identically."""
+    views = [
         ProposedCorrectionView(
             id=p.id,
             kind=p.kind,
@@ -1462,6 +1474,18 @@ def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorre
         )
         for p in read_pending_corrections(db, limit=limit)
     ]
+    views += [
+        ProposedCorrectionView(
+            id=p.id,
+            kind=f"ontology_{p.action}",
+            prompt=p.prompt,
+            evidence=p.evidence,
+            confidence=p.confidence,
+            subject_slug=p.subject_slug,
+        )
+        for p in read_pending_ontology_proposals(db, limit=limit)
+    ]
+    return views
 
 
 # ── observe ─────────────────────────────────────────────────────────────────

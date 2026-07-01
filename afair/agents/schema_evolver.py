@@ -86,7 +86,7 @@ import structlog
 from ulid import ULID
 
 from ..substrate import pipeline_events as pe
-from ..substrate.kinds import live_kinds, resolve_kind_batch
+from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX, live_kinds, resolve_kind_batch
 from .cold_path import ColdPathWorker
 from .llm import LLMError, call_tool
 from .tunable_registry import TunableRegistry
@@ -103,7 +103,10 @@ SCHEMA_EVOLVER_PRODUCED_BY = "schema_evolver:v0"
 
 # Proposal ids carry this prefix so the Phase-5 decide loop can dispatch
 # on id shape (ont_... = ontology queue, plain ULID = proposed_corrections).
-PROPOSAL_ID_PREFIX = "ont_"
+# Canonically defined in substrate/kinds.py (the decide path lives in
+# substrate and must not import agents); re-exported here under the name
+# this module has always used.
+PROPOSAL_ID_PREFIX = ONTOLOGY_PROPOSAL_ID_PREFIX
 
 # ── deterministic backstops (guardrails — NOT tunables, see module doc) ────
 

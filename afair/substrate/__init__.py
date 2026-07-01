@@ -69,14 +69,17 @@ from .events import (
 )
 from .kinds import (
     BOOTSTRAP_KIND_SLUGS,
+    ONTOLOGY_PROPOSAL_ID_PREFIX,
     KindRow,
     live_kind_slugs,
     live_kinds,
+    register_kind,
     resolve_kind_batch,
     resolve_kind_slug,
     resolve_to_live_kind,
     seed_bootstrap_kinds,
     write_kind_observation,
+    write_kind_revision,
 )
 from .objects import (
     StreamingObjectWriter,
@@ -86,6 +89,12 @@ from .objects import (
     object_size,
     read_object,
     write_object,
+)
+from .ontology import (
+    OntologyDecisionOutcome,
+    PendingOntologyProposal,
+    decide_ontology_proposal,
+    read_pending_ontology_proposals,
 )
 from .payload import (
     build_binary_payload,
@@ -112,6 +121,7 @@ from .temporal import (
 
 __all__ = [
     "BOOTSTRAP_KIND_SLUGS",
+    "ONTOLOGY_PROPOSAL_ID_PREFIX",
     "SCHEMA_VERSION",
     "TEMPORAL_CLASSES",
     "CorrectionOutcome",
@@ -125,7 +135,9 @@ __all__ = [
     "Event",
     "EventTemporal",
     "KindRow",
+    "OntologyDecisionOutcome",
     "PendingCorrection",
+    "PendingOntologyProposal",
     "StreamingObjectWriter",
     "assign_entity_kind",
     "build_binary_payload",
@@ -135,6 +147,7 @@ __all__ = [
     "canonical_json",
     "content_hash",
     "decide_correction",
+    "decide_ontology_proposal",
     "derive_searchable_text",
     "entity_id",
     "entity_id_v2",
@@ -170,7 +183,9 @@ __all__ = [
     "read_mentions_batch",
     "read_object",
     "read_pending_corrections",
+    "read_pending_ontology_proposals",
     "record_edge_review",
+    "register_kind",
     "resolve_canonical",
     "resolve_canonical_batch",
     "resolve_entity_kind",
@@ -197,6 +212,7 @@ __all__ = [
     "write_event_temporal",
     "write_event_with_status",
     "write_kind_observation",
+    "write_kind_revision",
     "write_merge_invalidation",
     "write_object",
 ]

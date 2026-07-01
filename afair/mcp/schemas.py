@@ -394,7 +394,8 @@ class RecallCoverage(BaseModel):
 
 
 class ProposedCorrectionView(BaseModel):
-    """One open entity-audit proposal awaiting the operator's decision.
+    """One open proposal awaiting the operator's decision — an entity-audit
+    correction OR a Schema-Evolver ontology revision (ADR-0003 Phase 5).
 
     Surfaced on ``recall(stats=True)`` (the session-start / check-in call) so
     the AI client can raise it conversationally and, on a yes, confirm it via
@@ -402,20 +403,28 @@ class ProposedCorrectionView(BaseModel):
     structured fields let the client explain or branch.
 
     Additive per Invariant I1 — a new optional field on RecallResult; the three
-    frozen verbs keep their signatures.
+    frozen verbs keep their signatures. Ontology proposals reuse the same view
+    (same list, same decide loop): their ``kind`` is ``'ontology_<action>'``,
+    the entity fields stay empty, and ``subject_slug`` names the kind the
+    revision touches.
     """
 
     id: str
     """Pass back as ``CorrectionDecision.proposal_id`` to confirm/reject."""
     kind: str
-    """'retype' | 'merge'."""
-    entity_id: str
-    entity_name: str
+    """'retype' | 'merge' | 'merge_review' for entity proposals;
+    'ontology_add' | 'ontology_rename' | 'ontology_merge' | 'ontology_split'
+    | 'ontology_deprecate' for ontology proposals."""
+    entity_id: str = ""
+    entity_name: str = ""
     prompt: str
     """Human-readable yes/no question, safe to show the user verbatim."""
     evidence: str
     """Why the audit flagged it — the pattern that fired."""
     confidence: float
+    subject_slug: str | None = None
+    """Ontology proposals only: the kind slug the revision is about (for
+    'ontology_add', the PROPOSED new slug)."""
 
 
 class RecallResult(BaseModel):
@@ -432,9 +441,9 @@ class RecallResult(BaseModel):
     ``summary`` is only populated when ``stats=True`` was requested.
     ``coverage`` is the honesty layer (see RecallCoverage) — populated on
     query/browse results, null on single-event lookups.
-    ``pending_corrections`` lists open entity-audit proposals — populated on
-    ``stats=True`` (and on any call that carried a ``decide``, so the client
-    sees the remaining queue after acting).
+    ``pending_corrections`` lists open entity-audit AND ontology proposals —
+    populated on ``stats=True`` (and on any call that carried a ``decide``,
+    so the client sees the remaining queue after acting).
     """
 
     hits: list[RecallHit]
@@ -484,14 +493,17 @@ class RecallFeedback(BaseModel):
 
 
 class CorrectionDecision(BaseModel):
-    """The operator's confirm/reject on one entity-audit proposal.
+    """The operator's verdict on one pending proposal — an entity-audit
+    correction or a Schema-Evolver ontology revision.
 
     The client first sees proposals via ``recall(stats=True).pending_corrections``,
     asks the user, then passes the decision back on its next recall:
     ``recall(decide=CorrectionDecision(proposal_id=..., verdict="confirm"))``.
-    A confirm applies the correction (re-type / merge) through the append-only
-    primitives and records it; a reject closes the proposal untouched. Deciding
-    an already-decided proposal is a no-op.
+    A confirm applies the change through the append-only primitives and
+    records it; a reject closes the proposal untouched. Deciding an
+    already-decided proposal is a no-op. Ids carrying the ``ont_`` prefix
+    route to the ontology queue (ADR-0003 Phase 5) — same argument, same
+    loop, no new tool.
 
     Why optional + on the existing tool: I1 forbids new tools. Additive optional
     args are allowed, exactly like ``feedback``.
@@ -499,10 +511,12 @@ class CorrectionDecision(BaseModel):
 
     proposal_id: str
     """``ProposedCorrectionView.id`` from a prior recall."""
-    verdict: Literal["confirm", "reject", "retract"]
+    verdict: Literal["confirm", "reject", "retract", "revert"]
     """``confirm`` keeps the proposed/auto state; ``reject`` corrects it;
     ``retract`` withdraws the entity entirely (it's noise — a file path, a test
-    fixture — not a real entity)."""
+    fixture — not a real entity; entity proposals only); ``revert`` undoes a
+    previously APPLIED ontology revision by appending the compensating
+    revision (I7; ontology proposals only)."""
     to_kind: str | None = None
     """For a ``merge_review`` reject: the corrected entity kind ("no, Clario is
     a project, not a product"). The assisting AI maps the user's natural-language

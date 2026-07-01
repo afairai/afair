@@ -28,8 +28,10 @@ Phase 1 is behavior-preserving by construction.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 from ulid import ULID
@@ -39,6 +41,19 @@ if TYPE_CHECKING:
 
 BOOTSTRAP_CREATED_BY = "bootstrap:v1"
 """``created_by`` stamp for the seeded kinds — bootstrap scaffold, not law."""
+
+ONTOLOGY_PROPOSAL_ID_PREFIX = "ont_"
+"""Row-id prefix for ``proposed_ontology_revisions`` rows. The decide loop
+dispatches on this shape (``ont_...`` = ontology queue, plain ULID =
+``proposed_corrections``) — defined here so both the Schema-Evolver (writer)
+and the corrections decide path (reader) import it without an
+agents↔substrate dependency."""
+
+KIND_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+"""Kind slugs: lowercase, letter-first, snake_case, 2-31 chars (ADR-0003)."""
+
+KIND_REVISION_ACTIONS = frozenset({"add", "rename", "merge", "split", "deprecate", "restore"})
+"""The ``kind_revisions.action`` CHECK set, mirrored for parse-don't-cast."""
 
 # The seven bootstrap kinds, in the canonical order the extractor tool
 # schema has always listed them (order preserved so the rendered enum is
@@ -104,6 +119,93 @@ def seed_bootstrap_kinds(conn: sqlite3.Connection) -> int:
             )
             inserted += cursor.rowcount
     return inserted
+
+
+# ── writers (ADR-0003 Phase 5 — the operator-confirmed revision path) ──────
+
+
+def register_kind(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    label: str,
+    description: str | None = None,
+    created_by: str,
+    source_event_id: str | None = None,
+) -> bool:
+    """Register one kind in ``kind_registry`` (append-only, I2).
+
+    ``INSERT OR IGNORE``: a slug that already owns a registry row — live or
+    dead — is never re-inserted; the row and its revision history are
+    permanent. Returns True when a NEW row landed, False when the slug was
+    already registered (the caller decides whether that means "restore the
+    dead kind" or "no-op").
+
+    Parse, don't cast: the slug is format-validated here even though the
+    Schema-Evolver's backstops validate it earlier — a manually inserted
+    proposal must not smuggle a malformed slug into the registry.
+    """
+    if not KIND_SLUG_RE.match(slug):
+        msg = f"invalid kind slug {slug!r} (must match {KIND_SLUG_RE.pattern})"
+        raise ValueError(msg)
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO kind_registry (
+                id, slug, label, description, created_at, created_by, source_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (f"kind:{slug}", slug, label, description, _now_iso(), created_by, source_event_id),
+        )
+    return cursor.rowcount > 0
+
+
+def write_kind_revision(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    from_slug: str | None = None,
+    to_slug: str | None = None,
+    detail: dict[str, Any] | None = None,
+    revised_by: str,
+    reason: str,
+    source_event_id: str | None = None,
+) -> str:
+    """Append one ``kind_revisions`` row — the ontology's revision primitive.
+
+    This is the writer the operator-confirm loop (Phase 5) applies proposals
+    through; the existing resolution chain (:func:`resolve_kind_slug` /
+    :func:`live_kinds` / the ``kind_current_v1`` view) picks the row up at
+    read time, so a rename or merge retypes its whole population with this
+    single row and zero per-entity writes. Reversal is a compensating row
+    (``restore`` after deprecate/rename/merge; ``deprecate`` after ``add``),
+    never a mutation — I7. Returns the new row's id.
+    """
+    if action not in KIND_REVISION_ACTIONS:
+        msg = f"action must be one of {sorted(KIND_REVISION_ACTIONS)}, got {action!r}"
+        raise ValueError(msg)
+    revision_id = str(ULID())
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO kind_revisions (
+                id, action, from_slug, to_slug, detail,
+                revised_at, revised_by, reason, source_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                revision_id,
+                action,
+                from_slug,
+                to_slug,
+                json.dumps(detail, sort_keys=True) if detail is not None else None,
+                _now_iso(),
+                revised_by,
+                reason,
+                source_event_id,
+            ),
+        )
+    return revision_id
 
 
 # ── resolution (latest-row-wins, mirroring resolve_canonical) ─────────────

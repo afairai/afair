@@ -41,7 +41,7 @@ from .entities import (
     write_entity_merge,
 )
 from .events import write_event
-from .kinds import live_kind_slugs, resolve_to_live_kind
+from .kinds import ONTOLOGY_PROPOSAL_ID_PREFIX, live_kind_slugs, resolve_to_live_kind
 
 if TYPE_CHECKING:
     import sqlite3
@@ -72,11 +72,12 @@ class PendingCorrection(BaseModel):
 
 
 class CorrectionOutcome(BaseModel):
-    """Result of deciding one proposal."""
+    """Result of deciding one proposal (entity-audit or ontology)."""
 
     proposal_id: str
     status: str
-    """'applied' | 'rejected' | 'not_found' | 'already_decided'."""
+    """'applied' | 'confirmed' | 'rejected' | 'not_found' | 'already_decided'
+    — plus 'reverted' / 'not_applied' for ontology proposals (Phase 5)."""
     note: str
 
 
@@ -356,7 +357,23 @@ def decide_correction(
     Idempotent against a decided proposal: a second decision on an
     already-decided row reports the prior status, so a double-click or retry
     never double-applies.
+
+    Ontology proposals (ADR-0003 Phase 5) ride the same loop: an id carrying
+    the ``ont_`` prefix dispatches to the ontology decide path (which also
+    accepts ``verdict="revert"`` on an applied revision). One verb, one
+    argument, two queues — I1 holds.
     """
+    if proposal_id.startswith(ONTOLOGY_PROPOSAL_ID_PREFIX):
+        # Lazy import: ontology.py imports CorrectionOutcome-adjacent pieces
+        # of this package; the function-level import keeps load order simple.
+        from .ontology import decide_ontology_proposal
+
+        outcome = decide_ontology_proposal(
+            conn, proposal_id=proposal_id, verdict=verdict, decided_by=decided_by
+        )
+        return CorrectionOutcome(
+            proposal_id=outcome.proposal_id, status=outcome.status, note=outcome.note
+        )
     if verdict not in ("confirm", "reject", "retract"):
         msg = f"verdict must be 'confirm', 'reject' or 'retract', got {verdict!r}"
         raise ValueError(msg)
