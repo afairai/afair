@@ -10,6 +10,31 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.3](https://github.com/afairai/afair/compare/v0.1.2...v0.1.3) (2026-07-01)
+
+
+### Features
+
+* **installer:** add Copilot CLI, Gemini CLI, Windsurf, Antigravity ([a598ea7](https://github.com/afairai/afair/commit/a598ea7ba376340c2296be816320253676533d14))
+* **installer:** add GitHub Copilot (VS Code) to one-command install ([15f321d](https://github.com/afairai/afair/commit/15f321dc0a606b653706a3e00507bd213b5d70e7))
+* **installer:** interactive client picker + don't offer web clients on localhost ([58200a8](https://github.com/afairai/afair/commit/58200a87ac28c33b6a4082d271115a22e3a40f00))
+* **llm:** support keyless/subscription providers (GitHub Copilot, any litellm) ([a2411de](https://github.com/afairai/afair/commit/a2411de848c21f6e984693988db78df1f691327d))
+* **mcp:** write-first intake — never reject remember/observe on shape ([b9ba3fc](https://github.com/afairai/afair/commit/b9ba3fc81f834701d70406543412e29bbf733c21))
+
+
+### Bug Fixes
+
+* **release:** make fallback Release publish idempotent ([c4582ec](https://github.com/afairai/afair/commit/c4582ec08e95423f49bd9dfdfca3106483e8c8e0))
+
+
+### Documentation
+
+* add 'Run it fully local (no external provider)' guide ([871294a](https://github.com/afairai/afair/commit/871294a32a1ae99d123087af8f1d8ac9c448b68c))
+* **clients:** per-client guides for Copilot CLI, Gemini CLI, Windsurf, Antigravity ([b41ed5d](https://github.com/afairai/afair/commit/b41ed5ded61f02cd99ae5ed633bdc9277f188659))
+* explain how many API keys afair needs (one is enough) ([325aa2b](https://github.com/afairai/afair/commit/325aa2bd916682da80dac238799bf8f7b240a684))
+* GitHub Copilot is chat-only (no embedding/vision/transcription) ([6feb3d7](https://github.com/afairai/afair/commit/6feb3d7a2c38085ca9b143a465d174ecb04425df))
+* **readme:** sharpen positioning around structuring as interpretation ([faedd45](https://github.com/afairai/afair/commit/faedd456425366ca0ca6ca615a9410bc5821c130))
+
 ## [0.1.2](https://github.com/afairai/afair/compare/v0.1.1...v0.1.2) (2026-06-28)
 
 
