@@ -146,7 +146,7 @@ The complete design, and the eight invariants that hold it together, live in
 |---|---|
 | [VISION.md](VISION.md) | The full design and the eight invariants. Start here for the why. |
 | [docs/self-hosting.md](docs/self-hosting.md) | Run your own vault: local, Docker, or a public deployment, with the CLI-vs-web client and OAuth setup. |
-| [docs/clients](docs/clients) | Per-client connection guides (Claude Code, Codex, Cursor, GitHub Copilot, Claude.ai, ChatGPT, Perplexity) and the one universal instruction snippet. |
+| [docs/clients](docs/clients) | Per-client connection guides (Claude Code, Codex, Cursor, GitHub Copilot for VS Code + CLI, Gemini CLI, Windsurf, Antigravity, Claude.ai, ChatGPT, Perplexity) and the one universal instruction snippet. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, the four checks, and the invariants a change cannot break. |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability, and the security model to hold afair against. |
 | [docs/adr](docs/adr) | Architecture Decision Records: why the invariants exist, why the entity graph is a belief layer. |

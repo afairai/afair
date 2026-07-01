@@ -72,10 +72,10 @@ beats a shared static token sitting in config files. Keep the bearer for a
 | [Codex CLI](codex.md) | bearer or OAuth | `~/.codex/config.toml` |
 | [Cursor](cursor.md) | bearer or OAuth | `.cursor/mcp.json` |
 | [GitHub Copilot (VS Code)](copilot.md) | bearer or OAuth | VS Code user `mcp.json` (agent mode) |
-| GitHub Copilot CLI | bearer or OAuth | `~/.copilot/mcp-config.json` (`type: http` + `url`) |
-| Gemini CLI | bearer or OAuth | `~/.gemini/settings.json` (`httpUrl`) |
-| Windsurf | bearer or OAuth | `~/.codeium/windsurf/mcp_config.json` (`serverUrl`) |
-| Antigravity | bearer or OAuth | `~/.gemini/config/mcp_config.json` (`serverUrl`) |
+| [GitHub Copilot CLI](copilot-cli.md) | bearer or OAuth | `~/.copilot/mcp-config.json` (`type: http` + `url`) |
+| [Gemini CLI](gemini-cli.md) | bearer or OAuth | `~/.gemini/settings.json` (`httpUrl`) |
+| [Windsurf](windsurf.md) | bearer or OAuth | `~/.codeium/windsurf/mcp_config.json` (`serverUrl`) |
+| [Antigravity](antigravity.md) | bearer or OAuth | `~/.gemini/config/mcp_config.json` (`serverUrl`) |
 | [Claude.ai (web/desktop)](claude-ai.md) | OAuth | Custom Connector UI |
 | [ChatGPT (web)](chatgpt.md) | OAuth (plan-gated) | Connectors / Developer mode |
 | [Perplexity (web)](perplexity.md) | OAuth (plan-gated) | Connectors |
