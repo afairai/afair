@@ -1466,7 +1466,15 @@ def observe(event: ObserveEvent) -> ObserveResult:
     db = connect_for_thread()
 
     event_dict = event.model_dump(exclude_none=False)
-    payload: dict[str, Any] = {"content_type": "event", **event_dict}
+    # Reserved payload keys always win over caller-supplied extras.
+    # ObserveEvent allows arbitrary extras, so a caller could otherwise
+    # smuggle content_type="text-large" + blob_hash=<existing hash> and
+    # make the extractor rehydrate an unrelated blob as this event's
+    # body. content_type is pinned to "event"; the modality-dispatch
+    # keys (blob_hash, text, parts) are stripped from extras.
+    for reserved in ("content_type", "blob_hash", "text", "parts"):
+        event_dict.pop(reserved, None)
+    payload: dict[str, Any] = {**event_dict, "content_type": "event"}
 
     # Single-pass write — see remember() for the rationale. Skips the
     # preview-hash compute_content_hash + read_event_by_hash that the old

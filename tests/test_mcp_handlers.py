@@ -388,6 +388,42 @@ def test_observe_preserves_extra_fields(ctx: ServerContext) -> None:
     assert p["content_type"] == "event"
 
 
+def test_observe_extras_cannot_override_reserved_payload_keys(ctx: ServerContext) -> None:
+    """Caller-supplied extras must not spoof reserved payload keys.
+
+    Regression: ObserveEvent allows arbitrary extras, and the payload was
+    built as {"content_type": "event", **event_dict}, so a caller-supplied
+    content_type (e.g. "text-large") plus a blob_hash of an EXISTING blob
+    made the extractor rehydrate an unrelated blob as this event's body.
+    """
+    event = ObserveEvent.model_validate(
+        {
+            "action": "spoof_attempt",
+            "subject": "handlers.py",
+            "content_type": "text-large",
+            "blob_hash": "sha256:" + "ab" * 32,
+            "text": "smuggled body",
+            "parts": [{"type": "text", "text": "smuggled part"}],
+            "legit_extra": "kept",
+        }
+    )
+    r = handlers.observe(event=event)
+
+    import json
+
+    row = ctx.db.execute("SELECT payload FROM events WHERE id = ?", (r.event_id,)).fetchone()
+    p = json.loads(row["payload"])
+    # Reserved keys win: content_type is pinned, modality-dispatch keys gone.
+    assert p["content_type"] == "event"
+    assert "blob_hash" not in p
+    assert "text" not in p
+    assert "parts" not in p
+    # Legitimate fields and extras survive.
+    assert p["action"] == "spoof_attempt"
+    assert p["subject"] == "handlers.py"
+    assert p["legit_extra"] == "kept"
+
+
 def test_observe_then_recall_finds_it(ctx: ServerContext) -> None:
     """Observe events are indexed via action/subject/result — recall finds them."""
     handlers.observe(

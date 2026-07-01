@@ -663,6 +663,101 @@ def test_resolve_canonical_batch_empty_and_dedup(
     assert resolve_canonical_batch(db, [a.id, a.id, a.id]) == {a.id: a.id}
 
 
+def test_resolve_canonical_batch_skips_invalidated_merge(
+    db: sqlite3.Connection, sample_event_id: str
+) -> None:
+    """An operator-invalidated merge must not resolve — in EITHER variant.
+
+    Regression: the batched CTE ranked over ALL of entity_merges while the
+    per-id helper filtered on merge_invalidations, so recall (which uses
+    the batch) kept serving a merge the operator had undone.
+    """
+    from afair.substrate import write_merge_invalidation
+    from afair.substrate.entities import resolve_canonical_batch
+
+    a = write_entity(
+        db,
+        canonical_name="A",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    b = write_entity(
+        db,
+        canonical_name="B",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    merge = write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=b.id, merged_by="t", reason="x", confidence=0.9
+    )
+    write_merge_invalidation(
+        db, merge_id=merge.id, invalidated_by="operator", reason="rejected auto-merge"
+    )
+
+    # Both variants must agree: the invalidated merge is gone, A is its
+    # own canonical again.
+    assert resolve_canonical(db, a.id) == a.id
+    assert resolve_canonical_batch(db, [a.id]) == {a.id: a.id}
+
+
+def test_resolve_canonical_batch_invalidated_newer_merge_falls_back_to_older(
+    db: sqlite3.Connection, sample_event_id: str
+) -> None:
+    """Invalidating the newest merge falls back to an older still-valid one.
+
+    The invalidation filter must apply BEFORE the latest-merge ranking;
+    filtering after rn=1 would drop the entity's merge entirely instead
+    of falling back — diverging from the per-id helper.
+    """
+    import time
+
+    from afair.substrate import write_merge_invalidation
+    from afair.substrate.entities import resolve_canonical_batch
+
+    a = write_entity(
+        db,
+        canonical_name="A",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    b = write_entity(
+        db,
+        canonical_name="B",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    c = write_entity(
+        db,
+        canonical_name="C",
+        kind="concept",
+        created_by="t",
+        source_event_id=sample_event_id,
+        confidence=0.5,
+    )
+    write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=b.id, merged_by="t", reason="first", confidence=0.6
+    )
+    time.sleep(0.001)  # guarantee distinct microsecond stamps even on fast hosts
+    newer = write_entity_merge(
+        db, from_entity_id=a.id, into_entity_id=c.id, merged_by="t", reason="second", confidence=0.9
+    )
+    write_merge_invalidation(
+        db, merge_id=newer.id, invalidated_by="operator", reason="wrong target"
+    )
+
+    # Newest merge (A→C) is invalidated; the older A→B is still live.
+    assert resolve_canonical(db, a.id) == b.id
+    assert resolve_canonical_batch(db, [a.id]) == {a.id: b.id}
+
+
 # ── edge invalidation ─────────────────────────────────────────────────────
 
 

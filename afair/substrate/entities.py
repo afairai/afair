@@ -870,8 +870,11 @@ def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> 
         f"""
         WITH RECURSIVE
         latest_merges(from_entity_id, into_entity_id) AS (
-            -- For each from_entity_id keep only the most recent merge row.
-            -- Matches the per-id helper's ORDER BY merged_at DESC LIMIT 1.
+            -- For each from_entity_id keep only the most recent LIVE merge
+            -- row. Invalidated merges (operator undid the merge) are
+            -- excluded BEFORE ranking so an invalidated newer merge falls
+            -- back to an older still-valid one — matching the per-id
+            -- helper's NOT EXISTS + ORDER BY merged_at DESC LIMIT 1.
             SELECT from_entity_id, into_entity_id FROM (
                 SELECT
                     from_entity_id,
@@ -881,6 +884,10 @@ def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> 
                         ORDER BY merged_at DESC
                     ) AS rn
                 FROM entity_merges
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM merge_invalidations mi
+                    WHERE mi.merge_id = entity_merges.id
+                )
             ) ranked
             WHERE rn = 1
         ),
