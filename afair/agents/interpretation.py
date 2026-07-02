@@ -125,12 +125,19 @@ def write_failed_interpretation(
 
     Same table, same shape; the extraction JSON carries a ``status: failed``
     discriminator. Makes retry and diagnosis observable without DDL.
+
+    ``retries`` carries the honest prior-attempt count: 0 on the first
+    failure, N when this row is the (N+1)-th failed extractor attempt for
+    the event. Derived from existing rows rather than a mutable counter so
+    it stays append-only per I2. The extraction-retry worker's selection
+    cap counts the failed rows themselves; this field is the human-readable
+    mirror of that count.
     """
     extraction: dict[str, Any] = {
         "status": "failed",
         "error_type": error_type,
         "error_message": error_message,
-        "retries": 0,
+        "retries": _count_failed_extractor_attempts(conn, event.content_hash),
         "attempted_at": _now_iso(),
     }
     return write_interpretation(
@@ -140,6 +147,25 @@ def write_failed_interpretation(
         produced_by=produced_by,
         extraction=extraction,
     )
+
+
+def _count_failed_extractor_attempts(conn: sqlite3.Connection, event_hash: str) -> int:
+    """Number of ``status: failed`` extractor rows already stored for an event.
+
+    Spans the whole ``extractor:%`` producer family (base producer, modality
+    subtags, ``#retryN`` variants) so the count reflects every real failed
+    attempt regardless of which extraction path produced it.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM interpretations
+        WHERE event_hash = ?
+          AND produced_by LIKE 'extractor:%'
+          AND json_extract(extraction, '$.status') = 'failed'
+        """,
+        (event_hash,),
+    ).fetchone()
+    return int(row["n"]) if row is not None else 0
 
 
 def _count_extractor_attempts(

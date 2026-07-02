@@ -64,6 +64,17 @@ log = structlog.get_logger(__name__)
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="extractor")
 """Background workers — text-only Phase 0 load fits easily in 4 threads."""
 
+EXTRACTION_LLM_TIMEOUT_SECONDS = 120.0
+"""Per-call timeout for the extraction LLM call.
+
+The wrapper default (30s) proved too tight for large real-world payloads:
+two substantial documents on the live vault (a session-handoff doc and a
+long email thread) hit litellm's timeout and were left with only a failed
+interpretation. Extraction runs on this background pool — never blocking
+the user-facing tool call — so a generous window costs nothing on the hot
+path. The extraction-retry cold-path worker covers whatever still times
+out (extraction_retry.py)."""
+
 # Shut down cleanly on interpreter exit so pending extractions try to land.
 atexit.register(lambda: _EXECUTOR.shutdown(wait=True, cancel_futures=False))
 
@@ -430,6 +441,7 @@ def _run_extraction(
                 tool_description=EXTRACTOR_TOOL_DESCRIPTION,
                 tool_schema=extractor_tool_schema(db),
                 api_key=api_key,
+                timeout=EXTRACTION_LLM_TIMEOUT_SECONDS,
             )
         except LLMError as e:
             log.warning(

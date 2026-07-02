@@ -34,6 +34,7 @@ from ..agents.entity_articles import EntityArticleWorker
 from ..agents.entity_audit import EntityAuditWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
+from ..agents.extraction_retry import ExtractionRetryWorker
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.rollback_monitor import RollbackMonitor
@@ -125,6 +126,11 @@ def build_server(settings: Settings) -> FastMCP:
             workers=[
                 Pruner(),
                 OrphanBlobSweeper(),
+                # Bounded re-extraction of events whose latest extractor
+                # interpretation is a transient failure (llm_timeout /
+                # llm_rate_limit). Closes the silent-permanent-gap failure
+                # mode where a timed-out extraction was never re-attempted.
+                ExtractionRetryWorker(),
                 EntityAuditWorker(),
                 ConflictResolver(),
                 Consolidator(),
