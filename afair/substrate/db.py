@@ -26,7 +26,7 @@ import sqlite_vec  # type: ignore[import-untyped]
 
 from .encryption import derive_sqlcipher_key
 from .kinds import seed_bootstrap_kinds
-from .schema import SCHEMA_DDL, VEC_DDL
+from .schema import SCHEMA_DDL, VEC_DDL, migrate_proposed_corrections_kind_check
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -247,6 +247,11 @@ def init_db(
         # Vector DDL is parameterized by embedding_dim — render once at boot.
         for stmt_template in VEC_DDL:
             conn.execute(stmt_template.format(dim=embedding_dim))
+    # ADR-0004: widen the proposed_corrections.kind CHECK on pre-existing vaults
+    # so 'edge_review' proposals can be inserted. Guarded + idempotent; a no-op
+    # on fresh vaults (SCHEMA_DDL already ships the widened CHECK) and on
+    # already-migrated ones. Runs in its own transaction inside the helper.
+    migrate_proposed_corrections_kind_check(conn)
     # Bootstrap the kind registry (ADR-0003 Phase 1). Idempotent — a
     # fresh vault gets the seven seeded, an existing vault gains the
     # registry on its next open, an already-seeded vault no-ops.

@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from .entities import (
     assign_entity_kind,
+    record_edge_review,
     resolve_canonical,
     resolve_entity_kind,
     retract_entity,
@@ -101,6 +102,12 @@ def _prompt_for(conn: sqlite3.Connection, kind: str, name: str, detail: dict[str
             f"({detail['from_kind']}) into '{detail['into_name']}' as a "
             f"{detail['merged_kind']}. Is {detail['merged_kind']} the right kind, "
             f"or should it be something else?"
+        )
+    if kind == "edge_review":
+        return (
+            f"afair derived '{detail['subject_name']} {detail['predicate']} "
+            f"{detail['object_name']}' with low confidence "
+            f"({detail['confidence']:.2f}). Is that relation right?"
         )
     return f"Review the proposed correction for '{name}'."
 
@@ -301,6 +308,67 @@ def _set_status(
         )
 
 
+def _decide_edge_review(
+    conn: sqlite3.Connection,
+    *,
+    proposal_id: str,
+    verdict: str,
+    detail: dict[str, Any],
+    decided_by: str,
+    now: str,
+) -> CorrectionOutcome:
+    """Record the operator's verdict on a derived edge (ADR-0004 C4).
+
+    A ``confirm``/``reject`` rides the already-shipped
+    :func:`~afair.substrate.entities.record_edge_review` — giving it its first
+    production caller — which for a reject also writes the ``edge_invalidation``
+    atomically, so the edge drops out of the live graph. The decision is
+    recorded as an ``observe`` event (I7). ``retract`` is meaningless for an
+    edge (the entity is real; only the RELATION is in question), so it raises.
+    A stale ``edge_id`` closes the proposal so it stops blocking the queue."""
+    if verdict == "retract":
+        msg = (
+            "retract is not meaningful for an edge-review proposal "
+            "(the entities are real; only the relation is in question) — "
+            "use confirm or reject"
+        )
+        raise ValueError(msg)
+    review_verdict = "confirm" if verdict == "confirm" else "reject"
+    edge_label = (
+        f"{detail.get('subject_name')} {detail.get('predicate')} {detail.get('object_name')}"
+    )
+    try:
+        record_edge_review(
+            conn,
+            edge_id=detail["edge_id"],
+            verdict=review_verdict,
+            reviewed_by=decided_by,
+            reason=f"decide loop, proposal {proposal_id}",
+        )
+    except ValueError as exc:
+        # Stale edge id (e.g. the edge row is gone). Close the proposal as
+        # rejected so it never re-blocks the (kind, subject) UNIQUE slot.
+        _set_status(conn, proposal_id, "rejected", now, decided_by)
+        return CorrectionOutcome(proposal_id=proposal_id, status="not_found", note=str(exc))
+    write_event(
+        conn,
+        origin="user",
+        kind="observe",
+        payload={
+            "action": "confirm_edge" if review_verdict == "confirm" else "reject_edge",
+            "subject": proposal_id,
+            "result": f"{review_verdict} relation",
+            "edge": edge_label,
+        },
+    )
+    _set_status(conn, proposal_id, "applied", now, decided_by)
+    return CorrectionOutcome(
+        proposal_id=proposal_id,
+        status="applied",
+        note=f"{review_verdict}ed relation '{edge_label}'",
+    )
+
+
 def _decide_merge_review(
     conn: sqlite3.Connection,
     *,
@@ -403,6 +471,20 @@ def decide_correction(
 
     detail = json.loads(row["detail"])
     now = _now_iso()
+
+    # Edge-review proposals (ADR-0004) dispatch first: confirm/reject ride
+    # record_edge_review, and retract is meaningless for a relation (handled
+    # inside). This must precede the generic retract path below, which would
+    # otherwise withdraw the SUBJECT entity — wrong for an edge verdict.
+    if row["kind"] == "edge_review":
+        return _decide_edge_review(
+            conn,
+            proposal_id=proposal_id,
+            verdict=verdict,
+            detail=detail,
+            decided_by=decided_by,
+            now=now,
+        )
 
     # Retract: the proposal's entity is noise, not a real entity ("which kind?"
     # is the wrong question). Withdraw it from the live graph (append-only).

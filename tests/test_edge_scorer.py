@@ -84,6 +84,8 @@ def _seed_edge(
     with_interpretation: bool = True,
     subj: Entity | None = None,
     obj: Entity | None = None,
+    subject_name: str = "Sajinth",
+    object_name: str = "Athara",
 ) -> tuple[Event, Entity, Entity, EntityEdge]:
     """Write event (+ optional extractor interpretation), two entities, their
     mentions, and one edge. Mirrors the substrate a real cycle would produce."""
@@ -105,8 +107,8 @@ def _seed_edge(
             produced_by="extractor:anthropic/claude-haiku-4-5",
             extraction=extraction,
         )
-    subj = subj or _entity(conn, "Sajinth", "person", ev)
-    obj = obj or _entity(conn, "Athara", "organization", ev)
+    subj = subj or _entity(conn, subject_name, "person", ev)
+    obj = obj or _entity(conn, object_name, "organization", ev)
     if subj_conf is not None:
         write_entity_mention(
             conn,
@@ -312,3 +314,215 @@ def test_calibration_report_bucket_and_brier_math(
     low = next(b for b in report["buckets"] if b["lo"] == 0.0)
     assert low["n"] == 1
     assert low["confirm_rate"] == 0.0
+
+
+# ── edge-review proposals + decide loop (ADR-0004 S6) ───────────────────────
+
+
+def _seed_weak_edge(conn: sqlite3.Connection, i: int) -> Any:
+    """A low-confidence edge (vague predicate, new endpoints, no extraction) on
+    a DISTINCT subject so the UNIQUE(kind, subject) doesn't collapse proposals."""
+    _ev, _subj, _obj, edge = _seed_edge(
+        conn,
+        text=f"Person{i} is loosely connected to the Org{i}",
+        predicate="is loosely connected to the",
+        extraction_confidence=None,
+        with_interpretation=False,
+        subj_conf=0.5,
+        obj_conf=0.5,
+        subject_name=f"Person{i}",
+        object_name=f"Org{i}",
+    )
+    return edge
+
+
+def test_scorer_proposes_at_most_k_lowest_confidence(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    from afair.substrate import read_pending_corrections
+
+    for i in range(5):
+        _seed_weak_edge(db, i)
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_proposed"] == 3  # capped at MAX_..._PER_CYCLE
+
+    pending = read_pending_corrections(db)
+    edge_reviews = [p for p in pending if p.kind == "edge_review"]
+    assert len(edge_reviews) == 3
+    # Each carries a ready-to-ask prompt and a reason string.
+    assert all("Is that relation right?" in p.prompt for p in edge_reviews)
+    assert all("served confidence" in p.evidence for p in edge_reviews)
+
+
+def test_scorer_skips_reviewed_invalidated_and_confident(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    from afair.substrate import read_pending_corrections
+
+    # A strong edge → never proposed.
+    _seed_edge(db, subject_name="Strong", object_name="Case")
+    # A weak edge already reviewed → skipped.
+    reviewed_edge = _seed_weak_edge(db, 1)
+    record_edge_review(db, edge_id=reviewed_edge.id, verdict="confirm", reviewed_by="op")
+    # A weak edge that will be proposed.
+    _seed_weak_edge(db, 2)
+
+    EdgeConfidenceScorer().run(db, settings)
+    edge_reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    # Only the single un-reviewed weak edge (Person2) is proposed.
+    assert len(edge_reviews) == 1
+    assert edge_reviews[0].detail["subject_name"] == "Person2"
+
+
+def test_proposals_idempotent_across_cycles(db: sqlite3.Connection, settings: Settings) -> None:
+    _seed_weak_edge(db, 1)
+    EdgeConfidenceScorer().run(db, settings)
+    n1 = db.execute(
+        "SELECT COUNT(*) AS c FROM proposed_corrections WHERE kind = 'edge_review'"
+    ).fetchone()["c"]
+    EdgeConfidenceScorer().run(db, settings)
+    n2 = db.execute(
+        "SELECT COUNT(*) AS c FROM proposed_corrections WHERE kind = 'edge_review'"
+    ).fetchone()["c"]
+    assert n1 == 1
+    assert n2 == 1  # INSERT OR IGNORE on the UNIQUE — no duplicate
+
+
+def test_decide_confirm_records_review_end_to_end(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """REGRESSION: propose → decide(confirm) → a confirm review row exists.
+    This full loop cannot pass on main — nothing proposes edge reviews, so
+    record_edge_review never gets a production caller."""
+    from afair.substrate import decide_correction, latest_edge_review, read_pending_corrections
+
+    edge = _seed_weak_edge(db, 1)
+    EdgeConfidenceScorer().run(db, settings)
+    proposal = next(p for p in read_pending_corrections(db) if p.kind == "edge_review")
+
+    outcome = decide_correction(db, proposal_id=proposal.id, verdict="confirm")
+    assert outcome.status == "applied"
+    assert latest_edge_review(db, edge.id) == "confirm"
+    # The proposal is closed; re-deciding is a no-op.
+    again = decide_correction(db, proposal_id=proposal.id, verdict="confirm")
+    assert again.status == "already_decided"
+
+
+def test_decide_reject_drops_edge_from_graph(db: sqlite3.Connection, settings: Settings) -> None:
+    from afair.substrate import (
+        decide_correction,
+        iter_edges_for_entity,
+        latest_edge_review,
+        read_pending_corrections,
+    )
+
+    edge = _seed_weak_edge(db, 1)
+    EdgeConfidenceScorer().run(db, settings)
+    proposal = next(p for p in read_pending_corrections(db) if p.kind == "edge_review")
+
+    outcome = decide_correction(db, proposal_id=proposal.id, verdict="reject")
+    assert outcome.status == "applied"
+    assert latest_edge_review(db, edge.id) == "reject"
+    # The reject wrote an invalidation → the edge is gone from live reads.
+    live = iter_edges_for_entity(db, edge.subject_id)
+    assert all(e.id != edge.id for e in live)
+
+
+def test_decide_retract_on_edge_raises(db: sqlite3.Connection, settings: Settings) -> None:
+    from afair.substrate import decide_correction, read_pending_corrections
+
+    _seed_weak_edge(db, 1)
+    EdgeConfidenceScorer().run(db, settings)
+    proposal = next(p for p in read_pending_corrections(db) if p.kind == "edge_review")
+    with pytest.raises(ValueError, match="retract is not meaningful"):
+        decide_correction(db, proposal_id=proposal.id, verdict="retract")
+
+
+def test_decide_stale_edge_id_closes_proposal(db: sqlite3.Connection, settings: Settings) -> None:
+    from afair.substrate import decide_correction, read_pending_corrections
+
+    _seed_weak_edge(db, 1)
+    EdgeConfidenceScorer().run(db, settings)
+    proposal = next(p for p in read_pending_corrections(db) if p.kind == "edge_review")
+    # Corrupt the stored edge_id to simulate a stale reference.
+    detail = dict(proposal.detail)
+    detail["edge_id"] = "edge:ghost"
+    import json as _json
+
+    db.execute(
+        "UPDATE proposed_corrections SET detail = ? WHERE id = ?",
+        (_json.dumps(detail), proposal.id),
+    )
+    db.commit()
+    outcome = decide_correction(db, proposal_id=proposal.id, verdict="confirm")
+    assert outcome.status == "not_found"
+    # The proposal is closed (rejected) so it stops blocking the queue.
+    remaining = [p for p in read_pending_corrections(db) if p.id == proposal.id]
+    assert remaining == []
+
+
+# ── proposed_corrections CHECK migration (ADR-0004 S6a) ─────────────────────
+
+
+def test_migrate_widens_kind_check_preserving_rows(db: sqlite3.Connection) -> None:
+    """A pre-ADR-0004 vault whose frozen CHECK lacks 'edge_review' is migrated
+    in place: existing rows survive and edge_review inserts start working."""
+    import json as _json
+
+    from afair.substrate.schema import migrate_proposed_corrections_kind_check
+
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "x"}
+    )
+    ent = _entity(db, "Legacy", "person", ev)
+
+    # Rebuild the table with the OLD frozen CHECK (no 'edge_review'), simulating
+    # a vault created before this ADR, and seed one decided row.
+    with db:
+        db.execute("DROP TABLE proposed_corrections")
+        db.execute(
+            """
+            CREATE TABLE proposed_corrections (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review')),
+                entity_id TEXT NOT NULL REFERENCES entities(id),
+                detail TEXT NOT NULL, evidence TEXT NOT NULL, confidence REAL NOT NULL,
+                tier TEXT NOT NULL CHECK (tier IN ('auto', 'review')),
+                detected_by TEXT NOT NULL, detected_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+                decided_at TEXT, decided_by TEXT,
+                UNIQUE(kind, entity_id)
+            ) STRICT
+            """
+        )
+        db.execute(
+            "INSERT INTO proposed_corrections "
+            "(id, kind, entity_id, detail, evidence, confidence, tier, detected_by, detected_at) "
+            "VALUES ('c1', 'retype', ?, ?, 'weak', 0.5, 'review', 't', '2026-01-01T00:00:00Z')",
+            (ent.id, _json.dumps({"to_kind": "organization"})),
+        )
+
+    # Pre-migration: an edge_review insert is refused by the frozen CHECK.
+    with pytest.raises(Exception, match="CHECK"), db:
+        db.execute(
+            "INSERT INTO proposed_corrections "
+            "(id, kind, entity_id, detail, evidence, confidence, tier, detected_by, detected_at) "
+            "VALUES ('e1', 'edge_review', ?, '{}', 'x', 0.3, 'review', 't', '2026-01-02T00:00:00Z')",
+            (ent.id,),
+        )
+
+    assert migrate_proposed_corrections_kind_check(db) is True
+    # The pre-existing row survived the rebuild.
+    kept = db.execute("SELECT kind FROM proposed_corrections WHERE id = 'c1'").fetchone()
+    assert kept["kind"] == "retype"
+    # edge_review inserts now succeed.
+    with db:
+        db.execute(
+            "INSERT INTO proposed_corrections "
+            "(id, kind, entity_id, detail, evidence, confidence, tier, detected_by, detected_at) "
+            "VALUES ('e1', 'edge_review', ?, '{}', 'x', 0.3, 'review', 't', '2026-01-02T00:00:00Z')",
+            (ent.id,),
+        )
+    # Idempotent: a second migrate is a no-op.
+    assert migrate_proposed_corrections_kind_check(db) is False

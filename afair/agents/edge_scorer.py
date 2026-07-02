@@ -23,11 +23,14 @@ No LLM, so no budget pressure — pure SQL + the pure model in
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from ulid import ULID
 
 from ..substrate import pipeline_events as pe
+from ..substrate.belief import predicate_is_crisp
 from ..substrate.confidence import (
     EDGE_CONFIDENCE_VERSION,
     EdgeConfidenceSignals,
@@ -36,10 +39,17 @@ from ..substrate.confidence import (
 )
 from ..substrate.edge_confidence import (
     EDGE_CONFIDENCE_EPSILON,
+    latest_edge_confidence_batch,
     latest_edge_scores_batch,
     write_edge_confidence_score,
 )
-from ..substrate.entities import EntityEdge, count_corroborating_sources
+from ..substrate.entities import (
+    EntityEdge,
+    count_corroborating_sources,
+    latest_edge_reviews_batch,
+    read_entity_by_id,
+    resolve_canonical,
+)
 from .cold_path import ColdPathWorker
 from .conflict_resolver import read_conflicts_batch
 from .verdicts import is_unresolved_conflict
@@ -55,6 +65,20 @@ log = structlog.get_logger(__name__)
 MAX_EDGES_PER_CYCLE = 100
 """Hard cap on edges scored per cycle. With 176 legacy edges the backfill
 completes in two cycles; steady-state re-scoring is far smaller."""
+
+EDGE_REVIEW_PROPOSAL_THRESHOLD = 0.6
+"""Served confidence below which a live, unreviewed, `proposed` edge becomes a
+candidate for the operator's review queue (ADR-0004 C4)."""
+
+MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE = 3
+"""Only the K lowest-confidence uncertain edges are queued per cycle —
+quarantine research says queue only the uncertain so review effort stays
+small. NOTE (review-fatigue behavior): UNIQUE(kind, entity_id) means one open
+edge-review proposal per SUBJECT entity at a time; a second low-confidence edge
+on the same subject waits until the first is decided (the pruner clears applied
+rows)."""
+
+EDGE_SCORER_PRODUCED_BY = "edge_confidence_scorer:v0"
 
 
 class EdgeConfidenceScorer(ColdPathWorker):
@@ -99,6 +123,11 @@ class EdgeConfidenceScorer(ColdPathWorker):
                     # flat-0.8 edge getting its first real score.
                     stats["legacy_backfilled"] += 1
 
+        # Propose the lowest-confidence uncertain edges for operator review
+        # (ADR-0004 C4). This gives record_edge_review its first production
+        # caller and makes the calibration set grow.
+        stats["edge_reviews_proposed"] = _propose_edge_reviews(conn)
+
         # Calibration: measure the priors against the operator's verdicts.
         # Included in cycle stats only once reviews exist (bootstrap).
         report = calibration_report(conn)
@@ -111,11 +140,12 @@ class EdgeConfidenceScorer(ColdPathWorker):
             conn,
             event_id="-",
             stage="edge_scorer.cycle",
-            producer="edge_confidence_scorer:v0",
+            producer=EDGE_SCORER_PRODUCED_BY,
             detail=(
                 f"scored={stats['edges_scored']} "
                 f"skipped_unchanged={stats['edges_skipped_unchanged']} "
-                f"legacy_backfilled={stats['legacy_backfilled']}"
+                f"legacy_backfilled={stats['legacy_backfilled']} "
+                f"reviews_proposed={stats['edge_reviews_proposed']}"
             ),
         )
         return stats
@@ -298,3 +328,122 @@ def _row_to_edge(row: Any) -> EntityEdge:
         source_event_id=row["source_event_id"],
         confidence=float(row["confidence"]),
     )
+
+
+# ── edge-review proposals (ADR-0004 C4) ─────────────────────────────────────
+
+
+def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
+    """Queue the K lowest-confidence uncertain edges for operator review.
+
+    Selects live (non-invalidated), unreviewed edges whose SERVED confidence is
+    below the threshold — those resolve to `proposed` (served < threshold <
+    the auto-confirm floor). Lowest confidence first, capped per cycle. Each is
+    inserted into ``proposed_corrections`` (kind ``edge_review``) with
+    ``INSERT OR IGNORE`` on the UNIQUE(kind, entity_id), so a re-run never
+    duplicates an open proposal. Returns the number of new proposals.
+    """
+    live_rows = conn.execute(
+        """
+        SELECT e.* FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        WHERE i.id IS NULL
+        """
+    ).fetchall()
+    if not live_rows:
+        return 0
+    edges = [_row_to_edge(r) for r in live_rows]
+    ids = [e.id for e in edges]
+    served = latest_edge_confidence_batch(conn, ids)
+    reviewed = latest_edge_reviews_batch(conn, ids)
+    scores = latest_edge_scores_batch(conn, ids)
+
+    candidates: list[tuple[float, EntityEdge]] = []
+    for edge in edges:
+        if edge.id in reviewed:
+            continue  # already has an operator verdict
+        conf = served.get(edge.id, edge.confidence)
+        if conf >= EDGE_REVIEW_PROPOSAL_THRESHOLD:
+            continue  # confident enough — not a review candidate
+        candidates.append((conf, edge))
+    candidates.sort(key=lambda c: c[0])
+
+    proposed = 0
+    for conf, edge in candidates:
+        if proposed >= MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE:
+            break
+        components = scores[edge.id].components if edge.id in scores else {}
+        if _insert_edge_review_proposal(conn, edge=edge, confidence=conf, components=components):
+            proposed += 1
+    return proposed
+
+
+def _insert_edge_review_proposal(
+    conn: sqlite3.Connection,
+    *,
+    edge: EntityEdge,
+    confidence: float,
+    components: dict[str, Any],
+) -> bool:
+    """Insert one edge-review proposal (INSERT OR IGNORE). Returns True when a
+    new row landed, False when the UNIQUE(kind, subject) absorbed it."""
+    subject_id = resolve_canonical(conn, edge.subject_id)
+    object_id = resolve_canonical(conn, edge.object_id)
+    subj = read_entity_by_id(conn, subject_id)
+    obj = read_entity_by_id(conn, object_id)
+    subject_name = subj.canonical_name if subj is not None else subject_id
+    object_name = obj.canonical_name if obj is not None else object_id
+    detail = {
+        "edge_id": edge.id,
+        "subject_name": subject_name,
+        "predicate": edge.predicate,
+        "object_name": object_name,
+        "confidence": round(confidence, 3),
+        "source_event_id": edge.source_event_id,
+    }
+    evidence = _proposal_evidence(edge, confidence, components)
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO proposed_corrections (
+            id, kind, entity_id, detail, evidence, confidence, tier,
+            detected_by, detected_at, status
+        ) VALUES (?, 'edge_review', ?, ?, ?, ?, 'review', ?, ?, 'proposed')
+        """,
+        (
+            str(ULID()),
+            subject_id,
+            json.dumps(detail, ensure_ascii=False, sort_keys=True),
+            evidence,
+            confidence,
+            EDGE_SCORER_PRODUCED_BY,
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _proposal_evidence(edge: EntityEdge, confidence: float, components: dict[str, Any]) -> str:
+    """A short, human-readable reason string built from the stored components —
+    e.g. ``"served confidence 0.42 (vague predicate, new endpoint, no
+    corroboration)"``."""
+    reasons: list[str] = []
+    signals = components.get("signals", {}) if isinstance(components, dict) else {}
+    if not predicate_is_crisp(edge.predicate):
+        reasons.append("vague predicate")
+    mentions = [
+        m
+        for m in (
+            signals.get("subject_mention_confidence"),
+            signals.get("object_mention_confidence"),
+        )
+        if isinstance(m, (int, float))
+    ]
+    if mentions and min(mentions) <= 0.5:
+        reasons.append("new endpoint")
+    if signals.get("corroborating_sources", 0) == 0:
+        reasons.append("no corroboration")
+    if signals.get("source_conflicted"):
+        reasons.append("contested source")
+    tail = f" ({', '.join(reasons)})" if reasons else ""
+    return f"served confidence {confidence:.2f}{tail}"

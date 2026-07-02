@@ -10,6 +10,8 @@ readable, queryable, and re-interpretable by every later version.
 
 from __future__ import annotations
 
+from typing import Any
+
 SCHEMA_VERSION = 1
 """Substrate writer version. Bump only when fields are ADDED, never removed."""
 
@@ -458,7 +460,7 @@ SCHEMA_DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS proposed_corrections (
         id            TEXT PRIMARY KEY,
-        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review')),
+        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review', 'edge_review')),
         entity_id     TEXT NOT NULL REFERENCES entities(id),
         detail        TEXT NOT NULL,
         evidence      TEXT NOT NULL,
@@ -956,3 +958,68 @@ VEC_DDL: tuple[str, ...] = (
     )
     """,
 )
+
+
+# The widened proposed_corrections definition (ADR-0004: adds the 'edge_review'
+# kind). Fresh vaults get this via SCHEMA_DDL; existing vaults, whose frozen
+# CHECK still lists only retype/merge/merge_review, are migrated in place by
+# :func:`migrate_proposed_corrections_kind_check`. Kept byte-identical to the
+# SCHEMA_DDL statement above except for the CHECK list so INSERT ... SELECT *
+# round-trips.
+_PROPOSED_CORRECTIONS_REBUILD_DDL = """
+    CREATE TABLE proposed_corrections (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review', 'edge_review')),
+        entity_id     TEXT NOT NULL REFERENCES entities(id),
+        detail        TEXT NOT NULL,
+        evidence      TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        tier          TEXT NOT NULL CHECK (tier IN ('auto', 'review')),
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+        decided_at    TEXT,
+        decided_by    TEXT,
+        UNIQUE(kind, entity_id)
+    ) STRICT
+"""
+
+
+def migrate_proposed_corrections_kind_check(conn: Any) -> bool:
+    """Widen the ``proposed_corrections.kind`` CHECK to admit ``edge_review``.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table's constraint,
+    so a vault created before ADR-0004 keeps the frozen
+    ``CHECK (kind IN ('retype','merge','merge_review'))`` and would REJECT an
+    ``edge_review`` insert. ``proposed_corrections`` is explicitly NON-substrate
+    (a regenerable suggestion queue, no I2 triggers — see its DDL comment), so a
+    guarded, transactional table rebuild is legitimate and touches neither I2
+    nor I3: the append-only *applied* corrections live elsewhere.
+
+    Idempotent: the guard (does the stored DDL already mention ``edge_review``?)
+    makes a re-run a no-op, and a fresh vault whose table already has the widened
+    CHECK is never rebuilt. Returns True when a rebuild happened.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return False  # table not created yet (shouldn't happen post-DDL)
+    if "edge_review" in row["sql"]:
+        return False  # already widened (fresh vault or prior migration)
+
+    # Rebuild in ONE transaction: rename → recreate widened → copy → drop old →
+    # re-index. FOREIGN KEYS are fine (nothing references this table; it
+    # references entities, which are untouched). Column order is identical so
+    # INSERT ... SELECT * maps positionally.
+    with conn:
+        conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
+        conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)
+        conn.execute("INSERT INTO proposed_corrections SELECT * FROM proposed_corrections_old")
+        conn.execute("DROP TABLE proposed_corrections_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
+            "ON proposed_corrections(status)"
+        )
+    return True
