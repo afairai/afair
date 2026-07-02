@@ -17,6 +17,7 @@ from afair.agents.entity_audit import EntityAuditWorker
 from afair.mcp.schemas import CorrectionDecision
 from afair.settings import Settings
 from afair.substrate import (
+    count_pending_corrections,
     decide_correction,
     open_db,
     read_pending_corrections,
@@ -90,6 +91,17 @@ def test_read_pending_surfaces_open_proposals(db: sqlite3.Connection, settings: 
     pending = read_pending_corrections(db)
     kinds = sorted(p.kind for p in pending)
     assert kinds == ["merge_review", "retype"]
+
+
+def test_count_pending_matches_open_queue(db: sqlite3.Connection, settings: Settings) -> None:
+    """The cheap COUNT(*) companion tracks the true open total: 0 on a fresh
+    vault, 2 after the seed (retype + merge_review), 1 once one is decided."""
+    assert count_pending_corrections(db) == 0  # fresh, no seed
+    _seed_proposals(db, settings)
+    assert count_pending_corrections(db) == 2
+    retype = next(p for p in read_pending_corrections(db) if p.kind == "retype")
+    decide_correction(db, proposal_id=retype.id, verdict="confirm")
+    assert count_pending_corrections(db) == 1
 
 
 def test_pending_prompt_for_merge_review_describes_the_auto_merge(
@@ -392,6 +404,78 @@ def test_recall_without_stats_omits_pending(ctx: object) -> None:
 
     result = handlers.recall(query="anything")
     assert result.pending_corrections == []
+
+
+def test_plain_recall_carries_count_without_list(ctx: object) -> None:
+    """The core fix: a plain query recall surfaces the TRUE open-queue total
+    (the nudge signal) while the heavy list stays gated off. The pile-up was
+    silent precisely because this integer did not exist."""
+    from afair.mcp import handlers
+
+    result = handlers.recall(query="anything")
+    assert result.pending_corrections_count == 2  # seed: retype + merge_review
+    assert result.pending_corrections == []  # list still gated behind stats/decide
+
+
+def test_single_event_lookup_carries_count(ctx: object) -> None:
+    """The count rides the single-event lookup returns too — both the hit path
+    and the miss path — so a by_id recall nudges just like a query recall."""
+    from afair.mcp import handlers
+
+    db = ctx.db  # type: ignore[attr-defined]
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "a note"}
+    )
+    hit = handlers.recall(by_id=ev.id)
+    assert len(hit.hits) == 1
+    assert hit.pending_corrections_count == 2
+    assert hit.pending_corrections == []
+
+    miss = handlers.recall(by_id="nope")
+    assert miss.hits == []
+    assert miss.pending_corrections_count == 2
+
+
+def test_recall_decide_count_reflects_remaining(ctx: object) -> None:
+    """The count is computed post-decide: a just-confirmed proposal is already
+    excluded, so the echoed count drops to the remaining total."""
+    from afair.mcp import handlers
+
+    retype = next(p for p in handlers.recall(stats=True).pending_corrections if p.kind == "retype")
+    result = handlers.recall(decide=CorrectionDecision(proposal_id=retype.id, verdict="confirm"))
+    assert result.pending_corrections_count == 1
+
+
+def test_recall_count_sums_both_queues(ctx: object) -> None:
+    """The nudge total covers BOTH queues `_pending_correction_views` merges:
+    the seed's 2 entity-audit proposals plus one Schema-Evolver ontology
+    proposal → 3, so the number never contradicts the list the client fetches
+    next."""
+    import json
+
+    from ulid import ULID
+
+    from afair.mcp import handlers
+    from afair.substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
+
+    db = ctx.db  # type: ignore[attr-defined]
+    with db:
+        db.execute(
+            """
+            INSERT INTO proposed_ontology_revisions (
+                id, action, subject_slug, detail, evidence, confidence,
+                detected_by, detected_at, status
+            ) VALUES (?, 'add', 'research_paper', ?, 'test signal', 0.8,
+                      'schema_evolver:v0', '2026-07-01T00:00:00+00:00', 'proposed')
+            """,
+            (
+                f"{ONTOLOGY_PROPOSAL_ID_PREFIX}{ULID()!s}",
+                json.dumps({"source_slug": "other", "label": "Research paper"}),
+            ),
+        )
+
+    result = handlers.recall(query="anything")
+    assert result.pending_corrections_count == 3  # 2 entity-audit + 1 ontology
 
 
 def test_recall_decide_applies_and_reports(ctx: object) -> None:

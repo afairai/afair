@@ -150,6 +150,19 @@ def read_pending_corrections(
     return out
 
 
+def count_pending_corrections(conn: sqlite3.Connection) -> int:
+    """True total of open entity-audit proposals (``status='proposed'``).
+
+    Cheap companion to :func:`read_pending_corrections`: no JOIN, no LIMIT,
+    covered by ``proposed_corrections_status_idx`` — safe to run on every
+    recall so clients can nudge the operator without a full stats call.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM proposed_corrections WHERE status = 'proposed'"
+    ).fetchone()
+    return int(row[0])
+
+
 def _apply_correction(
     conn: sqlite3.Connection,
     *,

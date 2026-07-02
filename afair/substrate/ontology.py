@@ -169,6 +169,18 @@ def read_pending_ontology_proposals(
     return out
 
 
+def count_pending_ontology_proposals(conn: sqlite3.Connection) -> int:
+    """True total of open ontology proposals (``status='proposed'``).
+
+    Same contract as :func:`~afair.substrate.corrections.count_pending_corrections`
+    — no LIMIT, covered by ``proposed_ontology_revisions_status_idx``.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM proposed_ontology_revisions WHERE status = 'proposed'"
+    ).fetchone()
+    return int(row[0])
+
+
 # ── apply (confirm) ─────────────────────────────────────────────────────────
 
 

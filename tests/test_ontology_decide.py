@@ -22,7 +22,9 @@ from ulid import ULID
 
 from afair.mcp.schemas import CorrectionDecision
 from afair.substrate import (
+    count_pending_ontology_proposals,
     decide_correction,
+    decide_ontology_proposal,
     live_kind_slugs,
     open_db,
     read_pending_ontology_proposals,
@@ -127,6 +129,22 @@ def test_read_pending_surfaces_open_proposals_most_confident_first(
     assert pending[0].subject_slug == "research_paper"
     assert "research_paper" in pending[0].prompt
     assert "place" in pending[1].prompt
+
+
+def test_count_pending_ontology_proposals(db: sqlite3.Connection) -> None:
+    """The cheap COUNT(*) companion tracks the open ontology queue: 1 after one
+    insert, 0 once decided — the half of the nudge total that rides the second
+    queue (``recall`` sums both)."""
+    assert count_pending_ontology_proposals(db) == 0
+    pid = _proposal(
+        db,
+        action="add",
+        subject_slug="research_paper",
+        detail={"source_slug": "other", "label": "Research paper"},
+    )
+    assert count_pending_ontology_proposals(db) == 1
+    decide_ontology_proposal(db, proposal_id=pid, verdict="reject")
+    assert count_pending_ontology_proposals(db) == 0
 
 
 # ── confirm: each action flips the resolved view ─────────────────────────────

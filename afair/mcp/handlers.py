@@ -59,6 +59,8 @@ from ..substrate import (
     build_blob_ref_payload,
     build_compound_payload,
     build_text_payload,
+    count_pending_corrections,
+    count_pending_ontology_proposals,
     iter_events,
     latest_edge_confidence_batch,
     latest_edge_reviews_batch,
@@ -1335,6 +1337,11 @@ def recall(
         _pending_correction_views(db) if (stats or decide is not None) else []
     )
 
+    # The cheap universal nudge: the TRUE open-queue total on every recall,
+    # so a client can prompt "you have N memories to review" without the
+    # operator ever calling stats=True. The heavy list stays gated above.
+    pending_count = count_pending_corrections(db) + count_pending_ontology_proposals(db)
+
     # ── Single-event lookup mode ───────────────────────────────────────────
     if by_id is not None or by_content_hash is not None:
         target = (
@@ -1352,6 +1359,7 @@ def recall(
                 note=_combine_notes(decide_note, note or f"no event found for {selector}"),
                 summary=summary,
                 pending_corrections=pending,
+                pending_corrections_count=pending_count,
             )
         invalidations = _attach_invalidations([target], db)
         conflicts = _attach_conflicts([target], db)
@@ -1378,6 +1386,7 @@ def recall(
             note=_combine_notes(decide_note, note),
             summary=summary,
             pending_corrections=pending,
+            pending_corrections_count=pending_count,
         )
 
     # ── Search / browse mode ───────────────────────────────────────────────
@@ -1496,6 +1505,7 @@ def recall(
         summary=summary,
         coverage=_compute_coverage(events, invalidations, conflicts, overlay),
         pending_corrections=pending,
+        pending_corrections_count=pending_count,
     )
 
 

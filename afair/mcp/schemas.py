@@ -450,6 +450,9 @@ class RecallResult(BaseModel):
     ``pending_corrections`` lists open entity-audit AND ontology proposals —
     populated on ``stats=True`` (and on any call that carried a ``decide``,
     so the client sees the remaining queue after acting).
+    ``pending_corrections_count`` is the TRUE total of open proposals
+    (entity-audit + ontology) and is populated on EVERY call — a cheap
+    nudge signal; call ``stats=True`` to fetch the list itself.
     """
 
     hits: list[RecallHit]
@@ -458,6 +461,7 @@ class RecallResult(BaseModel):
     summary: ContextSummary | None = None
     coverage: RecallCoverage | None = None
     pending_corrections: list[ProposedCorrectionView] = []
+    pending_corrections_count: int = 0
 
 
 # ── recall feedback ─────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ from .checkpoint import start_checkpoint_loop
 from .corrections import (
     CorrectionOutcome,
     PendingCorrection,
+    count_pending_corrections,
     decide_correction,
     read_pending_corrections,
 )
@@ -101,6 +102,7 @@ from .objects import (
 from .ontology import (
     OntologyDecisionOutcome,
     PendingOntologyProposal,
+    count_pending_ontology_proposals,
     decide_ontology_proposal,
     read_pending_ontology_proposals,
 )
@@ -157,6 +159,8 @@ __all__ = [
     "canonical_json",
     "content_hash",
     "count_corroborating_sources",
+    "count_pending_corrections",
+    "count_pending_ontology_proposals",
     "decide_correction",
     "decide_ontology_proposal",
     "derive_searchable_text",
