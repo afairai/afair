@@ -78,3 +78,27 @@ def test_key_sensitivity_detection() -> None:
 def test_before_send_is_idempotent_and_returns_event() -> None:
     event: dict = {"message": "boom"}
     assert _before_send(event, {}) is event
+
+
+def test_uvicorn_client_disconnect_noise_is_dropped() -> None:
+    # AFAIR-6: benign client-disconnect mid-stream, 0 users impacted.
+    event: dict = {
+        "logger": "uvicorn.error",
+        "logentry": {"message": "ASGI callable returned without completing response."},
+    }
+    assert _before_send(event, {}) is None
+
+
+def test_real_uvicorn_error_still_reports() -> None:
+    # A genuine uvicorn error (different message) must NOT be dropped.
+    event: dict = {"logger": "uvicorn.error", "message": "worker failed to boot"}
+    assert _before_send(event, {}) is event
+
+
+def test_asgi_message_from_other_logger_still_reports() -> None:
+    # The narrow logger match means the same string elsewhere is not scrubbed.
+    event: dict = {
+        "logger": "afair.mcp",
+        "message": "ASGI callable returned without completing response.",
+    }
+    assert _before_send(event, {}) is event

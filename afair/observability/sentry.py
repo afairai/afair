@@ -76,6 +76,18 @@ def _before_send(event: Any, _hint: Any) -> Any:
     request data or sets an ``extra`` containing vault text, it is masked
     here before transmission.
     """
+    # Drop the benign uvicorn client-disconnect noise: when a client closes
+    # the connection mid-stream on the Streamable-HTTP MCP endpoint, uvicorn
+    # logs "ASGI callable returned without completing response" at error level.
+    # 0 users impacted, not actionable (AFAIR-6 — 114 events of pure noise that
+    # were drowning real signal). Matched narrowly on logger + message so a
+    # genuine mid-response failure from any other source still reports.
+    if event.get("logger") == "uvicorn.error":
+        logentry = event.get("logentry") or {}
+        message = logentry.get("message") or event.get("message") or ""
+        if "ASGI callable returned without completing response" in str(message):
+            return None
+
     request = event.get("request")
     if isinstance(request, dict):
         # Headers and cookies carry the bearer + session; the body can be
