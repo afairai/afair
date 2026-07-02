@@ -134,6 +134,132 @@ async def test_observe_via_mcp_protocol(tmp_path: Path) -> None:
     assert data["ok"] is True
 
 
+def _tool_data(result: object) -> dict:
+    return result.data if hasattr(result, "data") else result.structured_content  # type: ignore[attr-defined,no-any-return]
+
+
+# ── stringified-object params (write-first intake at the live call layer) ─────
+#
+# Regression coverage for the HIGH-severity data-loss bug: FastMCP validates
+# tool args via ``TypeAdapter(fn).validate_python``. In that parameter (FieldInfo)
+# context, ``Field(discriminator="type")`` was hoisted OUTSIDE the WrapValidator,
+# so the write-first coercers never ran — a stringified ``content``/``event`` (and
+# the bare-string / wrong-tag tolerances b9ba3fc added) were rejected or garbled
+# BEFORE reaching the substrate. These tests exercise ``call_tool`` directly, the
+# exact layer a live MCP client hits (the type-level tests in test_mcp_handlers.py
+# passed while this path failed).
+
+
+@pytest.mark.asyncio
+async def test_remember_stringified_object_content_parsed(tmp_path: Path) -> None:
+    """T1: content passed as a JSON string persists the REAL text, not the blob."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    result = await server.call_tool(
+        "remember",
+        {"content": json.dumps({"type": "text", "text": "HOPE stringified content"})},
+    )
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool("recall", {"query": "HOPE", "full_payload": True, "limit": 5})
+    hits = _tool_data(recall)["hits"]
+    texts = [h["payload"].get("text") for h in hits]
+    assert "HOPE stringified content" in texts
+    # The raw JSON string must NOT have been stored as literal text.
+    assert all(not (t or "").startswith('{"type"') for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_observe_stringified_object_event_parsed(tmp_path: Path) -> None:
+    """T2: event passed as a JSON string parses into action/subject/result."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    result = await server.call_tool(
+        "observe",
+        {"event": json.dumps({"action": "edit", "subject": "x", "result": "ok"})},
+    )
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool("recall", {"by_id": data["event_id"], "full_payload": True})
+    payload = _tool_data(recall)["hits"][0]["payload"]
+    assert payload["action"] == "edit"
+    assert payload["subject"] == "x"
+    assert payload["result"] == "ok"
+    # The whole blob must NOT have been garbled into ``action``.
+    assert "action_full" not in payload
+
+
+@pytest.mark.asyncio
+async def test_remember_bare_string_content_becomes_text(tmp_path: Path) -> None:
+    """T3: a bare non-JSON string still lands as a text event (b9ba3fc tolerance)."""
+    server = build_server(_settings_for(tmp_path))
+    result = await server.call_tool("remember", {"content": "a plain non-JSON sentence"})
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool(
+        "recall", {"query": "plain non-JSON", "full_payload": True, "limit": 5}
+    )
+    hits = _tool_data(recall)["hits"]
+    assert any(h["payload"].get("text") == "a plain non-JSON sentence" for h in hits)
+
+
+@pytest.mark.asyncio
+async def test_remember_wrong_tag_dict_coerced_to_text(tmp_path: Path) -> None:
+    """T4: a dict whose ``type`` isn't a content tag coerces to text, not rejected."""
+    server = build_server(_settings_for(tmp_path))
+    result = await server.call_tool(
+        "remember",
+        {"content": {"type": "fact", "text": "wrong-tag but salvageable"}},
+    )
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool(
+        "recall", {"query": "salvageable", "full_payload": True, "limit": 5}
+    )
+    hits = _tool_data(recall)["hits"]
+    assert any(h["payload"].get("text") == "wrong-tag but salvageable" for h in hits)
+
+
+@pytest.mark.asyncio
+async def test_remember_stringified_binary_stored_as_binary(tmp_path: Path) -> None:
+    """T7: a stringified VALID binary object round-trips as a binary event.
+
+    Proves post-parse union validation (not a blind text fallback): the parsed
+    dict is a well-formed binary payload, so it must persist as ``binary``.
+    """
+    import base64
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    data_b64 = base64.b64encode(b"\x00\x01\x02binary bytes").decode()
+    result = await server.call_tool(
+        "remember",
+        {
+            "content": json.dumps(
+                {
+                    "type": "binary",
+                    "data_b64": data_b64,
+                    "mime": "application/octet-stream",
+                }
+            )
+        },
+    )
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool(
+        "recall", {"by_content_hash": data["content_hash"], "full_payload": True}
+    )
+    payload = _tool_data(recall)["hits"][0]["payload"]
+    assert payload["content_type"] == "binary"
+
+
 @pytest.mark.asyncio
 async def test_health_endpoint_returns_ok(tmp_path: Path) -> None:
     """The /health route returns 200 OK when the substrate is healthy."""

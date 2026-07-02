@@ -23,6 +23,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (
     BaseModel,
     Field,
+    TypeAdapter,
     ValidationError,
     WrapValidator,
     model_validator,
@@ -32,6 +33,23 @@ from pydantic import (
 def _canon_json(obj: Any) -> str:
     """Cheap deterministic serializer for size-bound checks (not for storage)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _parse_json_dict(v: str) -> dict[str, Any] | None:
+    """Return the decoded dict if ``v`` is a JSON-serialized object, else None.
+
+    Some MCP clients JSON-stringify object-typed tool arguments before sending
+    them (their arg serializer flattens nested objects to strings). Without this
+    the write-first coercers only ever saw the raw string and stored the whole
+    JSON blob as literal text/action. A string that parses to a non-dict
+    (``"[1,2,3]"``, ``"42"``, ``"true"``) returns None so it falls through to the
+    existing bare-string tolerance — nothing is lost either way.
+    """
+    try:
+        parsed = json.loads(v)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # 10 MB cap on `remember` content — v1 lock. Raising the cap later is
@@ -171,8 +189,18 @@ RememberContent = Annotated[
 
 _CONTENT_TAGS = {"text", "binary", "blob-ref", "compound"}
 
+# Module-level adapter for the canonical union. Validating through this instead
+# of the WrapValidator's ``handler`` gives DETERMINISTIC discriminated-union
+# validation, independent of the parameter-context schema ordering. In the
+# function-parameter (FieldInfo) context that FastMCP uses, pydantic hoists the
+# union's ``Field(discriminator="type")`` OUTSIDE the WrapValidator, so the
+# wrapped ``handler`` rebuilds the tagged union and rejects non-dicts/wrong tags
+# before coercion can run — the exact bug this restore fixes. The bare adapter
+# has no such ordering hazard.
+_REMEMBER_CONTENT_ADAPTER: TypeAdapter[RememberContent] = TypeAdapter(RememberContent)
 
-def _coerce_remember_content(v: Any, handler: Any) -> Any:
+
+def ensure_remember_content(v: Any) -> RememberContent:
     """Write-first intake: a ``remember`` is never rejected on content shape.
 
     afair's substrate is append-only and re-interpretable (I2/I3), so the intake
@@ -181,21 +209,23 @@ def _coerce_remember_content(v: Any, handler: Any) -> Any:
     the canonical union instead of raising a ValidationError that would silently
     drop the memory:
 
-    - a bare string -> a text event.
+    - an already-validated model -> returned untouched (fast path).
+    - a bare string -> a text event; but if the string is a JSON-serialized
+      object (a client that stringified the ``content`` argument), it is decoded
+      first and coerced like the equivalent dict, so the intended object is
+      persisted rather than the raw JSON text.
     - a dict whose ``type`` isn't a content tag (e.g. an agent put its
       ``type_hint`` value like 'fact' into ``content.type``) but that carries
       ``text`` -> a text event with that text.
     - anything else that still fails to validate (e.g. ``type: 'binary'`` with no
       data) -> the raw payload serialised as text, so nothing is ever lost.
-
-    A well-formed call passes straight through, so the frozen contract and the
-    advertised JSON schema are unchanged (WrapValidator keeps the wrapped
-    schema); this only widens what is accepted. `handler` runs the normal
-    discriminated-union validation.
     """
+    if isinstance(v, TextContent | BinaryContent | BlobRefContent | CompoundContent):
+        return v
     if isinstance(v, str):
-        v = {"type": "text", "text": v}
-    elif isinstance(v, dict) and v.get("type") not in _CONTENT_TAGS:
+        parsed = _parse_json_dict(v)
+        v = parsed if parsed is not None else {"type": "text", "text": v}
+    if isinstance(v, dict) and v.get("type") not in _CONTENT_TAGS:
         text = v.get("text")
         v = {
             "type": "text",
@@ -204,21 +234,46 @@ def _coerce_remember_content(v: Any, handler: Any) -> Any:
             else json.dumps(v, ensure_ascii=False, sort_keys=True),
         }
     try:
-        return handler(v)
+        return _REMEMBER_CONTENT_ADAPTER.validate_python(v)
     except ValidationError:
         raw = (
             v
             if isinstance(v, str)
             else json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
         )
-        return handler({"type": "text", "text": raw})
+        return _REMEMBER_CONTENT_ADAPTER.validate_python({"type": "text", "text": raw})
 
 
-RememberContentInput = Annotated[RememberContent, WrapValidator(_coerce_remember_content)]
-"""The `remember` tool parameter type: the canonical union, wrapped in a
-write-first coercion so malformed content is normalised (worst case: stored as
-text) instead of rejected. The generated JSON schema is still
-``RememberContent``'s, so the advertised tool contract (I1) is unchanged."""
+def _coerce_remember_content(v: Any, _handler: Any) -> RememberContent:
+    """WrapValidator entry for the ``content`` parameter.
+
+    ``_handler`` is deliberately unused: in the parameter context its wrapped
+    schema is the widened ``RememberContent | str`` union (the ``str`` member we
+    must never return), and its discriminator ordering is the landmine this fix
+    escapes. All validation goes through :func:`ensure_remember_content`, which
+    uses the bare module-level adapter instead.
+    """
+    return ensure_remember_content(v)
+
+
+RememberContentInput = Annotated[
+    RememberContent | str,
+    WrapValidator(_coerce_remember_content),
+]
+"""The `remember` tool parameter type: the canonical union OR a string, wrapped
+in a write-first coercion so malformed content is normalised (worst case: stored
+as text) instead of rejected.
+
+The ``| str`` does double duty: (a) it keeps ``RememberContent``'s
+``Field(discriminator=...)`` NESTED inside a Union arg so pydantic can no longer
+hoist the discriminator outside the WrapValidator in the function-parameter
+context (the bug that disabled the coercer at the live call layer); (b) it
+advertises the string alternative in the tool's inputSchema so clients that
+JSON-stringify the argument, or pre-validate client-side, stop refusing it.
+
+I1-additive: the advertised acceptance set is a strict SUPERSET — every payload
+valid under the prior object-only schema stays valid, and a string alternative is
+added. No parameter is renamed, removed, or narrowed."""
 
 
 class RememberResult(BaseModel):
@@ -587,15 +642,24 @@ class ObserveEvent(BaseModel):
         nothing the caller sent is lost). A live client that stuffs a whole
         JSON blob into ``action`` therefore persists rather than being dropped
         at the signature layer.
+
+        A ``str`` that is a JSON-serialized object (a client that stringified the
+        ``event`` argument) is decoded first and flows through the dict branch, so
+        its ``action`` / ``subject`` / ``result`` parse correctly instead of the
+        whole blob landing in ``action``.
         """
+        if isinstance(data, str):
+            parsed = _parse_json_dict(data)
+            if parsed is not None:
+                data = parsed  # fall through to the dict branch below
+            else:
+                return cls._truncate_long_fields({"action": data.strip() or "observed"})
         if isinstance(data, dict):
             coerced = dict(data)
             action = coerced.get("action")
             if not isinstance(action, str) or not action.strip():
                 coerced["action"] = "observed"
             return cls._truncate_long_fields(coerced)
-        if isinstance(data, str):
-            return cls._truncate_long_fields({"action": data.strip() or "observed"})
         dump = json.dumps(data, ensure_ascii=False, default=str)
         return cls._truncate_long_fields({"action": "observed", "result": dump})
 
@@ -639,6 +703,48 @@ class ObserveEvent(BaseModel):
             msg = "observe extras exceed nesting threshold (200 containers)"
             raise ValueError(msg)
         return self
+
+
+# Module-level adapter for the observe event. Everything routes through the
+# model, which triggers ``_accept_first`` (the write-first + JSON-string
+# coercion). Same deterministic-validation rationale as the remember adapter.
+_OBSERVE_EVENT_ADAPTER: TypeAdapter[ObserveEvent] = TypeAdapter(ObserveEvent)
+
+
+def ensure_observe_event(v: Any) -> ObserveEvent:
+    """Write-first intake for ``observe``: never rejected on shape.
+
+    Already-validated events pass through; everything else (dict, bare string,
+    JSON-serialized object string) runs through the model so ``_accept_first``
+    applies the action default, the JSON-string decode, and the AFAIR-H
+    truncation. Mirrors :func:`ensure_remember_content`.
+    """
+    if isinstance(v, ObserveEvent):
+        return v
+    return _OBSERVE_EVENT_ADAPTER.validate_python(v)
+
+
+def _coerce_observe_event(v: Any, _handler: Any) -> ObserveEvent:
+    """WrapValidator entry for the ``event`` parameter.
+
+    ``_handler`` is unused for the same reason as the remember coercer: the
+    parameter-context wrapped schema is the widened ``ObserveEvent | str`` union.
+    Validation goes through :func:`ensure_observe_event`.
+    """
+    return ensure_observe_event(v)
+
+
+ObserveEventInput = Annotated[
+    ObserveEvent | str,
+    WrapValidator(_coerce_observe_event),
+]
+"""The `observe` tool parameter type: the event model OR a string, wrapped in a
+write-first coercion. The ``| str`` advertises the string alternative in the
+tool's inputSchema (so a client that JSON-stringifies ``event`` is accepted) and,
+as with ``remember``, keeps the wrap validator reliably in the validation path.
+
+I1-additive: strict schema SUPERSET — the object form is unchanged, a string
+alternative is added; no parameter renamed, removed, or narrowed."""
 
 
 class ObserveResult(BaseModel):

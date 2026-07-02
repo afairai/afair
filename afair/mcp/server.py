@@ -199,6 +199,10 @@ def build_server(settings: Settings) -> FastMCP:
         invalidates: list[str] | None = None,
     ) -> schemas.RememberResult:
         enforce_write_scope()
+        # Narrow the widened ``RememberContent | str`` alias back to the concrete
+        # union for the handler (and mypy). No-op when the wrap validator already
+        # produced a model; defense-in-depth if a future FastMCP bypasses it.
+        content = schemas.ensure_remember_content(content)
         return handlers.remember(
             content=content,
             context=context,
@@ -240,8 +244,11 @@ def build_server(settings: Settings) -> FastMCP:
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")
-    def observe(event: schemas.ObserveEvent) -> schemas.ObserveResult:
+    def observe(event: schemas.ObserveEventInput) -> schemas.ObserveResult:
         enforce_write_scope()
+        # Narrow the widened ``ObserveEvent | str`` alias back to the concrete
+        # model for the handler (and mypy). No-op when already a model.
+        event = schemas.ensure_observe_event(event)
         return handlers.observe(event=event)
 
     # ── resources — auto-fetched by clients at session-init ─────────────────
