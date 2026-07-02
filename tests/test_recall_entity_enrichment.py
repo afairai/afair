@@ -134,12 +134,20 @@ def test_recall_surfaces_canonical_entities_for_each_hit(
 
 def test_recall_surfaces_entity_edges_for_relations(ctx: ServerContext, settings: Settings) -> None:
     """Edges with this event as source appear under entity_edges."""
-    # Pre-seed Sajinth so the edge below has one pre-existing endpoint
-    # (defense against fabricated edges between two same-event-born entities).
+    # Pre-seed BOTH endpoints so the edge below is genuinely strong: two
+    # exact-matched pre-existing entities (1.0 mentions) + a crisp predicate
+    # land the edge above the auto-confirm floor (ADR-0004). An edge on a
+    # brand-new endpoint (0.5 mention) is discounted to `proposed` by design,
+    # which is exactly what makes the quarantine gate discriminate.
     _seed_event_with_entities(
         ctx,
         text="Sajinth introduced himself",
         entities=[{"name": "Sajinth", "type": "person"}],
+    )
+    _seed_event_with_entities(
+        ctx,
+        text="Athara launched",
+        entities=[{"name": "Athara", "type": "organization"}],
     )
     EntityCanonicalizer().run(ctx.db, settings)
 

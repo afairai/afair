@@ -73,8 +73,11 @@ import structlog
 from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
+from ..substrate.confidence import EdgeConfidenceSignals, compute_edge_confidence
+from ..substrate.edge_confidence import write_edge_confidence_score
 from ..substrate.entities import (
     Entity,
+    count_corroborating_sources,
     find_edges_for_source_event,
     find_entity_by_name,
     read_entity_by_id,
@@ -525,6 +528,12 @@ def _canonicalize_one_event(
     # subjects/objects against entities we just canonicalized.
     resolved: dict[str, Entity] = {}
 
+    # Per-surface-form mention confidence just written (exact=1.0, alias=0.9,
+    # llm=verdict.confidence, new=PROVISIONAL). Feeds the edge-confidence
+    # weakest-endpoint signal (ADR-0004): an edge anchored on a freshly-created
+    # 0.5-confidence endpoint is strongly discounted.
+    mention_confidence: dict[str, float] = {}
+
     # Raw extractor kinds that did NOT map to a live registry kind — one
     # per surface form, written to the kind_observations ledger once the
     # surface form has resolved to an entity (ADR-0003 Phase 3).
@@ -572,6 +581,7 @@ def _canonicalize_one_event(
             if len(agreeing) == 1:
                 best = agreeing[0]
                 resolved[surface_form] = best
+                mention_confidence[surface_form] = 1.0
                 stats["matched_exact"] += 1
                 write_entity_mention(
                     conn,
@@ -612,6 +622,7 @@ def _canonicalize_one_event(
                 matched = read_entity_by_id(conn, verdict.matched_entity_id)
                 if matched is not None:
                     resolved[surface_form] = matched
+                    mention_confidence[surface_form] = verdict.confidence
                     stats["matched_llm"] += 1
                     write_entity_mention(
                         conn,
@@ -647,6 +658,7 @@ def _canonicalize_one_event(
                 if deliberate_split:
                     stats["homonym_splits"] = stats.get("homonym_splits", 0) + 1
             resolved[surface_form] = new_entity
+            mention_confidence[surface_form] = PROVISIONAL_NEW_ENTITY_CONFIDENCE
             write_entity_mention(
                 conn,
                 entity_id=new_entity.id,
@@ -670,6 +682,7 @@ def _canonicalize_one_event(
             aliased = read_entity_by_id(conn, alias_eid)
             if aliased is not None and resolve_entity_kind(conn, alias_eid) == kind:
                 resolved[surface_form] = aliased
+                mention_confidence[surface_form] = 0.9
                 stats["matched_alias"] += 1
                 write_entity_mention(
                     conn,
@@ -721,6 +734,7 @@ def _canonicalize_one_event(
                         matched = read_entity_by_id(conn, verdict2.matched_entity_id)
                         if matched is not None:
                             resolved[surface_form] = matched
+                            mention_confidence[surface_form] = verdict2.confidence
                             stats["matched_llm"] += 1
                             write_entity_mention(
                                 conn,
@@ -753,6 +767,7 @@ def _canonicalize_one_event(
             confidence=PROVISIONAL_NEW_ENTITY_CONFIDENCE,
         )
         resolved[surface_form] = new_entity
+        mention_confidence[surface_form] = PROVISIONAL_NEW_ENTITY_CONFIDENCE
         newly_created_ids.add(new_entity.id)
         stats["created"] += 1
         write_entity_mention(
@@ -796,6 +811,10 @@ def _canonicalize_one_event(
     if not isinstance(raw_relations, list):
         raw_relations = []
     grounding_text = _event_grounding_text(event, extraction) if raw_relations else ""
+    # Event-level extraction self-assessment feeds the edge-confidence prior
+    # (ADR-0004). Absent / non-numeric → None (contributes a neutral 0).
+    raw_conf = extraction.get("confidence")
+    extraction_confidence = float(raw_conf) if isinstance(raw_conf, (int, float)) else None
     for relation_dict in raw_relations:
         if not isinstance(relation_dict, dict):
             continue
@@ -846,6 +865,25 @@ def _canonicalize_one_event(
             )
             stats["edges_rejected_both_new"] = stats.get("edges_rejected_both_new", 0) + 1
             continue
+        # ADR-0004: compute a real, explainable confidence prior from the
+        # signals in hand instead of the old flat 0.8. source_conflicted is
+        # False at write time (the conflict resolver runs later); the cold-path
+        # rescorer catches contest post-write.
+        signals = EdgeConfidenceSignals(
+            extraction_confidence=extraction_confidence,
+            subject_mention_confidence=mention_confidence.get(subj),
+            object_mention_confidence=mention_confidence.get(obj),
+            predicate=pred,
+            corroborating_sources=count_corroborating_sources(
+                conn,
+                subject_id=subj_entity.id,
+                predicate=pred,
+                object_id=obj_entity.id,
+                exclude_event_id=event.id,
+            ),
+            source_conflicted=False,
+        )
+        prior, components = compute_edge_confidence(signals)
         edge = write_entity_edge(
             conn,
             subject_id=subj_entity.id,
@@ -853,10 +891,27 @@ def _canonicalize_one_event(
             object_id=obj_entity.id,
             source_event_id=event.id,
             discovered_by=CANONICALIZER_PRODUCED_BY,
-            confidence=0.8,
+            confidence=prior,
         )
         if edge is not None:
             stats["edges_created"] += 1
+            # Append the initial score row. Fail-soft: if the score write
+            # raises, the edge still stands and the stored column carries the
+            # identical number; the rescorer (S4) self-heals the missing row.
+            try:
+                write_edge_confidence_score(
+                    conn,
+                    edge_id=edge.id,
+                    confidence=prior,
+                    components=components,
+                    computed_by=CANONICALIZER_PRODUCED_BY,
+                )
+            except Exception as exc:
+                log.warning(
+                    "entity_canonicalizer.score_write_failed",
+                    edge_id=edge.id,
+                    error=str(exc),
+                )
 
     return stats, last_llm_call
 

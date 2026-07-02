@@ -36,6 +36,8 @@ from afair.settings import Settings
 from afair.substrate import (
     iter_edges_for_entity,
     iter_mentions_for_event,
+    latest_edge_confidence_batch,
+    latest_edge_scores_batch,
     open_db,
     read_edge_invalidations,
     write_event,
@@ -75,6 +77,7 @@ def _write_event_with_extraction(
     entities: list[dict[str, str]],
     relations: list[dict[str, str]] | None = None,
     summary: str | None = None,
+    confidence: float | None = None,
 ) -> str:
     """Write an event + its extractor interpretation. Returns content_hash."""
     event = write_event(
@@ -100,6 +103,8 @@ def _write_event_with_extraction(
         "entities": entities,
         "relations": grounded_relations,
     }
+    if confidence is not None:
+        extraction["confidence"] = confidence
     write_interpretation(
         conn,
         event=event,
@@ -113,6 +118,15 @@ def _write_event_with_extraction(
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch the inter-call sleep helper to a no-op for fast tests."""
     monkeypatch.setattr(ec, "_maybe_sleep", lambda _last: 0.0)
+
+
+def read_event_by_hash_for_test(conn: sqlite3.Connection, content_hash: str) -> str:
+    """Resolve a content_hash to the event id (for find_edges_for_source_event)."""
+    from afair.substrate import read_event_by_hash
+
+    ev = read_event_by_hash(conn, content_hash)
+    assert ev is not None
+    return ev.id
 
 
 # ── Stage 1: exact match ──────────────────────────────────────────────────
@@ -1002,3 +1016,180 @@ def test_relation_with_grounded_evidence_creates_edge(
     edges = db.execute("SELECT predicate FROM entity_edges").fetchall()
     assert len(edges) == 1
     assert edges[0]["predicate"] == "leads"
+
+
+# ── ADR-0004: edge-confidence write-time wiring ────────────────────────────
+
+
+def test_edge_confidence_not_hardcoded(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION (red on main, green after S3): an edge with a vague predicate
+    and one brand-new endpoint no longer gets a flat 0.8 — it gets a real,
+    lower prior. On main every edge is 0.8, so this test fails there."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
+
+    # First event establishes "Sajinth" as a pre-existing person endpoint.
+    _write_event_with_extraction(
+        db, text="Sajinth joined", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    # Second event: a vague 6-word predicate, subject pre-exists (exact 1.0),
+    # object is brand new (0.5). Both surface forms are listed as entities so
+    # the relation resolves; the edge anchors on the pre-existing Sajinth so
+    # the both-new guard does not reject it.
+    vague = "is a distant acquaintance of the"
+    text = f"Sajinth {vague} Newcomer"
+    h = _write_event_with_extraction(
+        db,
+        text=text,
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Newcomer", "type": "person"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": vague, "object": "Newcomer"}],
+    )
+
+    EntityCanonicalizer().run(db, settings)
+    ev = read_event_by_hash_for_test(db, h)
+    edges = find_edges_for_source_event(db, ev)
+    assert len(edges) == 1
+    assert edges[0].confidence != 0.8
+    assert edges[0].confidence < 0.6
+
+
+def test_edge_confidence_strong_case(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crisp predicate, both endpoints exact-matched pre-existing entities,
+    extraction confidence 0.9 → prior near the historical 0.8, plus one score
+    row whose components name every term."""
+    _no_sleep(monkeypatch)
+
+    def _boom(**_: Any) -> LLMResult:
+        msg = "no LLM call expected — both endpoints exact-match"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ec, "call_tool", _boom)
+
+    # Establish both endpoints first.
+    _write_event_with_extraction(
+        db,
+        text="Sajinth and Athara exist",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+    )
+    h = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+        confidence=0.9,
+    )
+
+    EntityCanonicalizer().run(db, settings)
+    ev = read_event_by_hash_for_test(db, h)
+    edges = find_edges_for_source_event(db, ev)
+    assert len(edges) == 1
+    edge = edges[0]
+    assert 0.78 <= edge.confidence <= 0.86
+
+    scores = latest_edge_scores_batch(db, [edge.id])
+    assert edge.id in scores
+    score = scores[edge.id]
+    assert abs(score.confidence - edge.confidence) < 1e-9
+    assert set(score.components["terms"].keys()) == {
+        "base",
+        "extract",
+        "crisp",
+        "mention",
+        "corroboration",
+        "conflict",
+    }
+
+
+def test_corroboration_counts_prior_source_events(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same triple from a second event corroborates the first: the second
+    edge scores higher and its components record corroborating_sources == 1."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
+
+    # Establish both endpoints.
+    _write_event_with_extraction(
+        db,
+        text="Sajinth and Athara exist",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+    )
+    ha = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    hb = _write_event_with_extraction(
+        db,
+        text="Again, Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+
+    EntityCanonicalizer().run(db, settings)
+    edge_a = find_edges_for_source_event(db, read_event_by_hash_for_test(db, ha))[0]
+    edge_b = find_edges_for_source_event(db, read_event_by_hash_for_test(db, hb))[0]
+    assert edge_b.confidence > edge_a.confidence
+
+    score_b = latest_edge_scores_batch(db, [edge_b.id])[edge_b.id]
+    assert score_b.components["signals"]["corroborating_sources"] == 1
+
+
+def test_score_row_failure_does_not_lose_edge(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-soft: if the score-row write raises, the edge is still created and
+    the counter still increments (the stored column carries the same number)."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(ec, "call_tool", _llm_returns(None, confidence=0.95))
+
+    def _raise(**_: Any) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ec, "write_edge_confidence_score", _raise)
+
+    _write_event_with_extraction(
+        db, text="Sajinth exists", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    h = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["edges_created"] == 1
+    ev = read_event_by_hash_for_test(db, h)
+    edges = find_edges_for_source_event(db, ev)
+    assert len(edges) == 1
+    # No score row was persisted (the write raised), but the column stands.
+    assert latest_edge_confidence_batch(db, [edges[0].id]) == {}
+    assert edges[0].confidence != 0.8

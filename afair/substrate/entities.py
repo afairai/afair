@@ -994,6 +994,54 @@ def read_edges_by_source_event_ids(
     return result
 
 
+def count_corroborating_sources(
+    conn: sqlite3.Connection,
+    *,
+    subject_id: str,
+    predicate: str,
+    object_id: str,
+    exclude_event_id: str | None = None,
+) -> int:
+    """Count OTHER live edges asserting the same canonical triple from distinct
+    source events (ADR-0004 corroboration signal).
+
+    The ``UNIQUE(subject_id, predicate, object_id, source_event_id)`` constraint
+    means an independent re-assertion of the same triple from a DIFFERENT event
+    creates a sibling row — those siblings ARE the corroboration. Endpoints are
+    compared MERGE-RESOLVED, so a triple re-asserted after a merge still counts
+    as the same fact. Only non-invalidated (live) edges count; the edge's own
+    source event is excluded via ``exclude_event_id``.
+    """
+    rows = conn.execute(
+        """
+        SELECT e.subject_id, e.object_id, e.source_event_id
+        FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        WHERE LOWER(e.predicate) = LOWER(?)
+          AND i.id IS NULL
+        """,
+        (predicate,),
+    ).fetchall()
+    if not rows:
+        return 0
+    ids_to_resolve = {subject_id, object_id}
+    for r in rows:
+        ids_to_resolve.add(r["subject_id"])
+        ids_to_resolve.add(r["object_id"])
+    resolved = resolve_canonical_batch(conn, list(ids_to_resolve))
+    target_subj = resolved.get(subject_id, subject_id)
+    target_obj = resolved.get(object_id, object_id)
+    sources: set[str] = set()
+    for r in rows:
+        if exclude_event_id is not None and r["source_event_id"] == exclude_event_id:
+            continue
+        rs = resolved.get(r["subject_id"], r["subject_id"])
+        ro = resolved.get(r["object_id"], r["object_id"])
+        if rs == target_subj and ro == target_obj:
+            sources.add(r["source_event_id"])
+    return len(sources)
+
+
 def read_entities_batch(conn: sqlite3.Connection, entity_ids: Iterable[str]) -> dict[str, Entity]:
     """Bulk-fetch entities by ID. Used by recall to materialize the
     canonical_entities surface on many hits in one query.
