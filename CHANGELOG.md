@@ -10,6 +10,13 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.10](https://github.com/afairai/afair/compare/v0.1.9...v0.1.10) (2026-07-02)
+
+
+### Features
+
+* **observability:** surface silent pipeline failures via /health ([3f0cb46](https://github.com/afairai/afair/commit/3f0cb46628b354fd71e939c757f080ec4ce2d989))
+
 ## [0.1.9](https://github.com/afairai/afair/compare/v0.1.8...v0.1.9) (2026-07-02)
 
 
