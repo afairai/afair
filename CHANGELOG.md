@@ -10,6 +10,27 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.5](https://github.com/afairai/afair/compare/v0.1.4...v0.1.5) (2026-07-02)
+
+
+### Features
+
+* **agents:** ADR-0003 phase 3 — free-text entity kinds with an observations ledger ([8e58ed1](https://github.com/afairai/afair/commit/8e58ed1756ff9350f3cbfa14fbf7d723847064fb))
+* **agents:** ADR-0003 phase 4 — Schema-Evolver in propose-only mode ([1336683](https://github.com/afairai/afair/commit/13366839873fbca0c84cc1b58e7e9cb859fc4f12))
+* **mcp:** ADR-0003 phase 5 — operator-confirmed ontology revisions close the emergent-ontology loop ([b718ab1](https://github.com/afairai/afair/commit/b718ab16878e208c80d2c702bcfb0d90bf002e5c))
+* **substrate:** ADR-0003 phase 1 — kind registry (kinds become data, behavior preserved) ([3f7dd8b](https://github.com/afairai/afair/commit/3f7dd8bdbfa17f5c3c1b115c5cd56ce3e81b9cd6))
+* **substrate:** ADR-0003 phase 2 — decouple entity kind from identity (mutable kinds, v2 ids, homonym guard) ([1434896](https://github.com/afairai/afair/commit/14348961e784a3bc8c0d82f25ec01fc6ccbe2f46))
+
+
+### Bug Fixes
+
+* **export:** include correction + ontology tables so export/import is faithful (I4) ([29234ed](https://github.com/afairai/afair/commit/29234ed267c5665779a40a8d905f0a62632ad161))
+
+
+### Documentation
+
+* **adr:** ADR-0003 emergent ontology (revisable entity kinds + Schema-Evolver) ([02c1ade](https://github.com/afairai/afair/commit/02c1ade82848552daa7af2b298e03888106c42b2))
+
 ## [0.1.4](https://github.com/afairai/afair/compare/v0.1.3...v0.1.4) (2026-07-01)
 
 
