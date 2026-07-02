@@ -51,6 +51,38 @@ def test_historical_verdicts_normalize_onto_current_names() -> None:
 
 
 @pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        # Canonical names observed in live vaults pass through unchanged.
+        ("conflicts", "conflicts"),
+        ("name_clash", "name_clash"),
+        ("confirms", "confirms"),
+        ("evolves", "evolves"),
+        ("updates", "updates"),
+        ("unrelated", "unrelated"),
+        ("reverts", "reverts"),
+        ("unsure", "unsure"),
+        # Historical spellings observed in live vaults (rows written before
+        # the v2:2026-06-13 rename) resolve via the alias map.
+        ("contradicts", "conflicts"),
+        ("compatible", "unrelated"),
+        ("corroboration", "confirms"),
+        ("temporal_evolution", "evolves"),
+        ("no_relation", "unrelated"),
+    ],
+)
+def test_every_vault_observed_label_normalizes(stored: str, expected: str) -> None:
+    """Pin every verdict spelling seen in real vault data to the taxonomy.
+
+    A 2026-07 vault checkup found exactly these 13 distinct labels across
+    2,015 conflict-resolver runs. Historical rows stay as written (I2/I3);
+    readers depend on this mapping, so dropping an alias would silently
+    degrade old rows to 'unsure'.
+    """
+    assert normalize_verdict(stored) == expected
+
+
+@pytest.mark.parametrize(
     ("verdict", "expected"),
     [
         ("conflicts", True),
