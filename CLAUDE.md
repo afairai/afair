@@ -8,7 +8,8 @@
 **Status:** In daily real-world use. The substrate, the frozen 3-verb MCP
 surface, the cold-path agents (including the relevance-decay/temporal worker),
 the entity graph, the recall honesty layer, and the recursive self-improvement
-loop are all live. Current focus: the open-source launch.
+loop are all live. The repo is public (open-core, AGPLv3); current focus is
+distribution.
 **Audience:** solo build; future contributors
 
 ### 0.1 What's live
@@ -39,42 +40,51 @@ All of this is in daily real-world use.
   (`deploy-afair-fleet.yml`, pinned ref); a `vX.Y.Z` tag here triggers it. The
   operator runbook lives in afair-web; self-host docs are `docs/self-hosting.md`.
 
-### 0.2 In flight / recent
+### 0.2 Recently shipped + current focus
 
-- **ADR-0004 edge-confidence model (branch, all 8 slices green).** The flat 0.8
-  edge confidence is replaced by a transparent log-odds model: a write-time
-  prior in the `entity_edges.confidence` column plus an append-only
+Since the open-source launch the vault has hardened considerably (v0.1.4 →
+v0.1.8, all live on the fleet):
+
+- **Edge-confidence model (ADR-0004, `Accepted`).** The flat 0.8 edge
+  confidence is replaced by a transparent log-odds model: a write-time prior in
+  the `entity_edges.confidence` column plus an append-only
   `edge_confidence_scores` overlay (latest-wins, column fallback). A cold-path
-  `edge_scorer` backfills the legacy rows (never mutated, I2/I3) and re-scores on
-  new corroboration / a contested source. Consumers wired: a discriminating
+  `edge_scorer` backfills legacy rows (never mutated, I2/I3) and re-scores on new
+  corroboration / a contested source. Consumers wired: a discriminating
   auto-confirm floor, per-edge served `confidence` + a low-confidence caveat in
   recall (served WITH a caveat, not suppressed — operator-decided fork), the
-  `edge_review` proposal queue (giving `record_edge_review` its first production
-  caller), the article-synth filter, and three bounded tuner tunables with
-  `calibration_report` as the promote evidence (`promote_enabled` still False).
-  Not yet merged / not applied to any live vault.
-- **ADR-0003 Phase 2 made effective on the live vault.** The kind-decoupling
-  (v2 identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
-  (ADR-0003 now `Accepted`) closes the remaining gaps: a read-only checkup
-  (`scripts/checkup_entities.py`), the canonicalizer defers on LLM-budget
-  exhaustion instead of minting cross-kind duplicates, the deduplicator unifies
-  kinds via assignment at high confidence (no review flood) and skips recorded
-  homonym splits, and a supervised drain tool (`scripts/drain_entity_dedup.py`)
-  works the v1 backlog down. Drain runs against the live vault are a later
-  supervised operator step (self-host runbook: `docs/self-hosting.md`).
-- **Going public (open-core).** Repos live in the `afairai` org; the deploy is
-  split (the fleet ships from the private afair-web repo); OSS community-health
-  files are in place; operator/fleet tooling lives only in afair-web. The git
-  history was scrubbed of that tooling (provision/retire, fly configs, deploy
-  workflows). No secrets were ever in history, and the business-confidential
-  docs were never committed (they have always been gitignored). `main`, the
-  tags, and the release-please branch are clean on GitHub; the stale `dev`
-  branch was deleted. Final pre-flip pass: internal and personal material
-  moved to afair-web (the `analysis/` notes, the operator vault host), with a
-  second history scrub for it. Then the visibility flip,
-  `gh repo edit afairai/afair --visibility public`.
+  `edge_review` proposal queue (`record_edge_review`'s first production caller),
+  the article-synth filter, and three bounded tuner tunables with
+  `calibration_report` as promote evidence (`promote_enabled` still False).
+  Shipped v0.1.7.
+- **ADR-0003 Phase 2 made effective (`Accepted`).** Kind-decoupling (v2
+  identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
+  closed the gaps: a read-only checkup (`scripts/checkup_entities.py`), the
+  canonicalizer defers on LLM-budget exhaustion instead of minting cross-kind
+  duplicates, the deduplicator unifies kinds via assignment at high confidence
+  (no review flood) and skips recorded homonym splits, and a supervised drain
+  tool (`scripts/drain_entity_dedup.py`; runbook in `docs/self-hosting.md`). The
+  operator vault's v1 cross-kind backlog was drained 191 → 98 (residue = genuine
+  homonyms the LLM correctly keeps separate).
+- **Reliability + review-loop fixes.** The dedup operator-override fix (the
+  "Graphiti" re-merge cycle — `agent_derived` never overrides an operator
+  decision, ADR-0002 entrenchment); a bounded cold-path retry for transient
+  `llm_timeout` extraction failures; and the **pending-review-count nudge** —
+  every recall now carries `pending_corrections_count`, so a client proactively
+  surfaces the review queue (the fix for the silent-accumulation problem where
+  proposals only surfaced on `stats=True`/`decide`).
+- **Public (open-core, AGPLv3).** The repo is public in the `afairai` org; the
+  deploy is split (the fleet ships from the private afair-web repo); OSS
+  community-health files are in place; fleet/operator tooling lives only in
+  afair-web and was scrubbed from this repo's history. No secrets were ever in
+  history; business-confidential docs were never committed (always gitignored).
 - **scripts/ hygiene.** Only self-hoster and contributor scripts remain; fleet
   tooling moved to afair-web; `bench.py` defaults to the local server.
+
+**Current focus: distribution.** Get afair in front of MCP users — the
+awesome-mcp-servers PR (#8895, blocked on a Glama listing), mcp.so, console.dev
+/ selfh.st / Changelog, the X launch article (`afair-web/marketing/`), and a
+hand-written Show HN (HN requires 100% human-written text — no AI drafting).
 
 ### 0.3 Blocked
 
