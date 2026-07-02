@@ -11,7 +11,7 @@ constitutional review.
 
 from __future__ import annotations
 
-from . import pipeline_events
+from . import observability, pipeline_events
 from .checkpoint import start_checkpoint_loop
 from .corrections import (
     CorrectionOutcome,
@@ -187,6 +187,7 @@ __all__ = [
     "object_path",
     "object_plaintext_size",
     "object_size",
+    "observability",
     "open_db",
     "pipeline_events",
     "read_edge_invalidations",

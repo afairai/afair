@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from ulid import ULID
@@ -105,6 +105,62 @@ def record(
             stage=stage,
             error=str(e),
         )
+
+
+def timeline(conn: sqlite3.Connection, event_id: str) -> list[dict[str, Any]]:
+    """Ordered lifecycle for one event — the "where did event X get stuck?"
+    answer without grepping logs.
+
+    Returns one dict per stage (oldest first) with ``stage``, ``status``,
+    ``recorded_at``, ``producer``, ``detail``, and a derived
+    ``seconds_since_previous`` (``None`` for the first row, else the gap
+    from the prior stage — a cheap duration read without a stored column,
+    keeping the substrate untouched per I3).
+
+    Covered by ``pipeline_events_event_id_idx (event_id, recorded_at)``.
+    """
+    rows = conn.execute(
+        """
+        SELECT stage, status, recorded_at, producer, detail
+        FROM pipeline_events
+        WHERE event_id = ?
+        ORDER BY recorded_at ASC, id ASC
+        """,
+        (event_id,),
+    ).fetchall()
+
+    out: list[dict[str, Any]] = []
+    prev: datetime | None = None
+    for row in rows:
+        recorded_at = row["recorded_at"]
+        seconds_since_previous: float | None = None
+        current = _parse_iso(recorded_at)
+        if prev is not None and current is not None:
+            seconds_since_previous = (current - prev).total_seconds()
+        if current is not None:
+            prev = current
+        out.append(
+            {
+                "stage": row["stage"],
+                "status": row["status"],
+                "recorded_at": recorded_at,
+                "producer": row["producer"],
+                "detail": row["detail"],
+                "seconds_since_previous": seconds_since_previous,
+            }
+        )
+    return out
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """Best-effort ISO-8601 parse; ``None`` on anything unparseable so a
+    single malformed timestamp can't break a whole timeline read."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def record_safe(

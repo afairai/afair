@@ -14,6 +14,7 @@ additions are new tools, never signature changes to these three.
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -35,6 +36,7 @@ from ..agents.entity_articles import EntityArticleWorker
 from ..agents.entity_audit import EntityAuditWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
+from ..agents.expectation_checker import ExpectationChecker
 from ..agents.extraction_retry import ExtractionRetryWorker
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
@@ -43,7 +45,7 @@ from ..agents.salience import SalienceWorker
 from ..agents.schema_evolver import SchemaEvolver
 from ..agents.temporal import TemporalWorker
 from ..agents.tuner import Tuner
-from ..substrate import start_checkpoint_loop
+from ..substrate import observability, start_checkpoint_loop
 from ..substrate.db import set_vault_key
 from . import descriptions, handlers, landing, resources, schemas
 from .auth import BearerTokenMiddleware, enforce_write_scope
@@ -119,8 +121,11 @@ def build_server(settings: Settings) -> FastMCP:
     # Phase 3 sleep swarm. Daemon thread runs Pruner + Conflict-Resolver
     # + Consolidator on their own intervals. Each worker is independently
     # tested + bounded so a single bad cycle can't crash the scheduler.
+    # Retained so /health can read per-worker liveness via scheduler.status().
+    # None when the cold path is disabled (self-hosters may run read-only).
+    scheduler: ColdPathScheduler | None = None
     if settings.cold_path_enabled:
-        ColdPathScheduler(
+        scheduler = ColdPathScheduler(
             vault_dir=settings.vault_dir,
             embedding_dim=settings.embedding_dim,
             settings=settings,
@@ -132,6 +137,11 @@ def build_server(settings: Settings) -> FastMCP:
                 # llm_rate_limit). Closes the silent-permanent-gap failure
                 # mode where a timed-out extraction was never re-attempted.
                 ExtractionRetryWorker(),
+                # Phase 0.5 observability — detection-only. Counts silent
+                # pipeline failures (event.written with no terminal
+                # extraction stage, retry-exhausted, permanent failures)
+                # into an append-only snapshot that /health surfaces.
+                ExpectationChecker(),
                 EntityAuditWorker(),
                 ConflictResolver(),
                 Consolidator(),
@@ -164,7 +174,8 @@ def build_server(settings: Settings) -> FastMCP:
                 Tuner(promote_enabled=False),
                 RollbackMonitor(),
             ],
-        ).start()
+        )
+        scheduler.start()
 
     # Background WAL-checkpoint loop — folds back the WAL file every 5
     # minutes so it doesn't grow unbounded on long-running servers.
@@ -284,9 +295,69 @@ def build_server(settings: Settings) -> FastMCP:
                 {"status": "degraded"},
                 status_code=503,
             )
-        return JSONResponse({"status": "ok"})
+
+        # ── enrichment (Phase 0.5) — strictly additive on the OK branch ──
+        # A backlog is a provider/workload condition, not an unhealthy
+        # machine, so we stay 200 (a 503 would make Fly restart and kill
+        # the cold-path scheduler mid-drain). The whole block is
+        # try/except-isolated: observability must NEVER turn a healthy
+        # vault into a 503. Body carries counts/ages/booleans/version
+        # only — no payloads, names, error strings, or paths.
+        from .. import __version__
+
+        body: dict[str, Any] = {
+            "status": "ok",
+            "version": __version__,
+            "checks": {"db": True},
+            "pipeline": None,
+            "workers": None,
+        }
+        try:
+            snapshot = observability.read_latest_snapshot(db)
+            if snapshot is not None:
+                body["pipeline"] = _health_pipeline_block(snapshot)
+            if scheduler is not None:
+                body["workers"] = {
+                    name: {"seconds_since_last_success": st["seconds_since_last_success"]}
+                    for name, st in scheduler.status().items()
+                }
+        except Exception as e:
+            # Same path-hygiene rule as the degraded branch: log the class
+            # only, never str(e) (it can carry the vault path).
+            log.warning("health.enrich_failed", exc_type=type(e).__name__)
+            body["pipeline"] = None
+            body["workers"] = None
+        return JSONResponse(body)
 
     return mcp
+
+
+def _health_pipeline_block(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Build the /health ``pipeline`` block from the latest snapshot.
+
+    Counts/ages/booleans only — ``write_snapshot`` guarantees integer
+    counters, so nothing content-shaped can reach the response here.
+    ``pipeline_ok`` is a convenience boolean; ``None`` only if the stored
+    snapshot somehow lacks the violation count (defensive).
+    """
+    counters = snapshot["counters"]
+    age_seconds: int | None
+    try:
+        recorded = datetime.fromisoformat(snapshot["recorded_at"])
+        age_seconds = int((datetime.now(UTC) - recorded).total_seconds())
+    except (ValueError, TypeError):
+        age_seconds = None
+    violations = counters.get("expectation_violations")
+    return {
+        "snapshot_age_seconds": age_seconds,
+        "pipeline_ok": (violations == 0) if violations is not None else None,
+        "expectation_violations": violations,
+        "stuck_extractions": counters.get("stuck_extractions"),
+        "pending_extraction_backlog": counters.get("pending_extraction_backlog"),
+        "retry_exhausted": counters.get("retry_exhausted"),
+        "permanent_failures": counters.get("permanent_failures"),
+        "oldest_stuck_age_seconds": counters.get("oldest_stuck_age_seconds"),
+    }
 
 
 def build_app(settings: Settings) -> Starlette:

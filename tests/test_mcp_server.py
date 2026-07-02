@@ -331,3 +331,187 @@ async def test_health_endpoint_returns_ok(tmp_path: Path) -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+# ── Phase 0.5 observability enrichment ───────────────────────────────────────
+
+
+def _health(tmp_path: Path) -> dict:
+    """Build the server and GET /health, returning the parsed body."""
+    from starlette.testclient import TestClient
+
+    server = build_server(_settings_for(tmp_path))
+    app = server.http_app()
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    return response.json()  # type: ignore[no-any-return]
+
+
+@pytest.mark.asyncio
+async def test_health_includes_version_and_pipeline_block(tmp_path: Path) -> None:
+    """A seeded snapshot surfaces in /health with the app version and the
+    counts it stored (counts only — no content)."""
+    import afair
+    from afair.substrate import observability, open_db
+
+    conn = open_db(tmp_path)
+    try:
+        observability.write_snapshot(
+            conn,
+            producer="expectation_checker",
+            counters={
+                "stuck_extractions": 1,
+                "pending_extraction_backlog": 2,
+                "retry_exhausted": 2,
+                "permanent_failures": 4,
+                "expectation_violations": 3,
+                "oldest_stuck_age_seconds": 5400,
+                "lookback_days": 7,
+            },
+        )
+    finally:
+        conn.close()
+
+    body = _health(tmp_path)
+    assert body["status"] == "ok"
+    assert body["version"] == afair.__version__
+    assert body["checks"] == {"db": True}
+    pipeline = body["pipeline"]
+    assert pipeline["stuck_extractions"] == 1
+    assert pipeline["pending_extraction_backlog"] == 2
+    assert pipeline["retry_exhausted"] == 2
+    assert pipeline["permanent_failures"] == 4
+    assert pipeline["expectation_violations"] == 3
+    assert pipeline["pipeline_ok"] is False
+    assert pipeline["oldest_stuck_age_seconds"] == 5400
+    assert isinstance(pipeline["snapshot_age_seconds"], int)
+
+
+@pytest.mark.asyncio
+async def test_health_end_to_end_surfaces_silent_failure(tmp_path: Path) -> None:
+    """THE proof: a backdated event.written with no terminal extraction
+    stage → the checker flags it → /health surfaces stuck_extractions >= 1
+    and pipeline_ok False, while status stays "ok" / 200 (a backlog is not
+    an unhealthy machine — decision §2C)."""
+    from datetime import UTC, datetime, timedelta
+
+    from ulid import ULID
+
+    from afair.agents.expectation_checker import ExpectationChecker
+    from afair.settings import Settings
+    from afair.substrate import open_db
+    from afair.substrate import pipeline_events as pe
+
+    conn = open_db(tmp_path)
+    try:
+        written_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_events
+                    (id, event_id, event_hash, stage, status, recorded_at, producer, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(ULID()),
+                    "01SILENT",
+                    None,
+                    pe.STAGE_EVENT_WRITTEN,
+                    "ok",
+                    written_at,
+                    None,
+                    None,
+                ),
+            )
+        settings = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            environment="local",
+            vault_dir=tmp_path,
+        )
+        stats = ExpectationChecker().run(conn, settings)
+        assert stats["stuck_extractions"] == 1
+    finally:
+        conn.close()
+
+    body = _health(tmp_path)
+    assert body["status"] == "ok"  # still 200 — silent failure is visible, not fatal
+    assert body["pipeline"]["stuck_extractions"] >= 1
+    assert body["pipeline"]["pipeline_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_health_no_snapshot_yet(tmp_path: Path) -> None:
+    """Before the checker's first cycle (or with cold path disabled), the
+    pipeline block is null — a valid 200 body for self-hosters."""
+    body = _health(tmp_path)
+    assert body["status"] == "ok"
+    assert body["pipeline"] is None
+    assert body["workers"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_body_contains_no_paths_or_content(tmp_path: Path) -> None:
+    """Regression for the security rule: the serialized /health body must
+    never contain the vault path or any seeded event content."""
+    import json
+
+    from ulid import ULID
+
+    from afair.substrate import observability, open_db
+    from afair.substrate import pipeline_events as pe
+
+    secret_text = "SENSITIVE-PAYLOAD-DO-NOT-LEAK"
+    conn = open_db(tmp_path)
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_events
+                    (id, event_id, event_hash, stage, status, recorded_at, producer, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(ULID()),
+                    "01LEAK",
+                    None,
+                    pe.STAGE_EVENT_WRITTEN,
+                    "ok",
+                    "2020-01-01T00:00:00+00:00",
+                    secret_text,
+                    secret_text,
+                ),
+            )
+        observability.write_snapshot(
+            conn, producer="expectation_checker", counters={"expectation_violations": 0}
+        )
+    finally:
+        conn.close()
+
+    body = _health(tmp_path)
+    serialized = json.dumps(body)
+    assert secret_text not in serialized
+    assert str(tmp_path) not in serialized
+
+
+@pytest.mark.asyncio
+async def test_health_degraded_body_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the DB read fails, /health returns exactly {"status":
+    "degraded"} with 503 and NO enrichment fields — the fleet's
+    orchestrator keys off this byte-for-byte."""
+    from starlette.testclient import TestClient
+
+    server = build_server(_settings_for(tmp_path))
+
+    def _boom() -> object:
+        raise RuntimeError("unable to open /data/vault/substrate.db")
+
+    monkeypatch.setattr("afair.mcp.server.connect_for_thread", _boom)
+
+    app = server.http_app()
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json() == {"status": "degraded"}

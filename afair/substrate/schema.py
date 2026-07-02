@@ -519,6 +519,36 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
     END
     """,
+    # ── observability_snapshots: expectation-checker counters (Phase 0.5) ──
+    # One row per checker cycle. ``counters`` is a JSON object of
+    # INTEGER-ONLY values (enforced by the writer in observability.py —
+    # never content, names, or paths). /health reads only the latest row
+    # (single indexed LIMIT 1) so per-probe aggregate scans stay off the
+    # hot path. Append-only like everything else; growth is ~35k rows/year.
+    """
+    CREATE TABLE IF NOT EXISTS observability_snapshots (
+        id           TEXT PRIMARY KEY,
+        recorded_at  TEXT NOT NULL,
+        producer     TEXT NOT NULL,
+        counters     TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS observability_snapshots_recorded_at_idx "
+    "ON observability_snapshots(recorded_at DESC)",
+    """
+    CREATE TRIGGER IF NOT EXISTS observability_snapshots_no_update
+    BEFORE UPDATE ON observability_snapshots
+    BEGIN
+        SELECT RAISE(ABORT, 'observability_snapshots is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS observability_snapshots_no_delete
+    BEFORE DELETE ON observability_snapshots
+    BEGIN
+        SELECT RAISE(ABORT, 'observability_snapshots is append-only (Invariant I2)');
+    END
+    """,
     # ── tuner_state ────────────────────────────────────────────────────
     # Append-only log of every self-modification the tuner makes
     # (and observations / hypotheses it considers).

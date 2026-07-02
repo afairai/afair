@@ -57,6 +57,19 @@ v0.1.8, all live on the fleet):
   the article-synth filter, and three bounded tuner tunables with
   `calibration_report` as promote evidence (`promote_enabled` still False).
   Shipped v0.1.7.
+- **Observability Phase 0.5.** The `expectation_checker` cold-path worker
+  makes silent pipeline failures visible: every 15 min it counts stuck
+  extractions (an `event.written` with no terminal extraction stage past a
+  30-min grace), retry-exhausted, and permanent failures from the unchanged
+  `pipeline_events` / `interpretations` substrate, and appends one
+  integer-only row to a new append-only `observability_snapshots` table
+  (I2 triggers). `/health` now surfaces `version` + a counts/ages/booleans
+  `pipeline` block (single indexed `LIMIT 1` read of the latest snapshot) +
+  per-worker `seconds_since_last_success` — 200 on a backlog, 503 only when
+  the DB is down (enrichment is fully try/except-isolated). Detection only:
+  no mutation, no 503-on-backlog, no content/paths in the body or WARN logs.
+  A `pipeline_events.timeline()` read helper answers "where did event X get
+  stuck". No MCP surface change (I1).
 - **ADR-0003 Phase 2 made effective (`Accepted`).** Kind-decoupling (v2
   identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
   closed the gaps: a read-only checkup (`scripts/checkup_entities.py`), the
@@ -94,8 +107,6 @@ hand-written Show HN (HN requires 100% human-written text — no AI drafting).
 
 - **Vault Dashboard**: read-only insight surface on the control plane
   (entity-graph hero, surprise heatmap). After the daily-use window.
-- **Observability (Phase 0.5)**: pipeline_events lifecycle tracing +
-  expectation checker + enriched `/health`.
 - **Early-access signup professionalization**: at ≥50–100 signups: dedicated
   store, double opt-in, admin broadcast.
 - **Funding stance**: bootstrap-default / VC-conditional (private note).
