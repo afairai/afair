@@ -386,6 +386,76 @@ new key and re-import through the MCP export surface. The current design encrypt
 the whole database file; finer-grained designs (per-event encryption, bring-your-
 own-key, TEE) are future work.
 
+## Entity-graph maintenance
+
+The entity graph (canonical entities, their kinds, and the same-name clusters
+the deduplicator collapses) is built and maintained entirely by the cold-path
+workers during normal use — you never have to touch it. Two operator tools help
+when you want to *inspect* the graph or *drain a backlog* of same-name splits
+faster than the every-6-hour scheduled deduplicator would (ADR-0003 Phase 2).
+Both accept `--vault-dir` and read `VAULT_DIR` / `AFAIR_VAULT_KEY` from the same
+`.env` the server uses.
+
+### Check the graph (read-only)
+
+`scripts/checkup_entities.py` opens the vault strictly read-only and reports the
+identity-scheme census, the same-name cluster backlog (same-kind vs cross-kind),
+the formation and drain rates, and the `other`-wildcard link metric.
+
+1. Run the checkup: `uv run python scripts/checkup_entities.py`.
+   Expected: a five-section summary. `--json` emits the raw report.
+2. Read section 1: a healthy, actively-used vault mints v2 (name-first) entity
+   ids — `entities: N v2 / M total` with `N > 0`. Zero v2 ids on a busy vault is
+   the "something is wrong with the deploy" signal.
+3. Read section 2 to see the same-name cluster backlog. Cross-kind clusters are
+   the drain candidates below. Note the total as your before/after baseline.
+
+Nothing is written; safe to run against a live vault at any time.
+
+### Drain the same-name backlog (supervised, writes merges)
+
+`scripts/drain_entity_dedup.py` loops the deduplicator at a raised per-cycle cap
+to work the backlog down in supervised batches. It reuses the worker's judged
+merge path, so it inherits every guard (it never blind-merges; it defers any
+cluster you have ever touched).
+
+1. **Dry run first** — see exactly what is on the table, no LLM calls, no writes:
+   `uv run python scripts/drain_entity_dedup.py --dry-run`.
+   Expected: a per-cluster listing (members, kinds, mention counts) ending in
+   `dry-run: no LLM calls, no writes.`
+2. **Drain one batch** (default 25 clusters):
+   `uv run python scripts/drain_entity_dedup.py --max-clusters 25 --sleep 2`.
+   Expected: per-cycle progress lines, then a summary. Cost: at most ~1 Haiku
+   judge call per examined cluster.
+3. **Re-check** with the checkup (above). Expected: the cluster count in
+   section 2 falls; `pending_corrections` stays small (unified clusters file no
+   review). Spot-check a few merges via `recall` before the next batch.
+4. Repeat step 2 until section 2's cluster count stops falling.
+
+### Revert a bad merge or a wrong kind
+
+Every change is append-only and reversible (I7). Two cases:
+
+- **Two entities were merged that should NOT have been** (genuinely different
+  things): invalidate the merge. In a Python shell against the vault:
+
+  ```python
+  from afair.substrate import open_db
+  from afair.substrate.entities import find_live_merge_from, write_merge_invalidation
+  db = open_db(VAULT_DIR)
+  merge_id = find_live_merge_from(db, "<from_entity_id>")
+  write_merge_invalidation(db, merge_id=merge_id, invalidated_by="operator",
+                           reason="not the same thing")
+  ```
+
+  After this the deduplicator's operator-governed guard permanently protects
+  that cluster from re-merging.
+- **The merge was right but the picked kind is wrong**: the entity-audit worker
+  files a `merge_review` proposal for cross-kind merges. Answer it through your
+  MCP client's decide surface (`recall(decide=...)`) with a `reject` and the
+  correct `to_kind` — that writes one kind-assignment row (latest-row-wins), no
+  merge surgery.
+
 ## Upgrading
 
 Pull, re-sync, redeploy. The substrate is append-only and forward-compatible by

@@ -1,6 +1,6 @@
 # ADR-0003: Emergent ontology (revisable entity kinds + Schema-Evolver)
 
-> **Status:** Proposed
+> **Status:** Accepted (2026-07-02)
 > **Date:** 2026-07-01
 > **Audience:** anyone touching the entity graph, the cold-path agents, or recall
 > **Relates to:** [ADR-0001](ADR-0001-constitutional-invariants.md) (invariants), [ADR-0002](ADR-0002-belief-revision-derived-layer.md) (quarantine + operator-confirm precedent), VISION.md §4 (I2/I3/I6/I7), §5.5 (emergent ontology), §6.5 (Schema-Evolver)
@@ -572,3 +572,51 @@ double-decide reports `already_decided`; restore reverses a merge; every
 applied revision has its anchor `observe` event.
 Rollback: revert the apply path; already-applied revisions stay historical
 and remain reversible through `restore` rows, per I7.
+
+## As built (2026-07-02)
+
+All five phases shipped and released. The commit chain on `main`:
+
+- `3f7dd8b` Phase 1 (kind registry) — released in **v0.1.5**
+- `1434896` Phase 2 (decouple kind from identity: v2 IDs, mutable kinds,
+  homonym guard) — **v0.1.5**
+- `8e58ed1` Phase 3 (free-text kinds + `kind_observations` ledger) — **v0.1.5**
+- `1336683` Phase 4 (Schema-Evolver, propose-only) — **v0.1.5**
+- `b718ab1` Phase 5 (operator-confirmed ontology revisions) — **v0.1.5**
+- `accb38d` dedup defers to operator-decided merges (the Graphiti re-merge
+  cycle fix) — **v0.1.6**
+
+### Phase 2 completion (making decoupling effective on the live vault)
+
+Post-ship, a live-vault checkup found the v1-era backlog (same-name clusters,
+all cross-kind because the v1 hash made same-name-same-kind impossible) still
+present, and identified a residual formation path. Six slices closed the gaps
+(the ADR's own re-examination discipline). All are behavior-preserving except
+where noted, and each is `git revert`-able (no slice rewrites substrate rows):
+
+- **Slice 1** — `scripts/checkup_entities.py`: a strictly read-only diagnostic
+  (identity-scheme census, same-name cluster census, formation/drain rates,
+  and the `_kinds_agree` `other`-wildcard metric). Measure before treating.
+- **Slice 2** — canonicalizer defers events when the per-cycle LLM budget is
+  exhausted instead of draining them exact-only. Exact-only drain was the
+  residual formation path: a kind flip on an existing name with no LLM minted
+  a new same-name cross-kind v2 duplicate. Deferred events keep zero mentions
+  and re-surface next cycle. New stat `events_deferred_no_budget`.
+- **Slice 3** — the deduplicator writes `assign_entity_kind` rows unifying a
+  confidently same-entity cluster's kind (>= `KIND_UNIFY_CONFIDENCE` = 0.9,
+  candidate-set bound to the shown members' kinds, I6). A unified cluster
+  shows equal kinds on both sides of the merge, so `entity_audit` files no
+  `merge_review` — kind disagreements become kind revisions, not review debt.
+- **Slice 4** — the deduplicator skips a recorded deliberate homonym split
+  (>= 2 v2 disambiguators for a name, all members v2 split identities); a
+  cluster with a v1 leftover is still judged.
+- **Slice 5** — `scripts/drain_entity_dedup.py`: a supervised operator tool
+  that loops `EntityDeduplicator.run()` at a raised per-cycle cap to work the
+  backlog down in batches (`--dry-run`, `--max-clusters`, `--sleep`); writes
+  an `observe` audit anchor (I7). Reuses `run()`, so it inherits every guard.
+- **Slice 6** — this note; `docs/self-hosting.md` entity-graph runbook.
+
+Consequence for the deduplicator: for v2 entities its cross-kind workload
+dries up structurally (a genuine same-thing kind-mislabel now links to the
+existing entity at canonicalization time rather than forking identity); what
+remains is the v1 backlog and genuine spelling variants, as intended.

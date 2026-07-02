@@ -41,6 +41,15 @@ All of this is in daily real-world use.
 
 ### 0.2 In flight / recent
 
+- **ADR-0003 Phase 2 made effective on the live vault.** The kind-decoupling
+  (v2 identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
+  (ADR-0003 now `Accepted`) closes the remaining gaps: a read-only checkup
+  (`scripts/checkup_entities.py`), the canonicalizer defers on LLM-budget
+  exhaustion instead of minting cross-kind duplicates, the deduplicator unifies
+  kinds via assignment at high confidence (no review flood) and skips recorded
+  homonym splits, and a supervised drain tool (`scripts/drain_entity_dedup.py`)
+  works the v1 backlog down. Drain runs against the live vault are a later
+  supervised operator step (self-host runbook: `docs/self-hosting.md`).
 - **Going public (open-core).** Repos live in the `afairai` org; the deploy is
   split (the fleet ships from the private afair-web repo); OSS community-health
   files are in place; operator/fleet tooling lives only in afair-web. The git
@@ -168,6 +177,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/smoke.sh` | Curl-only health + auth gate smoke (no Python) | Rare: when transport changes |
 | `scripts/smoke_mcp.py` | Full MCP-protocol round-trip smoke against live server | When tool contract changes |
 | `scripts/backfill_entities.py` | One-shot entity-graph backfill (Phase 4 Track 1 rebuild path) | Rare: when canonicalizer interface changes |
+| `scripts/checkup_entities.py` | Read-only entity-graph checkup (ADR-0003 Phase 2 verification): identity/cluster/formation/drain census + `other`-wildcard metric | When the Phase 2 diagnostics change |
+| `scripts/drain_entity_dedup.py` | Supervised operator drain of the same-name cluster backlog (loops the deduplicator at a raised cap; `--dry-run`/`--max-clusters`/`--sleep`) | When the deduplicator interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
 | _(hosted fleet ops: `provision`/`retire`/`hourly-backup` workflows + `provision_user.py`/`retire_user.py`/`recover_user.py`/`onboarding_email.py`)_ | Live only in the private **afair-web** repo (control plane); scrubbed from this repo's history | n/a here |
