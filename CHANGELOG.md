@@ -10,6 +10,23 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.8](https://github.com/afairai/afair/compare/v0.1.7...v0.1.8) (2026-07-02)
+
+
+### Features
+
+* **recall:** surface pending-review count on every recall ([5b87e5d](https://github.com/afairai/afair/commit/5b87e5dae47b13b4f3caa928d790cd088696263f))
+
+
+### Bug Fixes
+
+* **scripts:** set vault key before opening in the drain tool ([b91d0c7](https://github.com/afairai/afair/commit/b91d0c7e495dad31762c6c3b5d00309e8d5d26ab))
+
+
+### Documentation
+
+* **clients:** nudge operators about the review queue ([985672d](https://github.com/afairai/afair/commit/985672db5dda6f2a0f3cdbd85675ae859add1459))
+
 ## [0.1.7](https://github.com/afairai/afair/compare/v0.1.6...v0.1.7) (2026-07-02)
 
 
