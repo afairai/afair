@@ -45,6 +45,7 @@ from afair.agents.entity_canonicalizer import EntityCanonicalizer
 from afair.mcp.context import ServerContext, set_context
 from afair.settings import Settings
 from afair.substrate import open_db
+from afair.substrate.db import set_vault_key
 from afair.substrate.events import write_event
 
 DEFAULT_MAX_CYCLES = 100
@@ -133,6 +134,15 @@ def main(argv: list[str] | None = None) -> int:
             f"no substrate.db found at {settings.vault_dir / 'substrate.db'}; nothing to backfill\n"
         )
         return 2
+
+    # Install the vault key before opening, exactly as server boot does
+    # (server.py) and the drain tool. Without this an encrypted (production)
+    # vault opens as SQLCipher ciphertext and fails with "file is not a
+    # database". Keyless (local/test) vaults leave the module default
+    # untouched. The key is a process-level default, so this one install
+    # covers every open_db in this run (worker + _log_backfill_run).
+    if settings.vault_key is not None:
+        set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
 
     # Establish a ServerContext so connect_for_thread inside the worker
     # picks up the right vault path + API keys.

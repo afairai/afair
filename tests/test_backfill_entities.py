@@ -134,6 +134,54 @@ def test_backfill_returns_nonzero_when_vault_missing(tmp_path: Path) -> None:
     assert rc == 2
 
 
+def test_backfill_installs_vault_key_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An encrypted (production) vault needs the key installed before open_db,
+    exactly like the drain tool. When AFAIR_VAULT_KEY is set, the backfill must
+    install it (as UTF-8 bytes) before opening the vault. We spy on the install
+    so the plaintext test vault still opens."""
+    db = open_db(tmp_path)
+    _seed_event_with_entities(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    db.close()
+
+    calls: list[bytes] = []
+    monkeypatch.setattr(
+        "scripts.backfill_entities.set_vault_key",
+        lambda key: calls.append(key),
+    )
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "k" * 64)
+
+    rc = main(["--vault-dir", str(tmp_path), "--quiet"])
+    assert rc == 0
+    assert calls == [b"k" * 64]
+
+
+def test_backfill_keyless_vault_skips_key_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyless (local/test) vault leaves the module default untouched — the
+    key install is skipped so the plaintext vault opens as-is."""
+    db = open_db(tmp_path)
+    _seed_event_with_entities(
+        db, text="Sajinth runs Athara", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    db.close()
+
+    calls: list[bytes] = []
+    monkeypatch.setattr(
+        "scripts.backfill_entities.set_vault_key",
+        lambda key: calls.append(key),
+    )
+    monkeypatch.delenv("AFAIR_VAULT_KEY", raising=False)
+
+    rc = main(["--vault-dir", str(tmp_path), "--quiet"])
+    assert rc == 0
+    assert calls == []
+
+
 def test_backfill_max_cycles_bounds_runaway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
