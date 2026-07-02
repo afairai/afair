@@ -391,6 +391,12 @@ class RecallCoverage(BaseModel):
     thin_evidence: bool = False
     """True when the query matched very little — the vault likely doesn't hold
     this yet."""
+    low_confidence_edges: int = 0
+    """Count of served, unreviewed relations in these results below the
+    low-confidence caveat threshold (ADR-0004). Non-zero means the vault is
+    surfacing tentative beliefs alongside the memories — treat them as guesses,
+    not settled fact. The edges are still shown (recall honesty), and each is
+    reviewable through the recall(decide=...) loop."""
 
 
 class ProposedCorrectionView(BaseModel):

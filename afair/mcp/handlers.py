@@ -60,6 +60,7 @@ from ..substrate import (
     build_compound_payload,
     build_text_payload,
     iter_events,
+    latest_edge_confidence_batch,
     latest_edge_reviews_batch,
     object_exists,
     object_plaintext_size,
@@ -80,7 +81,12 @@ from ..substrate import (
     write_event_with_status,
 )
 from ..substrate import pipeline_events as pe
-from ..substrate.belief import Entrenchment, auto_confirm, resolve_trust
+from ..substrate.belief import (
+    _MIN_AUTO_CONFIRM_CONFIDENCE,
+    Entrenchment,
+    auto_confirm,
+    resolve_trust,
+)
 from ..substrate.corrections import decide_correction
 from ..substrate.events import row_to_event
 from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
@@ -492,6 +498,25 @@ def _compute_surprise_score(
     return (len(novel) / len(unique), len(novel), len(unique))
 
 
+def _resolve_auto_confirm_floor(db: Any) -> float:
+    """Resolve the auto-confirm confidence floor through the tuner registry,
+    falling back to the belief-module default (surprise-window pattern, same as
+    the surprise-context-window lookup above).
+
+    Until S8 registers ``belief.auto_confirm_floor``, ``registry.get`` raises
+    KeyError and the except path serves the static default — recall must NEVER
+    fail because a tunable lookup misbehaved."""
+    from ..agents.tunable_registry import (
+        TunableRegistry as _TunableRegistry,  # local import to avoid cycle
+    )
+
+    try:
+        registry = _TunableRegistry(db)
+        return float(registry.get("belief", "auto_confirm_floor"))
+    except Exception:
+        return _MIN_AUTO_CONFIRM_CONFIDENCE
+
+
 def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, Any]]:
     """For every event in ``events``, compute the per-hit entity overlay.
 
@@ -617,6 +642,12 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
     # auto_confirmed / proposed. Reviews fetched in one batched query.
     all_edge_ids = [edge.id for edges in edges_by_event_id.values() for edge in edges]
     review_verdicts = latest_edge_reviews_batch(db, all_edge_ids)
+    # SERVED confidence (ADR-0004): the latest score row per edge, falling back
+    # to the immutable at-discovery column when no score exists yet (old vaults,
+    # mid-backfill). This is the number the auto-confirm gate now judges — the
+    # frozen write-time column would make the gate vacuous.
+    served_confidence = latest_edge_confidence_batch(db, all_edge_ids)
+    auto_confirm_floor = _resolve_auto_confirm_floor(db)
     event_id_to_hash = {e.id: e.content_hash for e in events}
     for source_event_id, edges in edges_by_event_id.items():
         edge_content_hash = event_id_to_hash.get(source_event_id)
@@ -635,13 +666,15 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             # has_evidence=True: post-evidence-gate, every edge that exists was
             # grounded in a verbatim quote. source_entrenchment defaults to
             # AGENT_DERIVED; foreign-import downgrading is a later slice.
+            conf = served_confidence.get(edge.id, edge.confidence)
             trust = resolve_trust(
                 latest_verdict=review_verdicts.get(edge.id),
                 is_invalidated=False,
                 auto_confirmed=auto_confirm(
-                    confidence=edge.confidence,
+                    confidence=conf,
                     predicate=edge.predicate,
                     source_entrenchment=Entrenchment.AGENT_DERIVED,
+                    floor=auto_confirm_floor,
                 ),
             )
             edge_views.append(
@@ -652,6 +685,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                     "valid_from": edge.valid_from,
                     "valid_to": edge.valid_to,
                     "trust": trust.value,
+                    "confidence": round(conf, 3),
                 }
             )
         if edge_views:
@@ -1075,11 +1109,35 @@ def _build_temporal_overlay(
 STALENESS_CAVEAT_DAYS = 30
 THIN_EVIDENCE_MAX_HITS = 1
 
+# An edge served below this confidence AND still `proposed` (unreviewed) is a
+# low-confidence belief the coverage layer flags as tentative (ADR-0004 C3).
+LOW_CONFIDENCE_EDGE_CAVEAT_THRESHOLD = 0.5
+
+
+def _count_low_confidence_edges(overlay: dict[str, dict[str, Any]] | None) -> int:
+    """Count served, unreviewed relations below the caveat threshold across the
+    hits. Only `proposed` edges count — a confirmed / auto-confirmed edge below
+    the threshold is not "tentative", it has already been judged."""
+    if not overlay:
+        return 0
+    count = 0
+    for fields in overlay.values():
+        for edge in fields.get("entity_edges") or []:
+            conf = edge.get("confidence")
+            if (
+                edge.get("trust") == "proposed"
+                and isinstance(conf, (int, float))
+                and conf < LOW_CONFIDENCE_EDGE_CAVEAT_THRESHOLD
+            ):
+                count += 1
+    return count
+
 
 def _compute_coverage(
     events: list[Event],
     invalidations: dict[str, Any],
     conflicts: dict[str, list[dict[str, Any]]],
+    overlay: dict[str, dict[str, Any]] | None = None,
 ) -> RecallCoverage:
     """The honesty layer — what the vault does NOT confidently tell you.
 
@@ -1150,12 +1208,23 @@ def _compute_coverage(
             f"{invalidated} returned record(s) were later superseded; check the invalidation note."
         )
 
+    # Low-confidence relations (ADR-0004): served, unreviewed edges below the
+    # caveat threshold are surfaced WITH a caveat (recall honesty), not hidden —
+    # and they feed the correction-on-recall loop.
+    low_conf_edges = _count_low_confidence_edges(overlay)
+    if low_conf_edges:
+        caveats.append(
+            f"{low_conf_edges} relation(s) in these results are low-confidence beliefs; "
+            "treat as tentative."
+        )
+
     return RecallCoverage(
         caveats=caveats,
         stale_newest_event_days=newest_days,
         unresolved_contradictions=unresolved,
         invalidated_hits=invalidated,
         thin_evidence=thin,
+        low_confidence_edges=low_conf_edges,
     )
 
 
@@ -1425,7 +1494,7 @@ def recall(
         depth_used=depth_used,
         note=_combine_notes(decide_note, note),
         summary=summary,
-        coverage=_compute_coverage(events, invalidations, conflicts),
+        coverage=_compute_coverage(events, invalidations, conflicts, overlay),
         pending_corrections=pending,
     )
 

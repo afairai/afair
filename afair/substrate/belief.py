@@ -79,19 +79,26 @@ def auto_confirm(
     predicate: str,
     source_entrenchment: Entrenchment,
     has_evidence: bool = True,
+    floor: float = _MIN_AUTO_CONFIRM_CONFIDENCE,
 ) -> bool:
     """Whether a freshly-derived edge may be trusted without operator review.
 
     Trusts only edges that are evidence-grounded, crisply-predicated, above the
-    confidence floor, and NOT grounded in a foreign import. Everything else is
-    `proposed` and goes to the queue — queuing only the uncertain keeps review
-    effort small (ADR-0002 §4).
+    confidence ``floor``, and NOT grounded in a foreign import. Everything else
+    is `proposed` and goes to the queue — queuing only the uncertain keeps
+    review effort small (ADR-0002 §4).
+
+    ``floor`` defaults to the static ``_MIN_AUTO_CONFIRM_CONFIDENCE`` so every
+    existing caller is byte-compatible; recall now passes the SERVED confidence
+    (ADR-0004) and the tuner-resolved floor, which finally makes this gate
+    discriminate (before ADR-0004 every edge was a flat 0.8 that always cleared
+    the floor).
     """
     if source_entrenchment <= Entrenchment.FOREIGN_IMPORT:
         return False
     if not has_evidence:
         return False
-    if confidence < _MIN_AUTO_CONFIRM_CONFIDENCE:
+    if confidence < floor:
         return False
     return predicate_is_crisp(predicate)
 

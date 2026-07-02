@@ -24,7 +24,15 @@ from afair.mcp import handlers
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.mcp.schemas import TextContent
 from afair.settings import Settings
-from afair.substrate import open_db, record_edge_review, write_event
+from afair.substrate import (
+    open_db,
+    record_edge_review,
+    write_edge_confidence_score,
+    write_entity,
+    write_entity_edge,
+    write_event,
+)
+from afair.substrate.confidence import EDGE_CONFIDENCE_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -505,3 +513,130 @@ def test_recall_marks_confirmed_edge_as_confirmed(ctx: ServerContext, settings: 
     record_edge_review(ctx.db, edge_id=edge_id, verdict="confirm", reviewed_by="operator")
     edge = _recalled_edge(handlers.recall(query="Sajinth", depth="shallow"))
     assert edge["trust"] == "confirmed"
+
+
+# ── ADR-0004: served confidence, discriminating auto-confirm, caveat ────────
+
+
+def _seed_edge_directly(
+    ctx: ServerContext,
+    *,
+    text: str,
+    subject: str,
+    predicate: str,
+    obj: str,
+    column_confidence: float,
+    score_confidence: float | None = None,
+) -> str:
+    """Write an event + two entities + one edge directly (no canonicalizer), so
+    the test controls the stored column and the served score independently.
+    Returns the edge id."""
+    event = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": text}
+    )
+    subj_e = write_entity(
+        ctx.db,
+        canonical_name=subject,
+        kind="person",
+        created_by="test",
+        source_event_id=event.id,
+        confidence=0.9,
+    )
+    obj_e = write_entity(
+        ctx.db,
+        canonical_name=obj,
+        kind="organization",
+        created_by="test",
+        source_event_id=event.id,
+        confidence=0.9,
+    )
+    edge = write_entity_edge(
+        ctx.db,
+        subject_id=subj_e.id,
+        predicate=predicate,
+        object_id=obj_e.id,
+        source_event_id=event.id,
+        discovered_by="test",
+        confidence=column_confidence,
+    )
+    assert edge is not None
+    if score_confidence is not None:
+        write_edge_confidence_score(
+            ctx.db,
+            edge_id=edge.id,
+            confidence=score_confidence,
+            components={},
+            computed_by=EDGE_CONFIDENCE_VERSION,
+        )
+    return edge.id
+
+
+def test_recall_trust_reads_served_score_not_column(ctx: ServerContext) -> None:
+    """REGRESSION (red on main): an edge whose stored column is 0.8 (would
+    auto-confirm) but whose latest SCORE is 0.4 is served `proposed`. main
+    reads the frozen column → auto_confirmed; ADR-0004 reads the served score."""
+    _seed_edge_directly(
+        ctx,
+        text="Sajinth runs Athara",
+        subject="Sajinth",
+        predicate="runs",
+        obj="Athara",
+        column_confidence=0.8,
+        score_confidence=0.4,
+    )
+    result = handlers.recall(query="Sajinth", depth="shallow")
+    hit = next(h for h in result.hits if h.interpretation and h.interpretation.get("entity_edges"))
+    edge_view = hit.interpretation["entity_edges"][0]  # type: ignore[index]
+    assert edge_view["trust"] == "proposed"
+    assert edge_view["confidence"] == 0.4
+
+
+def test_recall_edge_confidence_falls_back_to_column(ctx: ServerContext) -> None:
+    """No score row → the served confidence falls back to the at-discovery
+    column, and a strong crisp edge stays auto-confirmed."""
+    _seed_edge_directly(
+        ctx,
+        text="Sajinth runs Athara",
+        subject="Sajinth",
+        predicate="runs",
+        obj="Athara",
+        column_confidence=0.82,
+        score_confidence=None,
+    )
+    result = handlers.recall(query="Sajinth", depth="shallow")
+    hit = next(h for h in result.hits if h.interpretation and h.interpretation.get("entity_edges"))
+    edge_view = hit.interpretation["entity_edges"][0]  # type: ignore[index]
+    assert edge_view["confidence"] == 0.82
+    assert edge_view["trust"] == "auto_confirmed"
+
+
+def test_coverage_flags_low_confidence_proposed_edges_only(ctx: ServerContext) -> None:
+    """A served, unreviewed edge below the caveat threshold is counted and
+    caveated; a below-threshold edge that is already CONFIRMED is not (it has
+    been judged, it is no longer tentative)."""
+    # Proposed @0.3 → flagged.
+    _seed_edge_directly(
+        ctx,
+        text="Orbital note: Sajinth runs Athara",
+        subject="Sajinth",
+        predicate="runs",
+        obj="Athara",
+        column_confidence=0.8,
+        score_confidence=0.3,
+    )
+    # Confirmed @0.3 → NOT flagged (operator already confirmed it).
+    confirmed_edge = _seed_edge_directly(
+        ctx,
+        text="Orbital note: Maya leads Clario",
+        subject="Maya",
+        predicate="leads",
+        obj="Clario",
+        column_confidence=0.8,
+        score_confidence=0.3,
+    )
+    record_edge_review(ctx.db, edge_id=confirmed_edge, verdict="confirm", reviewed_by="op")
+
+    result = handlers.recall(query="Orbital", depth="shallow")
+    assert result.coverage is not None
+    assert result.coverage.low_confidence_edges == 1
+    assert any("low-confidence beliefs" in c for c in result.coverage.caveats)

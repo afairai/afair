@@ -76,6 +76,23 @@ def test_auto_confirm_trusts_only_grounded_crisp_nonforeign() -> None:
     assert not auto_confirm(**{**base, "predicate": ""})  # malformed empty predicate
 
 
+def test_auto_confirm_respects_passed_floor() -> None:
+    """ADR-0004: recall passes a tunable floor. The default keeps every existing
+    caller byte-compatible; a raised/lowered floor moves the gate."""
+    base = {
+        "predicate": "runs",
+        "source_entrenchment": Entrenchment.AGENT_DERIVED,
+        "has_evidence": True,
+    }
+    # Default floor (0.75): 0.7 is below → not trusted; 0.8 clears it.
+    assert not auto_confirm(confidence=0.7, **base)
+    assert auto_confirm(confidence=0.8, **base)
+    # Lowered floor (0.6): 0.7 now clears it.
+    assert auto_confirm(confidence=0.7, floor=0.6, **base)
+    # Raised floor (0.85): an 0.8 edge is now quarantined.
+    assert not auto_confirm(confidence=0.8, floor=0.85, **base)
+
+
 def test_resolve_trust_precedence() -> None:
     # The invalidation is the canonical reject signal, and it is a defeater: it
     # wins even over a prior confirm (a source correction retracts the edge).
