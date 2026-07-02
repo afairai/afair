@@ -10,6 +10,36 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.7](https://github.com/afairai/afair/compare/v0.1.6...v0.1.7) (2026-07-02)
+
+
+### Features
+
+* **agents:** add cold-path edge-confidence rescorer + calibration ([9aade1d](https://github.com/afairai/afair/commit/9aade1deaf04699be098759753092e2a7f1d449d))
+* **articles:** stop laundering weak beliefs into article prose ([d1f1ef7](https://github.com/afairai/afair/commit/d1f1ef70c54e2fbf56965975264c3d7d63459191))
+* **canonicalizer:** compute real edge-confidence prior at write time ([750913e](https://github.com/afairai/afair/commit/750913ea2161cedb31a2d712cc57c79b6644a686))
+* **confidence:** add append-only edge-confidence overlay storage ([fcc68da](https://github.com/afairai/afair/commit/fcc68da8098c6536d6e6d5fd26ab7f2796d20d56))
+* **confidence:** add pure edge-confidence log-odds model ([844922c](https://github.com/afairai/afair/commit/844922cebd5d56ac7d5f061bfc681f57b9f5e10b))
+* **dedup:** skip deliberate homonym splits ([8c32531](https://github.com/afairai/afair/commit/8c32531fc1a1fcea220306ea2f594e78e7bc5f87))
+* **dedup:** unify kind via assignment at high confidence ([6d9aba1](https://github.com/afairai/afair/commit/6d9aba17c80922d906eddb86205eec9e9609291c))
+* **extractor:** retry transient extraction failures (llm_timeout) ([acfc372](https://github.com/afairai/afair/commit/acfc372835f2356a054bf6774ad2abffb2c4513f))
+* **recall:** serve edge confidence, discriminate quarantine, caveat ([936792c](https://github.com/afairai/afair/commit/936792c35bc27469767752e4e29664134819091d))
+* **review:** queue low-confidence edges + wire the decide loop ([2cbcb0c](https://github.com/afairai/afair/commit/2cbcb0c10d092fafea747f5192394d3bccd133e4))
+* **scripts:** read-only entity-graph checkup ([3d2e292](https://github.com/afairai/afair/commit/3d2e292010e2cf75c3aecb3916da3819f234d11f))
+* **scripts:** supervised dedup backlog drain tool ([d92e1ac](https://github.com/afairai/afair/commit/d92e1ac9f3e2ea0e3484d1daf3567903bb338428))
+* **tuner:** whitelist edge-confidence + auto-confirm-floor tunables ([fce784c](https://github.com/afairai/afair/commit/fce784cb4294c0f72efc2ce65a26e1642f13b442))
+
+
+### Bug Fixes
+
+* **canonicalizer:** defer events on LLM-budget exhaustion ([8f4668c](https://github.com/afairai/afair/commit/8f4668ccde3dde1098957d0a078ac5434943752b))
+
+
+### Documentation
+
+* **adr:** add ADR-0004 edge-confidence model + registry entry ([16e1e47](https://github.com/afairai/afair/commit/16e1e4720ab3c9438ad5a68be2073bb974e9adc3))
+* **adr:** mark ADR-0003 accepted; entity-graph runbook ([f70af7a](https://github.com/afairai/afair/commit/f70af7abb72caf69b1510fbf8c6a8b9e00e4c062))
+
 ## [0.1.6](https://github.com/afairai/afair/compare/v0.1.5...v0.1.6) (2026-07-02)
 
 
