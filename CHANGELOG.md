@@ -10,6 +10,13 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.6](https://github.com/afairai/afair/compare/v0.1.5...v0.1.6) (2026-07-02)
+
+
+### Bug Fixes
+
+* **dedup:** defer to operator-decided merges; stop re-merge cycle ([accb38d](https://github.com/afairai/afair/commit/accb38d2f55333efeb74a26278fd943d836f8133))
+
 ## [0.1.5](https://github.com/afairai/afair/compare/v0.1.4...v0.1.5) (2026-07-02)
 
 
