@@ -461,3 +461,15 @@ def test_load_token_returns_empty_when_absent(
     monkeypatch.delenv("TOKEN", raising=False)
     monkeypatch.chdir(tmp_path)  # no .env.local in this cwd
     assert installer._load_token() == ""
+
+
+def test_quoted_marker_in_prose_is_not_a_block(installer: ModuleType) -> None:
+    """A marker string mid-line in user prose must NOT be treated as a heading
+    block — otherwise a consented refresh would delete the user's prose up to
+    the next H2 (Fable review nit #1)."""
+    text = (
+        "# my notes\n\n"
+        "Remember to read the section ## afair MCP for details before you start.\n\n"
+        "## something else\n\nkeep me\n"
+    )
+    assert installer._find_snippet_blocks(text) == []

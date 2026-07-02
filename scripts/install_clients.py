@@ -234,6 +234,12 @@ def _find_snippet_blocks(text: str) -> list[tuple[int, int]]:
                 break
             line_start = text.rfind("\n", 0, idx)
             start = 0 if line_start == -1 else line_start + 1
+            if idx != start:
+                # Marker appears mid-line (e.g. quoted in prose:
+                # "see ## afair MCP") — not a real H2 heading. Skip it so a
+                # consented refresh never deletes user prose up to the next H2.
+                search_from = idx + len(marker)
+                continue
             nxt = text.find("\n## ", idx + len(marker))
             end = len(text) if nxt == -1 else nxt + 1
             spans.append((start, end))
