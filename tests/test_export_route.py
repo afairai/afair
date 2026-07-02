@@ -200,17 +200,19 @@ def test_export_accepts_either_token_when_both_set(vault_dir) -> None:
 # ─── shape ───────────────────────────────────────────────────────────────
 
 
-def test_export_empty_vault_returns_manifest_only(vault_dir) -> None:
+def test_export_empty_vault_returns_bootstrap_kinds_and_manifest(vault_dir) -> None:
     app = _build_app(vault_dir)
     client = TestClient(app)
     r = client.get("/internal/export", headers={"Authorization": "Bearer test-token"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/x-ndjson")
     assert "attachment" in r.headers["content-disposition"]
-    lines = [line for line in r.text.split("\n") if line]
-    # Empty substrate → only the manifest terminator.
-    assert len(lines) == 1
-    manifest = json.loads(lines[0])
+    lines = [json.loads(line) for line in r.text.split("\n") if line]
+    # An "empty" vault still carries substrate: opening it seeds the seven
+    # bootstrap ontology kinds (ADR-0003), and the export includes the kind
+    # registry for I4 fidelity. So: 7 kind_registry records + the manifest.
+    assert [rec["kind"] for rec in lines] == ["kind_registry"] * 7 + ["manifest"]
+    manifest = lines[-1]
     assert manifest["kind"] == "manifest"
     assert manifest["format_version"] == 1
 

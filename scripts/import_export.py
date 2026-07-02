@@ -31,7 +31,21 @@ Usage
 
 The output DB has tables matching the JSONL record kinds:
     events, interpretations, entities, entity_mentions, entity_edges,
-    entity_merges, edge_invalidations, blobs
+    entity_merges, edge_invalidations, merge_invalidations,
+    entity_retractions, edge_reviews, entity_identities,
+    entity_kind_assignments, kind_registry, kind_revisions,
+    kind_observations, proposed_corrections, proposed_ontology_revisions,
+    tuner_state, blobs
+
+The correction + ontology tables matter for fidelity (I4): they carry the
+operator's verdicts (a retracted entity stays retracted, a rejected merge
+stays rejected, a retyped entity keeps its assigned kind, a renamed kind
+still resolves) — none of which can be regenerated from events alone.
+
+Rows are inserted in stream order, and the export stream is FK-ordered
+(events first, then entities, then everything that references them), so a
+reconstruction that replays this file top-to-bottom into a real
+FK-enforcing substrate never sees a dangling reference.
 
 The ``blobs`` table stores the inlined base64 if ``?blobs=inline`` was
 used. A separate ``--extract-blobs DIR`` flag writes each blob to its
@@ -93,6 +107,61 @@ CREATE TABLE IF NOT EXISTS entity_merges (
     payload         TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS edge_invalidations (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+
+-- Correction ledger (ADR-0002): the operator's verdicts. Without these,
+-- a restored vault silently resurrects deleted/merged entities.
+CREATE TABLE IF NOT EXISTS merge_invalidations (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entity_retractions (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS edge_reviews (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+
+-- Ontology (ADR-0003): the emergent kind system. Without these, a
+-- restored vault loses every operator/agent ontology decision.
+CREATE TABLE IF NOT EXISTS entity_identities (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entity_kind_assignments (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kind_registry (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kind_revisions (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kind_observations (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+
+-- Suggestion queues: decided rows are operator verdicts recorded nowhere
+-- else; pending rows are regenerable but harmless.
+CREATE TABLE IF NOT EXISTS proposed_corrections (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proposed_ontology_revisions (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+
+-- Self-improvement log (I7): every promote/rollback the tuner made.
+CREATE TABLE IF NOT EXISTS tuner_state (
     rowid_external  INTEGER PRIMARY KEY,
     payload         TEXT NOT NULL
 );
@@ -160,6 +229,16 @@ def _insert_interpretation(conn: sqlite3.Connection, rec: dict) -> None:
 
 def _insert_generic(conn: sqlite3.Connection, table: str, rec: dict) -> None:
     rec.pop("kind", None)
+    if table == "entities":
+        # entities is keyed by the substrate entity id so dependents
+        # (retractions, kind assignments, identities, edges) can be joined
+        # back by id. Previously the id column existed but was never
+        # populated — a NULL-id row per entity.
+        conn.execute(
+            "INSERT OR REPLACE INTO entities (id, payload) VALUES (?, ?)",
+            (rec.get("id"), json.dumps(rec, ensure_ascii=False)),
+        )
+        return
     conn.execute(
         f"INSERT INTO {table} (payload) VALUES (?)",
         (json.dumps(rec, ensure_ascii=False),),
@@ -185,12 +264,26 @@ def _record_manifest(conn: sqlite3.Connection, rec: dict) -> None:
     )
 
 
+# Record kind → target table. Insert order follows the stream, which the
+# export emits FK-first (events → entities → dependents), so replaying
+# top-to-bottom is always reference-safe.
 GENERIC_KINDS = {
     "entity": "entities",
     "entity_mention": "entity_mentions",
     "entity_edge": "entity_edges",
     "entity_merge": "entity_merges",
     "edge_invalidation": "edge_invalidations",
+    "merge_invalidation": "merge_invalidations",
+    "entity_retraction": "entity_retractions",
+    "edge_review": "edge_reviews",
+    "entity_identity": "entity_identities",
+    "entity_kind_assignment": "entity_kind_assignments",
+    "kind_registry": "kind_registry",
+    "kind_revision": "kind_revisions",
+    "kind_observation": "kind_observations",
+    "proposed_correction": "proposed_corrections",
+    "proposed_ontology_revision": "proposed_ontology_revisions",
+    "tuner_state": "tuner_state",
 }
 
 

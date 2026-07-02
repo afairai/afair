@@ -7,9 +7,22 @@ can replay the timeline in order without sorting.
 Record shape:
   {"kind": "event",         ...event row + parsed payload}
   {"kind": "interpretation", ...interpretation row with extraction JSON}
-  {"kind": "entity",        ...canonical entity}
+  {"kind": "entity",        ...canonical entity (its own kind column as "entity_kind")}
   {"kind": "entity_mention", ...mention linking an event to an entity}
   {"kind": "entity_edge",   ...directed edge between two entities}
+  {"kind": "entity_merge",  ...merge decision between two entities}
+  {"kind": "edge_invalidation",  ...an edge withdrawn from the live graph}
+  {"kind": "merge_invalidation", ...a merge undone (rejected) by the operator}
+  {"kind": "entity_retraction",  ...an entity withdrawn as noise}
+  {"kind": "edge_review",   ...operator confirm/reject verdict on an edge}
+  {"kind": "entity_identity", ...v2 name-first identity ledger row}
+  {"kind": "entity_kind_assignment", ...append-only retype of an entity}
+  {"kind": "kind_registry", ...one registered ontology kind}
+  {"kind": "kind_revision", ...one ontology revision (add/rename/merge/...)}
+  {"kind": "kind_observation", ...raw extractor kind proposal, preserved}
+  {"kind": "proposed_correction", ...entity-audit proposal + its decision}
+  {"kind": "proposed_ontology_revision", ...schema-evolver proposal + decision}
+  {"kind": "tuner_state",   ...self-improvement promote/rollback/… record (I7)}
 
 Blob content is NOT inlined by default — the JSONL references blobs
 by hash. A separate ``?blobs=inline`` mode base64-encodes blob bytes
@@ -186,13 +199,62 @@ def _iter_export(
                 + "\n"
             )
 
-        # Entity graph: entities, mentions, edges, merges, invalidations.
+        # Entity graph + correction ledger + ontology (ADR-0002 / ADR-0003).
+        #
+        # Everything below is non-regenerable substrate-of-record: operator
+        # and agent decisions (retractions, rejected merges, edge verdicts,
+        # kind registry/revisions/assignments, v2 identity ordinals, raw
+        # kind proposals, tuner self-modifications) that no rebuild path
+        # (scripts/rebuild_vault.py, scripts/backfill_entities.py) can
+        # reproduce from events. Omitting any of them would make an
+        # export → import round-trip resurrect deleted/retyped entities or
+        # lose the ontology — a violation of I4 (the export must be a
+        # COMPLETE record of the substrate the user owns).
+        #
+        # Stream order is FK-safe by construction: events precede
+        # everything; entities precede their dependents (mentions, edges,
+        # merges, retractions, identities, kind assignments, observations,
+        # corrections); entity_merges precede merge_invalidations;
+        # entity_edges precede edge_invalidations and edge_reviews;
+        # kind_registry precedes kind_revisions. An importer that inserts
+        # in stream order never sees a dangling reference.
+        #
+        # Deliberately EXCLUDED, each with a reason:
+        #   events_fts / events_vec — derived search indexes, rebuilt from
+        #     events by the running system;
+        #   event_temporal — re-derived by the temporal worker from events
+        #     (idempotent on UNIQUE(event_hash, computed_by));
+        #   pipeline_events — lifecycle diagnostics about the pipeline, not
+        #     memory; one row per stage per event would dwarf the export;
+        #   oauth_* / api_tokens / export_jobs — host-local credential and
+        #     job state: exporting token hashes into a plaintext dump would
+        #     widen the credential blast radius, and they mean nothing on
+        #     the machine an export is restored to.
+        #
+        # proposed_corrections / proposed_ontology_revisions ARE included
+        # even though they are mutable suggestion queues: their DECIDED rows
+        # (confirmed/rejected, with decided_by/decided_at) are operator
+        # verdicts recorded nowhere else — losing a 'rejected' row would let
+        # a re-run of the audit / evolver re-propose (and, for auto-tier
+        # corrections, re-apply) something the operator already refused.
+        # Pending rows are regenerable, but carrying them is harmless.
         for table, kind in (
             ("entities", "entity"),
             ("entity_mentions", "entity_mention"),
             ("entity_edges", "entity_edge"),
             ("entity_merges", "entity_merge"),
             ("edge_invalidations", "edge_invalidation"),
+            ("merge_invalidations", "merge_invalidation"),
+            ("entity_retractions", "entity_retraction"),
+            ("edge_reviews", "edge_review"),
+            ("entity_identities", "entity_identity"),
+            ("entity_kind_assignments", "entity_kind_assignment"),
+            ("kind_registry", "kind_registry"),
+            ("kind_revisions", "kind_revision"),
+            ("kind_observations", "kind_observation"),
+            ("proposed_corrections", "proposed_correction"),
+            ("proposed_ontology_revisions", "proposed_ontology_revision"),
+            ("tuner_state", "tuner_state"),
         ):
             rows = conn.execute(
                 f"SELECT * FROM {table} ORDER BY rowid ASC",
@@ -203,6 +265,14 @@ def _iter_export(
                 # ("for k in row" instead of "for k in row.keys()") would
                 # be wrong here. Use the explicit .keys() API.
                 d = {k: row[k] for k in row.keys()}  # noqa: SIM118
+                # A table's own ``kind`` column (entities.kind — the entity's
+                # type; proposed_corrections.kind; tuner_state.kind) must not
+                # be clobbered by the record discriminator. Re-key it to
+                # ``<record_kind>_kind`` ("entity_kind", ...). Purely
+                # additive for consumers: the old export silently DESTROYED
+                # the column, so nothing could have depended on it.
+                if "kind" in d:
+                    d[f"{kind}_kind"] = d.pop("kind")
                 d["kind"] = kind
                 yield json.dumps(d, ensure_ascii=False, sort_keys=True, default=str) + "\n"
 
