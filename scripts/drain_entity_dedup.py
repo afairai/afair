@@ -42,6 +42,7 @@ from afair.agents import entity_dedup as ed
 from afair.agents.entity_dedup import EntityDeduplicator
 from afair.settings import Settings
 from afair.substrate import open_db
+from afair.substrate.db import set_vault_key
 from afair.substrate.events import write_event
 
 DEFAULT_MAX_CLUSTERS = 25
@@ -140,6 +141,13 @@ def main(argv: list[str] | None = None) -> int:
             f"no substrate.db found at {settings.vault_dir / 'substrate.db'}; nothing to drain\n"
         )
         return 2
+
+    # Install the vault key before opening, exactly as server boot does
+    # (server.py). Without this an encrypted (production) vault opens as
+    # SQLCipher ciphertext and fails with "file is not a database". Keyless
+    # (local/test) vaults leave the module default untouched.
+    if settings.vault_key is not None:
+        set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
 
     db = open_db(settings.vault_dir, embedding_dim=settings.embedding_dim)
     try:
