@@ -10,6 +10,28 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.9](https://github.com/afairai/afair/compare/v0.1.8...v0.1.9) (2026-07-02)
+
+
+### Features
+
+* **observability:** drop benign uvicorn client-disconnect noise ([71cbc16](https://github.com/afairai/afair/commit/71cbc16aee673b92c1213b51a46f702f4a3dbf19))
+
+
+### Bug Fixes
+
+* **installer:** anchor snippet markers to line start ([51cd4da](https://github.com/afairai/afair/commit/51cd4dab62b60a812adcaf9a0d4dfb368506b839))
+* **installer:** detect legacy em-dash heading, collapse duplicate blocks ([67bc02e](https://github.com/afairai/afair/commit/67bc02ea9a0527654eb2a6f2c3f00c72b78c72ea))
+* **mcp:** accept stringified content/event, never drop the write ([a2934df](https://github.com/afairai/afair/commit/a2934dff1e06c40c7f35931f4289298edb9a4555))
+* **observe:** coerce over-long action/subject/result, never drop ([3f57a2d](https://github.com/afairai/afair/commit/3f57a2d928161aa00eb501cd86b82d475a10a5e0))
+* **observe:** preserve caller-supplied &lt;field&gt;_full on truncation ([6cf4b45](https://github.com/afairai/afair/commit/6cf4b4541908d12cccd501f79bbeb49c5f72ae6a))
+* **scripts:** set vault key before opening in backfill_entities ([21e7a96](https://github.com/afairai/afair/commit/21e7a9625a3b56d5c8744afa11e69089298c44ac))
+
+
+### Documentation
+
+* **claude:** refresh §0 current state to reflect shipped work ([820363d](https://github.com/afairai/afair/commit/820363d30453a709895b4a05e6b299b74947c8d7))
+
 ## [0.1.8](https://github.com/afairai/afair/compare/v0.1.7...v0.1.8) (2026-07-02)
 
 
