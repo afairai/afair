@@ -74,10 +74,13 @@ CLIENT_KEYS: tuple[str, ...] = (
     "claude-ai",
 )
 
-# Idempotency markers: the current snippet heading, plus the legacy wrapper
-# older installs wrote, so re-running never double-appends.
+# Idempotency markers: the current snippet heading, plus the legacy wrappers
+# older installs wrote, so re-running never double-appends. The em-dash heading
+# predates the colon heading; without it, a legacy block escapes detection and
+# survives alongside a refreshed block, duplicating the snippet forever.
 SNIPPET_MARKERS = (
     "## afair: Persistent Memory Across AI Tools",
+    "## afair — Persistent Memory Across AI Tools",
     "## afair MCP",
 )
 
@@ -216,20 +219,56 @@ def _pick_url(existing_url: str | None, url: str, *, url_explicit: bool, label: 
     return url
 
 
-def _replace_snippet_block(text: str) -> str:
-    """Swap an existing afair snippet section for the current SNIPPET_BODY. The
-    snippet is one self-headed H2; the block runs from its heading to the next
-    sibling H2 (``\\n## ``) or end of file."""
+def _find_snippet_blocks(text: str) -> list[tuple[int, int]]:
+    """Every afair snippet block in ``text`` as sorted, merged ``(start, end)``
+    spans. A block is one self-headed H2 running from its heading to the next
+    sibling H2 (``\\n## ``) or end of file. All markers are scanned (every
+    occurrence, not just the first) so legacy and current headings are found
+    together — the state that duplicated blocks when only the first was swapped."""
+    spans: list[tuple[int, int]] = []
     for marker in SNIPPET_MARKERS:
-        idx = text.find(marker)
-        if idx == -1:
-            continue
-        line_start = text.rfind("\n", 0, idx)
-        start = 0 if line_start == -1 else line_start + 1
-        nxt = text.find("\n## ", idx + len(marker))
-        end = len(text) if nxt == -1 else nxt + 1
-        return text[:start] + SNIPPET_BODY + "\n" + text[end:]
-    return text
+        search_from = 0
+        while True:
+            idx = text.find(marker, search_from)
+            if idx == -1:
+                break
+            line_start = text.rfind("\n", 0, idx)
+            start = 0 if line_start == -1 else line_start + 1
+            nxt = text.find("\n## ", idx + len(marker))
+            end = len(text) if nxt == -1 else nxt + 1
+            spans.append((start, end))
+            search_from = end
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _replace_snippet_block(text: str) -> str:
+    """Replace every afair snippet block with a single current SNIPPET_BODY.
+
+    A file can carry more than one stale block at once (a legacy em-dash block
+    plus a colon block, for example). Remove them all and insert exactly one
+    current block at the position of the first, so a refresh collapses to one
+    block instead of leaving a survivor behind."""
+    blocks = _find_snippet_blocks(text)
+    if not blocks:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    inserted = False
+    for start, end in blocks:
+        parts.append(text[cursor:start])
+        if not inserted:
+            parts.append(SNIPPET_BODY + "\n")
+            inserted = True
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def _ensure_snippet(
@@ -249,7 +288,8 @@ def _ensure_snippet(
       rewrites the prompt without consent.
     """
     text = path.read_text() if path.exists() else ""
-    present = bool(text) and any(m in text for m in SNIPPET_MARKERS)
+    blocks = _find_snippet_blocks(text)
+    present = bool(text) and bool(blocks)
 
     if not present:
         if dry:
@@ -261,7 +301,10 @@ def _ensure_snippet(
         _ok(f"snippet: appended to {path}")
         return Change("snippet", path, "appended")
 
-    if SNIPPET_BODY.strip() in text:
+    # A single current block is the only true no-op. More than one block (a
+    # legacy heading alongside a current one) still needs a refresh so the
+    # duplicates collapse to one — otherwise the survivor burns context forever.
+    if len(blocks) == 1 and SNIPPET_BODY.strip() in text:
         _ok(f"snippet: already current in {path}")
         return None
 

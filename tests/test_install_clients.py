@@ -396,6 +396,62 @@ def test_ensure_snippet_ask_accepted_updates(installer: ModuleType, home: Path) 
     assert "OLD" not in md.read_text() and installer.SNIPPET_BODY in md.read_text()
 
 
+def test_ensure_snippet_legacy_em_dash_heading_replaced(installer: ModuleType, home: Path) -> None:
+    """The older em-dash heading must be recognized and refreshed, not treated
+    as foreign text and left in place beside a new colon-heading block."""
+    md = home / "CLAUDE.md"
+    md.write_text(
+        "# top\n\n## afair — Persistent Memory Across AI Tools\n\nLEGACY OLD\n\n## after\nkeep me\n"
+    )
+    ch = installer._ensure_snippet(md, dry=False, update="yes")
+    text = md.read_text()
+    assert ch is not None and ch.note == "updated"
+    assert "LEGACY OLD" not in text
+    assert "## afair — Persistent Memory Across AI Tools" not in text  # legacy gone
+    assert installer.SNIPPET_BODY in text
+    assert "## after\nkeep me" in text  # sibling survives
+
+
+def test_ensure_snippet_collapses_duplicate_legacy_and_current_blocks(
+    installer: ModuleType, home: Path
+) -> None:
+    """A file carrying BOTH a legacy em-dash block and a current colon block
+    (the observed live state) must collapse to exactly one current block —
+    previously only the first block was swapped, so a duplicate survived."""
+    md = home / "CLAUDE.md"
+    md.write_text(
+        "# top\n\n"
+        "## afair — Persistent Memory Across AI Tools\n\nLEGACY OLD\n\n"
+        + installer.SNIPPET_BODY
+        + "\n\n## after\nkeep me\n"
+    )
+    ch = installer._ensure_snippet(md, dry=False, update="yes")
+    text = md.read_text()
+    assert ch is not None and ch.note == "updated"
+    assert "LEGACY OLD" not in text
+    assert "## afair — Persistent Memory Across AI Tools" not in text
+    # Exactly one current block remains.
+    assert text.count("## afair: Persistent Memory Across AI Tools") == 1
+    assert installer.SNIPPET_BODY in text
+    assert "## after\nkeep me" in text
+
+
+def test_replace_snippet_block_collapses_all_afair_blocks(installer: ModuleType) -> None:
+    """_replace_snippet_block removes every marker-headed block and inserts a
+    single current body at the position of the first."""
+    text = (
+        "# top\n\n"
+        "## afair — Persistent Memory Across AI Tools\n\nLEGACY\n\n"
+        "## afair MCP\n\nOLDER\n\n"
+        "## keep\nsurvivor\n"
+    )
+    out = installer._replace_snippet_block(text)
+    assert "LEGACY" not in out and "OLDER" not in out
+    assert out.count("## afair: Persistent Memory Across AI Tools") == 1
+    assert installer.SNIPPET_BODY in out
+    assert "## keep\nsurvivor" in out
+
+
 # ── token lookup ─────────────────────────────────────────────────────────────
 
 
