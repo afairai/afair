@@ -257,6 +257,7 @@ class EntityCanonicalizer(ColdPathWorker):
             "llm_calls": 0,
             "llm_errors": 0,
             "sonnet_escalations": 0,
+            "events_deferred_no_budget": 0,
         }
 
         model = settings.canonicalizer_model
@@ -271,7 +272,22 @@ class EntityCanonicalizer(ColdPathWorker):
 
         # Phase A — canonicalize new events.
         events_with_extractions = _find_uncanonicalized_events(conn, MAX_EVENTS_PER_CYCLE)
-        for event, extraction in events_with_extractions:
+        for index, (event, extraction) in enumerate(events_with_extractions):
+            # G1 fix (ADR-0003 Phase 2 completion): once the per-cycle LLM
+            # budget is gone, DEFER the remaining events instead of draining
+            # them exact-only. Exact-only mode is exactly the residual
+            # formation path — a kind flip on an existing name with no LLM
+            # available falls through write_entity's same-initial-kind reuse
+            # and mints a NEW same-name cross-kind v2 duplicate (the old
+            # failure through a new door). Deferred events write zero
+            # entity_mentions, so _find_uncanonicalized_events re-surfaces
+            # them next cycle (120s) with a fresh budget; oldest-first
+            # ordering means they go first. The rare mid-event exhaustion
+            # still falls back to a plain create inside the helper — that
+            # path never loses a mention and biases-to-split by design.
+            if llm_budget <= 0:
+                stats["events_deferred_no_budget"] = len(events_with_extractions) - index
+                break
             result, last_llm_call = _canonicalize_one_event(
                 conn,
                 event=event,
@@ -317,10 +333,6 @@ class EntityCanonicalizer(ColdPathWorker):
                         "reason": "extractor entities present but all filtered (empty names, invalid shapes)",
                     },
                 )
-            if llm_budget <= 0:
-                # Drain remaining events with exact-only matching by leaving
-                # llm_budget at 0; the helper handles that mode internally.
-                pass
 
         # Phase B — cascade pending invalidations.
         for invalidate_event in _find_uncascaded_invalidations(conn, MAX_CASCADES_PER_CYCLE):
@@ -355,7 +367,8 @@ class EntityCanonicalizer(ColdPathWorker):
                 f"events={stats['events_canonicalized']} "
                 f"entities_created={stats['entities_created']} "
                 f"edges_created={stats['edges_created']} "
-                f"llm_calls={stats['llm_calls']}"
+                f"llm_calls={stats['llm_calls']} "
+                f"deferred_no_budget={stats['events_deferred_no_budget']}"
             ),
         )
         return stats

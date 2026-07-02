@@ -584,12 +584,14 @@ def test_second_cycle_is_noop(
     assert stats2["entities_created"] == 0
 
 
-def test_llm_budget_cap_drains_remaining_to_exact_or_new(
+def test_llm_budget_cap_defers_remaining_events(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the LLM budget is exhausted, remaining events still get
-    canonicalized — they just skip the LLM stage and fall through to
-    Stage 3 (new entity)."""
+    """When the LLM budget is exhausted, remaining events are DEFERRED, not
+    drained exact-only (ADR-0003 Phase 2, Slice 2 / G1). Draining exact-only
+    was the residual formation path — a kind flip on an existing name with no
+    LLM available minted a new cross-kind duplicate. Deferred events keep zero
+    mentions and re-surface next cycle with a fresh budget."""
     _no_sleep(monkeypatch)
     # Tighten the budget for the test.
     monkeypatch.setattr(ec, "MAX_LLM_CALLS_PER_CYCLE", 1)
@@ -598,7 +600,6 @@ def test_llm_budget_cap_drains_remaining_to_exact_or_new(
     _write_event_with_extraction(db, text="anchor", entities=[{"name": "Maya", "type": "person"}])
     EntityCanonicalizer().run(db, settings)
 
-    # Two more events with variant surface forms that won't exact-match Maya.
     call_count = 0
 
     def _llm_returns_match(**kw: Any) -> LLMResult:
@@ -620,10 +621,16 @@ def test_llm_budget_cap_drains_remaining_to_exact_or_new(
     )
 
     stats = EntityCanonicalizer().run(db, settings)
-    # LLM was budgeted to 1 call total — the second event creates a new
-    # entity without invoking the LLM.
-    assert stats["llm_calls"] <= 1
-    assert stats["entities_created"] == 2
+    # One LLM call fit in the budget (Alice); the second event (Bob) was
+    # deferred rather than drained exact-only.
+    assert stats["llm_calls"] == 1
+    assert stats["entities_created"] == 1
+    assert stats["events_deferred_no_budget"] == 1
+
+    # Next cycle: fresh budget → the deferred event is processed, no loss.
+    stats2 = EntityCanonicalizer().run(db, settings)
+    assert stats2["events_deferred_no_budget"] == 0
+    assert stats2["entities_created"] == 1
 
 
 # ── cascade invalidation ──────────────────────────────────────────────────
