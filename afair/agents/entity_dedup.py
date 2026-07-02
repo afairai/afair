@@ -36,6 +36,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from ..substrate.entities import (
     Entity,
+    assign_entity_kind,
     find_live_merge_from,
     resolve_canonical,
     write_entity_merge,
@@ -74,6 +75,14 @@ MERGE_CONFIDENCE_THRESHOLD = 0.75
 """Merge only on an explicit same_entity=True at or above this confidence.
 Conservative on purpose — a false merge is harder to undo than a missed one."""
 
+KIND_UNIFY_CONFIDENCE = 0.9
+"""ADR-0003 Phase 2 (Slice 3): only at or above this confidence does a
+merge ALSO write kind-assignment rows unifying the cluster's kind. Set
+higher than the merge floor (0.75) on purpose — assigning a kind widens
+agent authority (it skips ``merge_review``), so it takes a stronger yes.
+Below this, the merge still lands, the kind disagreement stands, and
+``entity_audit`` files a ``merge_review`` exactly as before."""
+
 
 _TOOL_NAME = "judge_same_entity"
 _TOOL_DESCRIPTION = (
@@ -99,6 +108,15 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "type": "number",
             "description": "0.0-1.0 confidence in the same_entity decision.",
         },
+        "unified_kind": {
+            "type": ["string", "null"],
+            "description": (
+                "When same_entity is true, the single kind that best "
+                "describes the real-world thing. MUST be copied EXACTLY "
+                "from one of the 'kind' values shown in the records; use "
+                "null if unsure. The system discards any value not shown."
+            ),
+        },
     },
     "required": ["same_entity", "confidence"],
 }
@@ -116,6 +134,11 @@ Merge (same_entity=true) only when the surrounding context makes it clear
 the records describe one and the same thing. Genuine homonyms (a company
 and a concept, a person and a project) are same_entity=false.
 
+When same_entity is true, also set unified_kind to the single kind that
+best describes the real-world thing — copied EXACTLY from one of the
+'kind' values shown in the records (not a new word). Leave it null if
+you're unsure which shown kind is right.
+
 Use the judge_same_entity tool exactly once.
 """
 
@@ -130,6 +153,7 @@ class _Verdict(BaseModel):
     same_entity: bool
     reason: str = ""
     confidence: float = 0.0
+    unified_kind: str | None = None
 
 
 class EntityDeduplicator(ColdPathWorker):
@@ -143,6 +167,7 @@ class EntityDeduplicator(ColdPathWorker):
             "clusters_examined": 0,
             "clusters_merged": 0,
             "entities_merged": 0,
+            "kinds_unified": 0,
             "skipped_already_merged": 0,
             "skipped_operator_governed": 0,
             "skipped_recent_decision": 0,
@@ -203,13 +228,16 @@ class EntityDeduplicator(ColdPathWorker):
                 )
                 continue
 
+            unified = _unify_cluster_kind(conn, members=members, verdict=verdict)
             merged = _merge_into_densest(conn, members=members, verdict=verdict)
             stats["clusters_merged"] += 1
             stats["entities_merged"] += merged
+            stats["kinds_unified"] += unified
             log.info(
                 "entity_dedup.merged",
                 entity=key,
                 merged=merged,
+                kinds_unified=unified,
                 confidence=verdict.confidence,
             )
 
@@ -222,6 +250,7 @@ class EntityDeduplicator(ColdPathWorker):
                 f"examined={stats['clusters_examined']} "
                 f"merged={stats['clusters_merged']} "
                 f"entities_merged={stats['entities_merged']} "
+                f"kinds_unified={stats['kinds_unified']} "
                 f"kept_separate={stats['skipped_not_same']} "
                 f"skipped_operator_governed={stats['skipped_operator_governed']} "
                 f"skipped_recent={stats['skipped_recent_decision']} "
@@ -444,18 +473,79 @@ def _judge(*, members: list[_Member], model: str, api_key: str | None) -> _Verdi
         max_tokens=300,
     )
     data = result.data
+    raw_unified = data.get("unified_kind")
+    unified_kind = (
+        raw_unified.strip() if isinstance(raw_unified, str) and raw_unified.strip() else None
+    )
     return _Verdict(
         same_entity=bool(data.get("same_entity", False)),
         reason=str(data.get("reason", "")),
         confidence=float(data.get("confidence", 0.0)),
+        unified_kind=unified_kind,
     )
+
+
+def _valid_unified_kind(verdict: _Verdict, members: list[_Member]) -> str | None:
+    """The verdict's ``unified_kind`` iff it is one of the kinds actually
+    shown in the records, else None.
+
+    Candidate-set binding (Security L1, same pattern the canonicalizer uses
+    to bind an LLM match to the shown candidate ids): a hallucinated or
+    injected kind that is not in ``{m.entity.kind}`` is discarded — the
+    slug can only be one of the members' current registry-resolved kinds,
+    so nothing invents a kind (I6).
+    """
+    if verdict.unified_kind is None:
+        return None
+    shown = {m.entity.kind for m in members}
+    return verdict.unified_kind if verdict.unified_kind in shown else None
+
+
+def _unify_cluster_kind(
+    conn: sqlite3.Connection, *, members: list[_Member], verdict: _Verdict
+) -> int:
+    """Write one ``assign_entity_kind`` row per member whose current kind
+    differs from the confidently-agreed unified kind. Returns the count.
+
+    ADR-0003 Phase 2 (Slice 3): a kind disagreement inside a same-entity
+    cluster becomes a kind-assignment revision, not merge_review debt —
+    the property the decoupling was built for. Gated on
+    ``KIND_UNIFY_CONFIDENCE`` (higher than the merge floor): assigning a
+    kind widens agent authority, so it takes a stronger yes. Each row is
+    fully attributed (author, reason, confidence) and reversed by one
+    newer assignment (an operator retype always lands later → latest-row-
+    wins, I7).
+    """
+    unified = _valid_unified_kind(verdict, members)
+    if unified is None or verdict.confidence < KIND_UNIFY_CONFIDENCE:
+        return 0
+    assigned = 0
+    for m in members:
+        if m.entity.kind == unified:
+            continue
+        assign_entity_kind(
+            conn,
+            entity_id=m.entity.id,
+            kind_slug=unified,
+            assigned_by=DEDUP_PRODUCED_BY,
+            reason=(f"same-name dedup unified kind → {unified}: " + verdict.reason)[:500],
+            confidence=verdict.confidence,
+        )
+        assigned += 1
+    return assigned
 
 
 def _merge_into_densest(
     conn: sqlite3.Connection, *, members: list[_Member], verdict: _Verdict
 ) -> int:
     """Merge every member into the one with the most mentions. Returns the
-    number of merge rows written."""
+    number of merge rows written.
+
+    Kind unification (:func:`_unify_cluster_kind`) is applied by the caller
+    in the same pass, so a unified cluster shows equal kinds on both sides
+    of the merge — ``entity_audit.find_cross_kind_auto_merges`` then files
+    no ``merge_review`` for it (G3).
+    """
     # members arrive mention-count desc; the target is the densest.
     target = members[0].entity
     merged = 0
