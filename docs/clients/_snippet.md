@@ -58,6 +58,11 @@ correction without asking me first.
 
 - Don't ask "should I remember this?" Just remember.
 - Don't ask "should I check?" Just recall.
+- Every `recall` result carries `pending_corrections_count`. When it's
+  above zero and you haven't mentioned it this session (or the number
+  changed), tell me once: "you have N memories to review" and offer to
+  walk them with `recall(stats=True)` then `recall(decide=...)`. Don't
+  repeat the nudge on every recall, and never decide without asking me.
 - Long text (docs, transcripts, code): pass directly through
   `remember(content=...)`, no truncation.
 - Files (PDFs, images, audio) over a few MB: upload via the MCP blob
@@ -111,3 +116,8 @@ like:
   meaningful actions.
 
 Refinements here are append-only: note the date, what was added, why.
+
+- 2026-07-02: added the `pending_corrections_count` nudge bullet. The
+  review queue was accumulating silently because a plain `recall` never
+  surfaced the count (the list is gated behind `stats`/`decide`), so
+  nothing prompted the operator to work it down.
