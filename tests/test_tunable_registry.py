@@ -265,3 +265,49 @@ def test_tuner_state_no_update_no_delete(conn) -> None:
         conn.execute("UPDATE tuner_state SET rationale = 'changed' WHERE id = ?", (e.id,))
     with pytest.raises(_sqlite3.IntegrityError, match="append-only"), conn:
         conn.execute("DELETE FROM tuner_state WHERE id = ?", (e.id,))
+
+
+# ── ADR-0004 S8: edge-confidence + belief tunables ──────────────────────────
+
+
+def _spec(worker: str, tunable: str) -> TunableSpec:
+    return next(s for s in REGISTRY if s.worker == worker and s.tunable == tunable)
+
+
+def test_edge_confidence_tunables_registered_with_module_defaults() -> None:
+    from afair.substrate.belief import _MIN_AUTO_CONFIRM_CONFIDENCE
+    from afair.substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION
+
+    assert _spec("edge_confidence", "base_rate").default == DEFAULT_BASE_RATE
+    assert _spec("edge_confidence", "corroboration_weight").default == W_CORROBORATION
+    assert _spec("belief", "auto_confirm_floor").default == _MIN_AUTO_CONFIRM_CONFIDENCE
+
+
+def test_edge_confidence_bounds_reject_out_of_range() -> None:
+    base = _spec("edge_confidence", "base_rate")
+    # Above max (0.85) is rejected.
+    with pytest.raises(ChangeRejected):
+        validate_change(spec=base, current=0.70, proposed=0.95)
+    # A small in-bounds move passes.
+    validate_change(spec=base, current=0.70, proposed=0.73)
+
+    floor = _spec("belief", "auto_confirm_floor")
+    with pytest.raises(ChangeRejected):
+        validate_change(spec=floor, current=0.75, proposed=0.50)  # below min 0.60
+    validate_change(spec=floor, current=0.75, proposed=0.78)
+
+
+def test_registry_resolves_promoted_edge_confidence_value(conn) -> None:
+    r = TunableRegistry(conn)
+    assert r.get("edge_confidence", "base_rate") == 0.70  # default
+    tuner_state.write(
+        conn,
+        kind="promote",
+        worker="edge_confidence",
+        tunable="base_rate",
+        old_value=0.70,
+        new_value=0.75,
+        rationale="test",
+    )
+    r.invalidate("edge_confidence", "base_rate")
+    assert r.get("edge_confidence", "base_rate") == 0.75

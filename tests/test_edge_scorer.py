@@ -526,3 +526,29 @@ def test_migrate_widens_kind_check_preserving_rows(db: sqlite3.Connection) -> No
         )
     # Idempotent: a second migrate is a no-op.
     assert migrate_proposed_corrections_kind_check(db) is False
+
+
+# ── ADR-0004 S8: tuner-resolved weights ─────────────────────────────────────
+
+
+def test_promoted_base_rate_changes_next_score(db: sqlite3.Connection, settings: Settings) -> None:
+    from afair.substrate import tuner_state
+
+    _ev, _s, _o, edge = _seed_edge(db)
+    EdgeConfidenceScorer().run(db, settings)
+    before = latest_edge_scores_batch(db, [edge.id])[edge.id].confidence
+
+    # Promote base_rate up → a higher prior → a higher computed score. The
+    # scorer builds a fresh registry each cycle, so the next run picks it up.
+    tuner_state.write(
+        db,
+        kind="promote",
+        worker="edge_confidence",
+        tunable="base_rate",
+        old_value=0.70,
+        new_value=0.85,
+        rationale="test",
+    )
+    EdgeConfidenceScorer().run(db, settings)
+    after = latest_edge_scores_batch(db, [edge.id])[edge.id].confidence
+    assert after > before

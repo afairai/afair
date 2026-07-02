@@ -640,3 +640,36 @@ def test_coverage_flags_low_confidence_proposed_edges_only(ctx: ServerContext) -
     assert result.coverage is not None
     assert result.coverage.low_confidence_edges == 1
     assert any("low-confidence beliefs" in c for c in result.coverage.caveats)
+
+
+def test_promoted_floor_quarantines_stronger_edges(ctx: ServerContext) -> None:
+    """ADR-0004 S8 end-to-end: raising belief.auto_confirm_floor above an edge's
+    served confidence flips it from auto_confirmed to proposed at recall time."""
+    from afair.substrate import tuner_state
+
+    _seed_edge_directly(
+        ctx,
+        text="Sajinth runs Athara",
+        subject="Sajinth",
+        predicate="runs",
+        obj="Athara",
+        column_confidence=0.8,
+        score_confidence=0.8,
+    )
+    r1 = handlers.recall(query="Sajinth", depth="shallow")
+    hit1 = next(h for h in r1.hits if h.interpretation and h.interpretation.get("entity_edges"))
+    assert hit1.interpretation["entity_edges"][0]["trust"] == "auto_confirmed"  # type: ignore[index]
+
+    # Promote the floor above 0.8 — a fresh registry per recall reads it live.
+    tuner_state.write(
+        ctx.db,
+        kind="promote",
+        worker="belief",
+        tunable="auto_confirm_floor",
+        old_value=0.75,
+        new_value=0.85,
+        rationale="test",
+    )
+    r2 = handlers.recall(query="Sajinth", depth="shallow")
+    hit2 = next(h for h in r2.hits if h.interpretation and h.interpretation.get("entity_edges"))
+    assert hit2.interpretation["entity_edges"][0]["trust"] == "proposed"  # type: ignore[index]

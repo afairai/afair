@@ -209,6 +209,47 @@ REGISTRY: tuple[TunableSpec, ...] = (
             "the evolver proposes promoting it to a registry kind."
         ),
     ),
+    # ── edge-confidence model (ADR-0004) ──────────────────────────────
+    # The intercept + corroboration weight of the log-odds edge-confidence
+    # model, and the served-confidence floor the quarantine gate uses. The
+    # model's STRUCTURE (the terms, the sigmoid, the scorer itself) stays off
+    # the tunable surface per I7; only these three scalars drift, within hard
+    # bounds, on the evidence of calibration_report.
+    TunableSpec(
+        worker="edge_confidence",
+        tunable="base_rate",
+        kind="float",
+        default=0.70,
+        min_value=0.55,
+        max_value=0.85,
+        bounded_delta=0.10,
+        rationale=(
+            "Prior probability an evidence-gated agent-derived edge is true; "
+            "the calibration intercept."
+        ),
+    ),
+    TunableSpec(
+        worker="edge_confidence",
+        tunable="corroboration_weight",
+        kind="float",
+        default=0.8,
+        min_value=0.2,
+        max_value=2.0,
+        bounded_delta=0.20,
+        rationale=("Log-odds added per doubling of independent corroborating source events."),
+    ),
+    TunableSpec(
+        worker="belief",
+        tunable="auto_confirm_floor",
+        kind="float",
+        default=0.75,
+        min_value=0.60,
+        max_value=0.90,
+        bounded_delta=0.10,
+        rationale=(
+            "Served-confidence floor below which a derived edge is quarantined as proposed."
+        ),
+    ),
     # NOTE: extractor prompt-variant pools (per kind: text / pdf / audio
     # / vision) are intentionally NOT in the initial whitelist. They
     # need a separate "prompt variant pool" plumbing (Phase C) before

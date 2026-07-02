@@ -441,6 +441,14 @@ class Tuner(ColdPathWorker):
             "pre_promote_baseline": baseline,
             "judge_prompt_version": "v0:2026-06-03",
         }
+        # For the edge-confidence + belief tunables, the calibration report
+        # (served confidence vs the operator's edge verdicts) is the ground-truth
+        # evidence a promote rides on (ADR-0004 S8). Read-only; attaching it
+        # never changes promote logic — promote_enabled stays False by default.
+        if worker in ("edge_confidence", "belief"):
+            from ..substrate.confidence import calibration_report
+
+            promote_evidence["calibration"] = calibration_report(conn)
         try:
             record_change(
                 registry,
