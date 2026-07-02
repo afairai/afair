@@ -29,6 +29,7 @@ from ..agents.blob_sweeper import OrphanBlobSweeper
 from ..agents.cold_path import ColdPathScheduler
 from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
+from ..agents.edge_scorer import EdgeConfidenceScorer
 from ..agents.embedding import embed_text
 from ..agents.entity_articles import EntityArticleWorker
 from ..agents.entity_audit import EntityAuditWorker
@@ -136,6 +137,7 @@ def build_server(settings: Settings) -> FastMCP:
                 Consolidator(),
                 EntityCanonicalizer(),
                 EntityDeduplicator(),
+                EdgeConfidenceScorer(),
                 EntityArticleWorker(),
                 TemporalWorker(),
                 SalienceWorker(),

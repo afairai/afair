@@ -12,19 +12,26 @@ gets a sensible score from crispness + corroboration alone. The full per-term
 breakdown is returned alongside the score and stored next to it, so "why 0.63?"
 always has an answer.
 
-No DB, no LLM, no I/O — this mirrors ``belief.py``'s pure-logic style. The
-cold-path scorer (``agents/edge_scorer.py``) and the canonicalizer recover the
-signals from the substrate and call in here.
+The SCORING model is pure (no DB, no LLM, no I/O) — it mirrors ``belief.py``'s
+style; the cold-path scorer (``agents/edge_scorer.py``) and the canonicalizer
+recover the signals from the substrate and call in here. The one exception is
+:func:`calibration_report`, a measurement helper at the bottom that reads the
+operator's ``edge_reviews`` verdicts to check how well the priors match reality
+— it takes a connection because the ground truth lives in the substrate.
 """
 
 from __future__ import annotations
 
 from math import exp, log, log2
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from .belief import predicate_is_crisp
+from .edge_confidence import latest_edge_confidence_batch
+
+if TYPE_CHECKING:
+    import sqlite3
 
 EDGE_CONFIDENCE_VERSION = "edge_confidence:v1"
 """Stamped into edge_confidence_scores.computed_by. Bump to re-derive (I7)."""
@@ -192,3 +199,108 @@ def compute_edge_confidence(
         "z": z,
     }
     return confidence, components
+
+
+# ── calibration (ADR-0004 "Calibration") ───────────────────────────────────
+
+CALIBRATION_MIN_REVIEWS = 20
+"""Below this many labeled edges (with >= 5 in each class) the calibration
+report is "insufficient" and nothing moves — the bootstrap needs a real sample
+before the numbers mean anything."""
+
+_CALIBRATION_BUCKETS: tuple[tuple[float, float], ...] = (
+    (0.0, 0.25),
+    (0.25, 0.5),
+    (0.5, 0.75),
+    (0.75, 1.0),
+)
+
+
+def calibration_report(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Measure how well served confidences match the operator's verdicts.
+
+    Joins the latest ``edge_reviews`` verdict per edge with that edge's SERVED
+    confidence (latest score, else the stored column) and reports, per
+    confidence bucket, the observed confirm-rate vs the mean predicted
+    confidence, plus an overall Brier score. This is the calibration target the
+    ADR names: an edge served at 0.9 should be confirmed ~90% of the time.
+
+    Returns ``sufficient=False`` (and moves nothing) until there are at least
+    ``CALIBRATION_MIN_REVIEWS`` reviewed edges with >= 5 in each class. Pure
+    read — no writes, no LLM.
+    """
+    verdict_rows = conn.execute(
+        "SELECT edge_id, verdict FROM edge_reviews ORDER BY reviewed_at ASC, id ASC"
+    ).fetchall()
+    # Ascending overwrite → latest verdict per edge.
+    latest_verdict = {r["edge_id"]: r["verdict"] for r in verdict_rows}
+    empty: dict[str, Any] = {
+        "reviewed": 0,
+        "confirmed": 0,
+        "rejected": 0,
+        "brier": None,
+        "buckets": [],
+        "sufficient": False,
+    }
+    if not latest_verdict:
+        return empty
+
+    edge_ids = list(latest_verdict)
+    served = latest_edge_confidence_batch(conn, edge_ids)
+    placeholders = ",".join("?" * len(edge_ids))
+    col_rows = conn.execute(
+        f"SELECT id, confidence FROM entity_edges WHERE id IN ({placeholders})",
+        edge_ids,
+    ).fetchall()
+    column = {r["id"]: float(r["confidence"]) for r in col_rows}
+
+    bucket_state = [
+        {"lo": lo, "hi": hi, "n": 0, "confirmed": 0, "sum_pred": 0.0}
+        for lo, hi in _CALIBRATION_BUCKETS
+    ]
+    confirmed = 0
+    rejected = 0
+    brier_sum = 0.0
+    scored = 0
+    for edge_id, verdict in latest_verdict.items():
+        if verdict not in ("confirm", "reject"):
+            continue
+        predicted = served.get(edge_id, column.get(edge_id))
+        if predicted is None:
+            continue  # edge row gone (shouldn't happen; defensive)
+        outcome = 1.0 if verdict == "confirm" else 0.0
+        if verdict == "confirm":
+            confirmed += 1
+        else:
+            rejected += 1
+        brier_sum += (predicted - outcome) ** 2
+        scored += 1
+        for i, (lo, hi) in enumerate(_CALIBRATION_BUCKETS):
+            # Top bucket is closed on the right so a served 0.99 lands in it.
+            in_bucket = lo <= predicted < hi or (
+                i == len(_CALIBRATION_BUCKETS) - 1 and predicted <= hi
+            )
+            if in_bucket:
+                bucket_state[i]["n"] += 1
+                bucket_state[i]["confirmed"] += int(outcome)
+                bucket_state[i]["sum_pred"] += predicted
+                break
+
+    buckets = [
+        {
+            "lo": b["lo"],
+            "hi": b["hi"],
+            "n": b["n"],
+            "confirm_rate": (b["confirmed"] / b["n"]) if b["n"] else None,
+            "mean_predicted": (b["sum_pred"] / b["n"]) if b["n"] else None,
+        }
+        for b in bucket_state
+    ]
+    return {
+        "reviewed": scored,
+        "confirmed": confirmed,
+        "rejected": rejected,
+        "brier": (brier_sum / scored) if scored else None,
+        "buckets": buckets,
+        "sufficient": scored >= CALIBRATION_MIN_REVIEWS and confirmed >= 5 and rejected >= 5,
+    }
