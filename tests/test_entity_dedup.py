@@ -13,8 +13,8 @@ from afair.settings import Settings
 from afair.substrate import open_db, write_event
 from afair.substrate.corrections import DECIDED_BY_OPERATOR
 from afair.substrate.entities import (
+    entity_id,
     resolve_canonical,
-    write_entity,
     write_entity_mention,
     write_entity_merge,
     write_merge_invalidation,
@@ -32,12 +32,15 @@ def conn(tmp_path):
 
 
 def _seed_entity(conn, *, name: str, kind: str, n_mentions: int) -> str:
-    """Create an entity under (name, kind) with n_mentions source events.
+    """Create a v1 (kind-in-hash) entity under (name, kind) with n_mentions.
 
-    write_entity is idempotent on (name, kind), so the mentions all attach
-    to the one entity. Returns its id.
+    The deduplicator's realistic target is the v1 backlog: same-name entities
+    that split across kinds because the v1 hash baked the kind into identity.
+    Seeding v1 (direct insert, no entity_identities row) also keeps these
+    clusters clear of the Slice-4 deliberate-split guard, which only fires on
+    v2 split identities. Returns the entity id.
     """
-    entity_id = ""
+    eid = entity_id(name, kind)
     for i in range(n_mentions):
         event = write_event(
             conn,
@@ -45,18 +48,19 @@ def _seed_entity(conn, *, name: str, kind: str, n_mentions: int) -> str:
             kind="remember",
             payload={"content_type": "text", "text": f"{name} {kind} note {i}"},
         )
-        entity = write_entity(
-            conn,
-            canonical_name=name,
-            kind=kind,
-            created_by="test",
-            source_event_id=event.id,
-            confidence=0.9,
-        )
-        entity_id = entity.id
+        with conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO entities (
+                    id, canonical_name, kind, created_at, created_by,
+                    confidence, source_event_id
+                ) VALUES (?, ?, ?, '2026-01-01T00:00:00+00:00', 'test', 0.9, ?)
+                """,
+                (eid, name, kind, event.id),
+            )
         write_entity_mention(
             conn,
-            entity_id=entity.id,
+            entity_id=eid,
             event_id=event.id,
             event_hash=event.content_hash,
             surface_form=name,
@@ -64,7 +68,7 @@ def _seed_entity(conn, *, name: str, kind: str, n_mentions: int) -> str:
             match_method="exact",
             confidence=0.9,
         )
-    return entity_id
+    return eid
 
 
 def _stub_judge(monkeypatch, *, same: bool, confidence: float, counter: dict | None = None):

@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from ..substrate.entities import (
+    ID_SCHEME_V2,
     Entity,
     assign_entity_kind,
     find_live_merge_from,
@@ -170,6 +171,7 @@ class EntityDeduplicator(ColdPathWorker):
             "kinds_unified": 0,
             "skipped_already_merged": 0,
             "skipped_operator_governed": 0,
+            "skipped_deliberate_split": 0,
             "skipped_recent_decision": 0,
             "skipped_not_same": 0,
             "llm_errors": 0,
@@ -197,6 +199,20 @@ class EntityDeduplicator(ColdPathWorker):
             # (ADR-0003 Phase 2).
             if _cluster_operator_governed(conn, [m.entity.id for m in members]):
                 stats["skipped_operator_governed"] += 1
+                continue
+
+            # ADR-0003 Phase 2 (Slice 4): respect a recorded homonym split.
+            # If every live member is a v2 split identity of this name and
+            # there are >= 2 disambiguators, the split was an explicit
+            # judgment (an LLM "none of these" or an operator) already sitting
+            # in entity_identities — re-judging risks merging what was
+            # deliberately separated. A cluster that also contains a member
+            # OUTSIDE the split set (e.g. a v1 leftover sharing the name) is
+            # judged as usual (the operator can still merge split entities
+            # explicitly through the decide loop, which flips the cluster to
+            # operator-governed above — reversal stays available, I7).
+            if _is_deliberate_split_cluster(conn, entity_key=key, members=members):
+                stats["skipped_deliberate_split"] += 1
                 continue
 
             # Already judged "keep separate" and the cluster hasn't grown
@@ -253,11 +269,39 @@ class EntityDeduplicator(ColdPathWorker):
                 f"kinds_unified={stats['kinds_unified']} "
                 f"kept_separate={stats['skipped_not_same']} "
                 f"skipped_operator_governed={stats['skipped_operator_governed']} "
+                f"skipped_deliberate_split={stats['skipped_deliberate_split']} "
                 f"skipped_recent={stats['skipped_recent_decision']} "
                 f"errors={stats['llm_errors']}"
             ),
         )
         return stats
+
+
+def _is_deliberate_split_cluster(
+    conn: sqlite3.Connection, *, entity_key: str, members: list[_Member]
+) -> bool:
+    """True if this same-name cluster is a recorded deliberate homonym split.
+
+    Deterministic (no LLM): the split signal already lives in
+    ``entity_identities.disambiguator``. The cluster is a deliberate split
+    when there are >= 2 distinct v2 disambiguators for the name AND every
+    member is one of those v2 split identities. If ANY member is outside the
+    split set (a v1 leftover row still carrying the name), return False so
+    the cluster is judged as usual — the v1 backlog is exactly what the
+    worker still drains.
+    """
+    rows = conn.execute(
+        "SELECT entity_id, disambiguator FROM entity_identities "
+        "WHERE name_lower = ? AND id_scheme = ?",
+        (entity_key, ID_SCHEME_V2),
+    ).fetchall()
+    if not rows:
+        return False
+    split_ids = {r["entity_id"] for r in rows}
+    distinct_disambiguators = {r["disambiguator"] for r in rows}
+    if len(distinct_disambiguators) < 2:
+        return False
+    return all(m.entity.id in split_ids for m in members)
 
 
 def _cluster_operator_governed(conn: sqlite3.Connection, member_ids: list[str]) -> bool:

@@ -20,9 +20,9 @@ from afair.settings import Settings
 from afair.substrate import open_db, write_event
 from afair.substrate.entities import (
     assign_entity_kind,
+    entity_id,
     resolve_canonical,
     resolve_entity_kind,
-    write_entity,
     write_entity_mention,
 )
 
@@ -41,7 +41,10 @@ def conn(tmp_path: Path):
 
 
 def _seed_entity(conn: sqlite3.Connection, *, name: str, kind: str, n_mentions: int) -> str:
-    entity_id = ""
+    """Seed a v1 (kind-in-hash) entity — the realistic dedup backlog, and
+    clear of the Slice-4 deliberate-split guard (which only fires on v2
+    split identities)."""
+    eid = entity_id(name, kind)
     for i in range(n_mentions):
         event = write_event(
             conn,
@@ -49,18 +52,19 @@ def _seed_entity(conn: sqlite3.Connection, *, name: str, kind: str, n_mentions: 
             kind="remember",
             payload={"content_type": "text", "text": f"{name} {kind} note {i}"},
         )
-        entity = write_entity(
-            conn,
-            canonical_name=name,
-            kind=kind,
-            created_by="test",
-            source_event_id=event.id,
-            confidence=0.9,
-        )
-        entity_id = entity.id
+        with conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO entities (
+                    id, canonical_name, kind, created_at, created_by,
+                    confidence, source_event_id
+                ) VALUES (?, ?, ?, '2026-01-01T00:00:00+00:00', 'test', 0.9, ?)
+                """,
+                (eid, name, kind, event.id),
+            )
         write_entity_mention(
             conn,
-            entity_id=entity.id,
+            entity_id=eid,
             event_id=event.id,
             event_hash=event.content_hash,
             surface_form=name,
@@ -68,7 +72,7 @@ def _seed_entity(conn: sqlite3.Connection, *, name: str, kind: str, n_mentions: 
             match_method="exact",
             confidence=0.9,
         )
-    return entity_id
+    return eid
 
 
 def _stub_judge(monkeypatch, *, same: bool, confidence: float, unified_kind: str | None) -> None:
