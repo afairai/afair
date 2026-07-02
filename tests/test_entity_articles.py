@@ -309,3 +309,83 @@ def test_groups_same_name_across_kinds_into_one_article(conn, monkeypatch) -> No
     assert payload["entity_kind"] == "mixed"
     assert payload["mention_count"] == 3
     assert len(payload["entity_ids"]) == 2  # both kind-variants aggregated
+
+
+# ── ADR-0004 C5: weak edges are not laundered into article prose ────────────
+
+
+def _one_edge_group(conn):
+    """Build two entities + one edge and a group over the subject. Returns
+    (group, edge)."""
+    from afair.substrate import write_entity_edge
+
+    ev = write_event(
+        conn,
+        origin="agent",
+        kind="remember",
+        payload={"content_type": "text", "text": "A advises B"},
+    )
+    a = write_entity(
+        conn,
+        canonical_name="Alpha",
+        kind="person",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.9,
+    )
+    b = write_entity(
+        conn,
+        canonical_name="Beta",
+        kind="organization",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.9,
+    )
+    edge = write_entity_edge(
+        conn,
+        subject_id=a.id,
+        predicate="advises",
+        object_id=b.id,
+        source_event_id=ev.id,
+        discovered_by="t",
+        confidence=0.8,
+    )
+    group = ea._EntityGroup(
+        entity_key="alpha",
+        canonical_name="Alpha",
+        kinds=["person"],
+        entity_ids=[a.id],
+        mention_count=3,
+        latest_mention_at="2026-01-01T00:00:00Z",
+    )
+    return group, edge
+
+
+def test_gather_edges_excludes_low_confidence(conn) -> None:
+    from afair.substrate import write_edge_confidence_score
+    from afair.substrate.confidence import EDGE_CONFIDENCE_VERSION
+
+    group, edge = _one_edge_group(conn)
+    # A 0.2 score row → excluded from the gathered triples.
+    write_edge_confidence_score(
+        conn, edge_id=edge.id, confidence=0.2, components={}, computed_by=EDGE_CONFIDENCE_VERSION
+    )
+    assert ea._gather_edges(conn, group) == []
+
+    # A later 0.8 score row (latest wins) → included.
+    write_edge_confidence_score(
+        conn, edge_id=edge.id, confidence=0.8, components={}, computed_by=EDGE_CONFIDENCE_VERSION
+    )
+    triples = ea._gather_edges(conn, group)
+    assert len(triples) == 1
+    assert triples[0]["predicate"] == "advises"
+    assert triples[0]["other"] == "Beta"
+
+
+def test_gather_edges_falls_back_to_column_above_floor(conn) -> None:
+    # No score row at all → served falls back to the column (0.8), which clears
+    # the 0.4 floor. The edge is included (current behavior preserved).
+    group, _edge = _one_edge_group(conn)
+    triples = ea._gather_edges(conn, group)
+    assert len(triples) == 1
+    assert triples[0]["other"] == "Beta"

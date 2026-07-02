@@ -48,6 +48,7 @@ from pydantic import BaseModel
 from ..agents.invalidation import write_invalidation
 from ..substrate import pipeline_events as pe
 from ..substrate import write_event
+from ..substrate.edge_confidence import latest_edge_confidence_batch
 from ..substrate.entities import iter_edges_for_entity, read_entity_by_id
 from ..substrate.events import read_event_by_hash
 from .cold_path import ColdPathWorker
@@ -82,6 +83,12 @@ individually queryable but don't bloat the prompt."""
 
 MAX_EDGES_PER_ARTICLE = 20
 """Cap on relationship triples included in the prompt."""
+
+ARTICLE_MIN_EDGE_CONFIDENCE = 0.4
+"""Served-confidence floor for an edge to feed article prose (ADR-0004 C5).
+Below it, a weak belief is a guess the synthesizer must not launder into a
+confident sentence. Rejected edges are already dropped by invalidation; this
+catches the low-confidence-but-not-yet-reviewed ones."""
 
 _TAG_RE = re.compile(r"</?[^>]+>")
 """Strips XML-ish list markup small models sometimes emit into array
@@ -558,30 +565,50 @@ def _gather_mentions(conn: sqlite3.Connection, group: _EntityGroup) -> list[dict
 
 
 def _gather_edges(conn: sqlite3.Connection, group: _EntityGroup) -> list[dict[str, str]]:
-    """Non-invalidated relationship triples touching the group, rendered as
-    ``{this} {predicate} {other}`` with the other entity's display name."""
-    out: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    """Non-invalidated, sufficiently-confident relationship triples touching the
+    group, rendered as ``{this} {predicate} {other}`` with the other entity's
+    display name.
+
+    ADR-0004 C5: edges whose SERVED confidence is below
+    ``ARTICLE_MIN_EDGE_CONFIDENCE`` are skipped so weak beliefs stop being
+    laundered into confident article prose. Confidence falls back to the
+    at-discovery column when no score row exists (old vaults, mid-backfill),
+    exactly as everywhere else."""
     member_ids = set(group.entity_ids)
+    # Collect the candidate edges first (deduped by id) so served confidence is
+    # fetched in ONE batched query instead of per-edge.
+    edges = []
+    seen_edge_ids: set[str] = set()
     for eid in group.entity_ids:
         for edge in iter_edges_for_entity(conn, eid):
-            if len(out) >= MAX_EDGES_PER_ARTICLE:
-                return out
-            other_id = edge.object_id if edge.subject_id in member_ids else edge.subject_id
-            other = read_entity_by_id(conn, other_id)
-            other_name = other.canonical_name if other is not None else other_id
-            direction = "→" if edge.subject_id in member_ids else "←"
-            triple = (edge.predicate, direction, other_name)
-            if triple in seen:
+            if edge.id in seen_edge_ids:
                 continue
-            seen.add(triple)
-            out.append(
-                {
-                    "predicate": edge.predicate,
-                    "direction": direction,
-                    "other": other_name,
-                }
-            )
+            seen_edge_ids.add(edge.id)
+            edges.append(edge)
+    served = latest_edge_confidence_batch(conn, [e.id for e in edges])
+
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for edge in edges:
+        if len(out) >= MAX_EDGES_PER_ARTICLE:
+            break
+        if served.get(edge.id, edge.confidence) < ARTICLE_MIN_EDGE_CONFIDENCE:
+            continue  # weak belief — do not launder into confident prose
+        other_id = edge.object_id if edge.subject_id in member_ids else edge.subject_id
+        other = read_entity_by_id(conn, other_id)
+        other_name = other.canonical_name if other is not None else other_id
+        direction = "→" if edge.subject_id in member_ids else "←"
+        triple = (edge.predicate, direction, other_name)
+        if triple in seen:
+            continue
+        seen.add(triple)
+        out.append(
+            {
+                "predicate": edge.predicate,
+                "direction": direction,
+                "other": other_name,
+            }
+        )
     return out
 
 
