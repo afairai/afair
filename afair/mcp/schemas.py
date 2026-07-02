@@ -540,6 +540,15 @@ MAX_OBSERVE_ACTION_CHARS = 200
 MAX_OBSERVE_SUBJECT_CHARS = 1_000
 MAX_OBSERVE_RESULT_CHARS = 2_000
 MAX_OBSERVE_EXTRAS_BYTES = 64 * 1024
+
+_OBSERVE_FIELD_CAPS = {
+    "action": MAX_OBSERVE_ACTION_CHARS,
+    "subject": MAX_OBSERVE_SUBJECT_CHARS,
+    "result": MAX_OBSERVE_RESULT_CHARS,
+}
+"""Per-field character caps for the write-first truncation in
+``ObserveEvent._accept_first``. Over-long values are truncated to the cap
+and the full original preserved under ``<field>_full`` rather than rejected."""
 """Caps for observe() inputs. ``extras`` is the free-form open dict; the
 size cap and nesting check below stop deeply-nested JSON bombs and
 extras floods that would inflate FTS index / SQLite payload row."""
@@ -564,22 +573,43 @@ class ObserveEvent(BaseModel):
     @classmethod
     def _accept_first(cls, data: Any) -> Any:
         """Write-first intake: an ``observe`` is never rejected for a missing
-        action. ``action`` is the only hard requirement, so we default it rather
-        than drop the event (same principle as remember's content coercion).
+        action or for an over-long field. ``action`` is the only hard
+        requirement, so we default it rather than drop the event (same
+        principle as remember's content coercion).
 
         - a dict without a usable ``action`` -> action defaults to 'observed'.
         - a bare string -> that string becomes the action.
         - anything else -> kept under a default action so it is still logged.
+
+        Over-long ``action`` / ``subject`` / ``result`` are truncated to their
+        caps so the Field length constraints never reject a real payload; the
+        full original is preserved verbatim under ``<field>_full`` (I2 spirit —
+        nothing the caller sent is lost). A live client that stuffs a whole
+        JSON blob into ``action`` therefore persists rather than being dropped
+        at the signature layer.
         """
         if isinstance(data, dict):
-            action = data.get("action")
+            coerced = dict(data)
+            action = coerced.get("action")
             if not isinstance(action, str) or not action.strip():
-                return {**data, "action": "observed"}
-            return data
+                coerced["action"] = "observed"
+            return cls._truncate_long_fields(coerced)
         if isinstance(data, str):
-            return {"action": data.strip() or "observed"}
+            return cls._truncate_long_fields({"action": data.strip() or "observed"})
         dump = json.dumps(data, ensure_ascii=False, default=str)
-        return {"action": "observed", "result": dump[:MAX_OBSERVE_RESULT_CHARS]}
+        return cls._truncate_long_fields({"action": "observed", "result": dump})
+
+    @staticmethod
+    def _truncate_long_fields(data: dict[str, Any]) -> dict[str, Any]:
+        """Truncate over-long ``action`` / ``subject`` / ``result`` to their
+        caps, preserving the full original under ``<field>_full`` so the
+        Field constraints never fire on real input and no data is lost."""
+        for field, cap in _OBSERVE_FIELD_CAPS.items():
+            value = data.get(field)
+            if isinstance(value, str) and len(value) > cap:
+                data[f"{field}_full"] = value
+                data[field] = value[:cap]
+        return data
 
     @model_validator(mode="after")
     def _bound_extras(self) -> ObserveEvent:

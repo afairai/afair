@@ -16,6 +16,7 @@ change (no compliant caller depended on infinite-length lists).
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,7 +24,7 @@ import pytest
 from afair.mcp import handlers, schemas
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.mcp.schemas import BinaryContent, ObserveEvent, TextContent
-from afair.substrate import open_db
+from afair.substrate import open_db, read_event_by_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -162,9 +163,53 @@ def test_observe_extras_within_bounds_accepted() -> None:
     assert e.action == "edited_file"
 
 
-def test_observe_action_long_rejected_by_pydantic() -> None:
-    with pytest.raises(ValueError, match="action"):
-        ObserveEvent(action="x" * (schemas.MAX_OBSERVE_ACTION_CHARS + 1))
+def test_observe_action_long_coerced_and_preserved() -> None:
+    """Write-first intake (v0.1.3): an over-long ``action`` is never rejected
+    at the pydantic signature layer. It is truncated to the cap and the full
+    original preserved under ``action_full`` so nothing the caller sent is lost.
+    """
+    original = "x" * (schemas.MAX_OBSERVE_ACTION_CHARS + 1)
+    e = ObserveEvent(action=original)
+    assert e.action == "x" * schemas.MAX_OBSERVE_ACTION_CHARS
+    assert e.action_full == original  # type: ignore[attr-defined]
+
+
+def test_observe_subject_and_result_long_coerced_and_preserved() -> None:
+    """Same write-first coercion for the ``subject`` and ``result`` fields."""
+    long_subject = "s" * (schemas.MAX_OBSERVE_SUBJECT_CHARS + 5)
+    long_result = "r" * (schemas.MAX_OBSERVE_RESULT_CHARS + 5)
+    e = ObserveEvent(action="ok", subject=long_subject, result=long_result)
+    assert e.subject == "s" * schemas.MAX_OBSERVE_SUBJECT_CHARS
+    assert e.result == "r" * schemas.MAX_OBSERVE_RESULT_CHARS
+    assert e.subject_full == long_subject  # type: ignore[attr-defined]
+    assert e.result_full == long_result  # type: ignore[attr-defined]
+
+
+def test_observe_long_action_json_blob_persists_to_vault(ctx: ServerContext) -> None:
+    """Regression for AFAIR-H / AFAIR-3: a live client stuffed a whole JSON blob
+    (well over 200 chars) into ``action``. Pydantic's ``max_length`` used to
+    reject it at the FastMCP signature layer BEFORE the tolerant intake
+    validator ran, so the observation was silently dropped ("...NOT persisted to
+    vault"). It must now persist: truncated ``action`` in the vault plus the
+    full original under ``action_full``.
+    """
+    blob = json.dumps(
+        {
+            "tool": "edit_file",
+            "path": "afair/agents/extractor.py",
+            "note": "long structured payload the client packed into action " + "z" * 300,
+        }
+    )
+    assert len(blob) > schemas.MAX_OBSERVE_ACTION_CHARS
+
+    r = handlers.observe(event=ObserveEvent.model_validate({"action": blob}))
+    assert r.ok is True
+
+    stored = read_event_by_hash(ctx.db, r.content_hash)
+    assert stored is not None
+    payload = stored.payload
+    assert payload["action"] == blob[: schemas.MAX_OBSERVE_ACTION_CHARS]
+    assert payload["action_full"] == blob
 
 
 # ── existing behavior preserved (no regression) ────────────────────────────
