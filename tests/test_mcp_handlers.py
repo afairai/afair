@@ -12,6 +12,7 @@ from afair.mcp import handlers
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.mcp.handlers import InvalidRecallArgsError
 from afair.mcp.schemas import (
+    MAX_OBSERVE_ACTION_CHARS,
     MAX_REMEMBER_BYTES,
     BinaryContent,
     ObserveEvent,
@@ -329,6 +330,31 @@ def test_observe_bare_string_becomes_action() -> None:
     assert ObserveEvent.model_validate("did a thing").action == "did a thing"
 
 
+def test_observe_stringified_object_parsed_and_truncated() -> None:
+    # T10: a JSON-serialized event string decodes to its fields (action/subject),
+    # and an over-long action still truncates with the full value preserved —
+    # the JSON-string decode composes with the AFAIR-H truncation.
+    import json
+
+    long_action = "x" * 250
+    e = ObserveEvent.model_validate(json.dumps({"action": long_action, "subject": "s"}))
+    assert e.subject == "s"
+    assert len(e.action) == MAX_OBSERVE_ACTION_CHARS
+    dumped = e.model_dump()
+    assert dumped["action_full"] == long_action
+
+
+def test_observe_stringified_non_dict_falls_back_to_action() -> None:
+    # T10: a string that json-parses to a non-dict (a quoted JSON string) is not
+    # an object, so the ORIGINAL string lands as the action verbatim — nothing
+    # is lost (matches the remember non-dict fallback).
+    import json
+
+    raw = json.dumps("quoted json string")  # -> '"quoted json string"'
+    e = ObserveEvent.model_validate(raw)
+    assert e.action == raw
+
+
 # ── remember: write-first content coercion (never lose a memory) ─────────────
 
 _content = TypeAdapter(RememberContentInput)
@@ -361,6 +387,24 @@ def test_remember_valid_content_passes_through_unchanged() -> None:
     out = _content.validate_python({"type": "text", "text": "hi"})
     assert isinstance(out, TextContent)
     assert out.text == "hi"
+
+
+def test_remember_content_stringified_object_parsed() -> None:
+    # T9: a JSON-serialized object string decodes to the intended object,
+    # not stored as literal text.
+    import json
+
+    out = _content.validate_python(json.dumps({"type": "text", "text": "hi there"}))
+    assert isinstance(out, TextContent)
+    assert out.text == "hi there"
+
+
+def test_remember_content_stringified_non_dict_falls_back_to_text() -> None:
+    # T9: a string that json-parses to a non-dict (list/number/bool) is NOT an
+    # object, so it falls to the bare-string tolerance and is stored verbatim.
+    out = _content.validate_python("[1, 2, 3]")
+    assert isinstance(out, TextContent)
+    assert out.text == "[1, 2, 3]"
 
 
 def test_observe_preserves_extra_fields(ctx: ServerContext) -> None:

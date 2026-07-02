@@ -261,6 +261,66 @@ async def test_remember_stringified_binary_stored_as_binary(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_observe_bare_string_event_becomes_action(tmp_path: Path) -> None:
+    """T5: a bare non-JSON event string still becomes the action (pin)."""
+    server = build_server(_settings_for(tmp_path))
+    result = await server.call_tool("observe", {"event": "just did a thing"})
+    data = _tool_data(result)
+    assert data["ok"] is True
+
+    recall = await server.call_tool("recall", {"by_id": data["event_id"], "full_payload": True})
+    payload = _tool_data(recall)["hits"][0]["payload"]
+    assert payload["action"] == "just did a thing"
+
+
+def _string_alt_present(node: dict) -> bool:
+    """A plain-string member (no const tag, no object properties) is advertised."""
+    members = node.get("anyOf", [node])
+    return any(
+        m.get("type") == "string" and "const" not in m and "properties" not in m for m in members
+    )
+
+
+def _discriminator_tags(node: dict) -> set[str]:
+    tags: set[str] = set()
+
+    def walk(m: dict) -> None:
+        const = m.get("properties", {}).get("type", {})
+        if "const" in const:
+            tags.add(const["const"])
+        for sub in m.get("oneOf", []) + m.get("anyOf", []):
+            walk(sub)
+
+    for m in node.get("anyOf", [node]):
+        walk(m)
+    return tags
+
+
+@pytest.mark.asyncio
+async def test_advertised_input_schema_is_i1_superset(tmp_path: Path) -> None:
+    """T8: the advertised inputSchema is a strict SUPERSET of the prior contract.
+
+    Every object variant that was valid before stays valid (all four remember
+    content tags; the observe event object), and a string alternative is added.
+    Locks the I1-additive guarantee so a future change can't silently drop the
+    string acceptance or a content variant from the frozen surface.
+    """
+    server = build_server(_settings_for(tmp_path))
+    tools = {t.name: t for t in await server.list_tools()}
+
+    content = tools["remember"].parameters["properties"]["content"]
+    assert _discriminator_tags(content) == {"text", "binary", "blob-ref", "compound"}
+    assert _string_alt_present(content), "remember.content must advertise a string alt"
+
+    event = tools["observe"].parameters["properties"]["event"]
+    event_members = event.get("anyOf", [event])
+    assert any(m.get("type") == "object" for m in event_members), (
+        "observe.event must still advertise its object form"
+    )
+    assert _string_alt_present(event), "observe.event must advertise a string alt"
+
+
+@pytest.mark.asyncio
 async def test_health_endpoint_returns_ok(tmp_path: Path) -> None:
     """The /health route returns 200 OK when the substrate is healthy."""
     from starlette.testclient import TestClient

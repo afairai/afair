@@ -99,7 +99,9 @@ ARGUMENTS:
       {"type": "text", "text": "..."}                          for any text, OR
       {"type": "binary", "data_b64": "...", "mime": "image/png",
        "filename_hint": "screenshot.png"}                       for binary.
-    Max 10 MB raw bytes.
+    Max 10 MB raw bytes. A JSON-string-serialized object (the same shape
+    sent as a string) is also accepted and parsed, and a bare string is
+    stored as text — the write is never rejected on shape.
   - context: Optional. Where this came from or what it relates to.
     Examples: "email thread with Sajinth", "Tuesday standup",
     "dinner with Mara", "Mum's birthday weekend". Aids future
@@ -265,7 +267,9 @@ ARGUMENTS:
       "subject": what was acted upon (filename, person, ticket, ...)
       "result":  outcome ("success", "failed: X", free text)
     Beyond those, ANY additional fields are preserved verbatim. Use
-    whatever shape fits your agent's natural mental model.
+    whatever shape fits your agent's natural mental model. A JSON-string-
+    serialized object is also accepted and parsed, and a bare string
+    becomes the action — the event is never rejected on shape.
 
     Examples:
       {"action": "edit_file", "subject": "events.py",
