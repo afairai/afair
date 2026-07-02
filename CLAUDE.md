@@ -41,6 +41,18 @@ All of this is in daily real-world use.
 
 ### 0.2 In flight / recent
 
+- **ADR-0004 edge-confidence model (branch, all 8 slices green).** The flat 0.8
+  edge confidence is replaced by a transparent log-odds model: a write-time
+  prior in the `entity_edges.confidence` column plus an append-only
+  `edge_confidence_scores` overlay (latest-wins, column fallback). A cold-path
+  `edge_scorer` backfills the legacy rows (never mutated, I2/I3) and re-scores on
+  new corroboration / a contested source. Consumers wired: a discriminating
+  auto-confirm floor, per-edge served `confidence` + a low-confidence caveat in
+  recall (served WITH a caveat, not suppressed — operator-decided fork), the
+  `edge_review` proposal queue (giving `record_edge_review` its first production
+  caller), the article-synth filter, and three bounded tuner tunables with
+  `calibration_report` as the promote evidence (`promote_enabled` still False).
+  Not yet merged / not applied to any live vault.
 - **ADR-0003 Phase 2 made effective on the live vault.** The kind-decoupling
   (v2 identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
   (ADR-0003 now `Accepted`) closes the remaining gaps: a read-only checkup
@@ -159,6 +171,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/adr/ADR-0001-constitutional-invariants.md` | Why the eight invariants exist + why drawn this way: each negates a failure mode, the three reinforcing chains, the I2-erasure clarification, and the accepted bets (I8 economics, I3 projection discipline, I7 aspirational). Has re-examination triggers | When an invariant is re-examined or a bet resolves |
 | `docs/adr/ADR-0002-belief-revision-derived-layer.md` | Treat the entity graph as defeasible beliefs: entrenchment trust tiers (AGM), source-cascade retraction (JTMS/defeasible), evidence-grounding (= the relation fix), quarantine + auto-confirm policy (KG HITL), correction-on-recall (reconsolidation). Grounded in cited papers. Drove the `edge_reviews` table + `substrate/belief.py` | When the trust model / confirm-loop changes |
 | `docs/adr/ADR-0003-emergent-ontology.md` | Proposed design that discharges the I6 debt: entity kinds become an append-only registry (add/rename/merge/split/deprecate revisions), kind decouples from entity identity (v2 IDs + kind-assignment overlay + resolution views, no migration), and the VISION §6.5 Schema-Evolver ships as a propose-only cold-path worker gated by the ADR-0002 `recall(decide=)` confirm loop | When the ontology model / Schema-Evolver design changes |
+| `docs/adr/ADR-0004-edge-confidence-model.md` | Replaces the flat 0.8 edge confidence with a transparent log-odds model (write-time prior in the `confidence` column + append-only `edge_confidence_scores` overlay, latest-wins with column fallback). Wires the consumers: discriminating auto-confirm floor, per-edge served `confidence` + low-confidence caveat in recall, the `edge_review` proposal queue (first production caller of `record_edge_review`), the article-synthesizer filter, and three bounded tuner tunables with `calibration_report` as the evidence. Legacy edges never mutated (I2/I3); scored by the cold-path `edge_scorer`. Low-confidence edges served with a caveat, not suppressed | When the confidence model / its consumers change |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3: the open-source core license (see VISION §12) | Only on a license change |
