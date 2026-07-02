@@ -607,7 +607,12 @@ class ObserveEvent(BaseModel):
         for field, cap in _OBSERVE_FIELD_CAPS.items():
             value = data.get(field)
             if isinstance(value, str) and len(value) > cap:
-                data[f"{field}_full"] = value
+                full_key = f"{field}_full"
+                # Don't clobber a caller-supplied ``<field>_full``: keep theirs
+                # under ``<field>_full_client`` so nothing the caller sent is lost.
+                if full_key in data and data[full_key] != value:
+                    data[f"{full_key}_client"] = data[full_key]
+                data[full_key] = value
                 data[field] = value[:cap]
         return data
 

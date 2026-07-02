@@ -227,3 +227,13 @@ def test_remember_text_above_cap_raises_typed_error(ctx: ServerContext) -> None:
     text = "x" * (schemas.MAX_REMEMBER_BYTES + 1)
     with pytest.raises(handlers.ContentTooLargeError):
         handlers.remember(content=TextContent(type="text", text=text))
+
+
+def test_observe_caller_supplied_action_full_is_preserved() -> None:
+    """When action is over-long AND the caller already sent action_full, keep
+    theirs under action_full_client so nothing the caller sent is lost
+    (Fable review nit #3)."""
+    original = "x" * (schemas.MAX_OBSERVE_ACTION_CHARS + 50)
+    e = ObserveEvent.model_validate({"action": original, "action_full": "caller-provided"})
+    assert e.action_full == original  # type: ignore[attr-defined]
+    assert e.action_full_client == "caller-provided"  # type: ignore[attr-defined]
