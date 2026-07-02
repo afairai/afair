@@ -10,6 +10,7 @@ Record shape:
   {"kind": "entity",        ...canonical entity (its own kind column as "entity_kind")}
   {"kind": "entity_mention", ...mention linking an event to an entity}
   {"kind": "entity_edge",   ...directed edge between two entities}
+  {"kind": "edge_confidence_score", ...append-only served-confidence overlay row}
   {"kind": "entity_merge",  ...merge decision between two entities}
   {"kind": "edge_invalidation",  ...an edge withdrawn from the live graph}
   {"kind": "merge_invalidation", ...a merge undone (rejected) by the operator}
@@ -215,9 +216,14 @@ def _iter_export(
         # everything; entities precede their dependents (mentions, edges,
         # merges, retractions, identities, kind assignments, observations,
         # corrections); entity_merges precede merge_invalidations;
-        # entity_edges precede edge_invalidations and edge_reviews;
-        # kind_registry precedes kind_revisions. An importer that inserts
-        # in stream order never sees a dangling reference.
+        # entity_edges precede edge_confidence_scores, edge_invalidations and
+        # edge_reviews; kind_registry precedes kind_revisions. An importer that
+        # inserts in stream order never sees a dangling reference.
+        #
+        # edge_confidence_scores is technically re-derivable by the cold-path
+        # scorer, but the rows are small and the belief history ("what did the
+        # vault believe about this edge, and why") is part of what the user
+        # owns (I4 completeness), so including it costs nothing.
         #
         # Deliberately EXCLUDED, each with a reason:
         #   events_fts / events_vec — derived search indexes, rebuilt from
@@ -242,6 +248,7 @@ def _iter_export(
             ("entities", "entity"),
             ("entity_mentions", "entity_mention"),
             ("entity_edges", "entity_edge"),
+            ("edge_confidence_scores", "edge_confidence_score"),
             ("entity_merges", "entity_merge"),
             ("edge_invalidations", "edge_invalidation"),
             ("merge_invalidations", "merge_invalidation"),

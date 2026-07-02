@@ -20,6 +20,13 @@ from .corrections import (
     read_pending_corrections,
 )
 from .db import init_db, open_db
+from .edge_confidence import (
+    EDGE_CONFIDENCE_EPSILON,
+    EdgeConfidenceScore,
+    latest_edge_confidence_batch,
+    latest_edge_scores_batch,
+    write_edge_confidence_score,
+)
 from .entities import (
     EdgeInvalidation,
     EdgeReview,
@@ -121,10 +128,12 @@ from .temporal import (
 
 __all__ = [
     "BOOTSTRAP_KIND_SLUGS",
+    "EDGE_CONFIDENCE_EPSILON",
     "ONTOLOGY_PROPOSAL_ID_PREFIX",
     "SCHEMA_VERSION",
     "TEMPORAL_CLASSES",
     "CorrectionOutcome",
+    "EdgeConfidenceScore",
     "EdgeInvalidation",
     "EdgeReview",
     "Entity",
@@ -159,8 +168,10 @@ __all__ = [
     "iter_edges_for_entity",
     "iter_events",
     "iter_mentions_for_event",
+    "latest_edge_confidence_batch",
     "latest_edge_review",
     "latest_edge_reviews_batch",
+    "latest_edge_scores_batch",
     "live_kind_slugs",
     "live_kinds",
     "next_disambiguator",
@@ -203,6 +214,7 @@ __all__ = [
     "start_checkpoint_loop",
     "temporal_relevance",
     "upcoming_temporal",
+    "write_edge_confidence_score",
     "write_edge_invalidation",
     "write_entity",
     "write_entity_edge",

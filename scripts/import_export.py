@@ -31,7 +31,7 @@ Usage
 
 The output DB has tables matching the JSONL record kinds:
     events, interpretations, entities, entity_mentions, entity_edges,
-    entity_merges, edge_invalidations, merge_invalidations,
+    edge_confidence_scores, entity_merges, edge_invalidations, merge_invalidations,
     entity_retractions, edge_reviews, entity_identities,
     entity_kind_assignments, kind_registry, kind_revisions,
     kind_observations, proposed_corrections, proposed_ontology_revisions,
@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS entity_mentions (
     payload         TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS entity_edges (
+    rowid_external  INTEGER PRIMARY KEY,
+    payload         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS edge_confidence_scores (
     rowid_external  INTEGER PRIMARY KEY,
     payload         TEXT NOT NULL
 );
@@ -271,6 +275,7 @@ GENERIC_KINDS = {
     "entity": "entities",
     "entity_mention": "entity_mentions",
     "entity_edge": "entity_edges",
+    "edge_confidence_score": "edge_confidence_scores",
     "entity_merge": "entity_merges",
     "edge_invalidation": "edge_invalidations",
     "merge_invalidation": "merge_invalidations",

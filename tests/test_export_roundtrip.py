@@ -35,6 +35,7 @@ from afair.substrate import (
     resolve_entity_kind,
     retract_entity,
     retracted_entity_ids,
+    write_edge_confidence_score,
     write_entity,
     write_entity_edge,
     write_entity_merge,
@@ -154,6 +155,16 @@ def _build_vault_with_corrections_and_ontology(vault_dir: Path) -> dict[str, Any
             verdict="reject",
             reviewed_by="operator",
             reason="co-occurrence, not authorship",
+        )
+        # Belief-strength overlay (ADR-0004): a served-confidence score for
+        # the edge. Re-derivable, but part of "what did the vault believe"
+        # (I4), so it rides the export after its edge.
+        write_edge_confidence_score(
+            conn,
+            edge_id=edge.id,
+            confidence=0.42,
+            components={"version": "edge_confidence:v1", "z": -0.3},
+            computed_by="edge_confidence:v1",
         )
 
         # Ontology (ADR-0003): a kind addition, a rename, a retype
@@ -355,6 +366,7 @@ def test_roundtrip_preserves_corrections_and_ontology(vault_dir, tmp_path) -> No
     assert counts["merge_invalidation"] == 1
     assert counts["entity_retraction"] == 1
     assert counts["edge_review"] == 1
+    assert counts["edge_confidence_score"] == 1
     assert counts["kind_revision"] == 2
     assert counts["entity_kind_assignment"] == 1
     assert counts["kind_observation"] == 1
@@ -505,6 +517,7 @@ def test_export_excludes_regenerable_and_credential_tables(vault_dir) -> None:
         "event",
         "entity",
         "entity_edge",
+        "edge_confidence_score",
         "entity_merge",
         "edge_invalidation",
         "merge_invalidation",
@@ -525,3 +538,26 @@ def test_export_excludes_regenerable_and_credential_tables(vault_dir) -> None:
     assert "pipe_test_1" not in text
     assert "tok_test_1" not in text
     assert "a" * 64 not in text  # no token hash leaks into the dump
+
+
+def test_export_edge_confidence_score_follows_its_edge(vault_dir, tmp_path) -> None:
+    """The confidence overlay streams AFTER its entity_edge (FK-safe order).
+
+    A dependency-free importer replaying top-to-bottom must never see a score
+    row before the edge it references. (ADR-0004 S2 export coverage.)
+    """
+    _build_vault_with_corrections_and_ontology(vault_dir)
+    records = [json.loads(line) for line in _iter_export(vault_dir, include_blobs=False)]
+
+    edge_positions = [i for i, r in enumerate(records) if r["kind"] == "entity_edge"]
+    score_positions = [i for i, r in enumerate(records) if r["kind"] == "edge_confidence_score"]
+    assert len(score_positions) == 1
+    assert edge_positions, "fixture must write at least one edge"
+    # Every score row appears after every edge row (edges precede the overlay).
+    assert min(score_positions) > max(edge_positions)
+
+    # The score's edge_id is one of the exported edges — no dangling reference.
+    edge_ids = {r["id"] for r in records if r["kind"] == "entity_edge"}
+    score_rec = records[score_positions[0]]
+    assert score_rec["edge_id"] in edge_ids
+    assert score_rec["confidence"] == 0.42

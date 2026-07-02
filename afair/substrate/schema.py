@@ -410,6 +410,44 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_reviews is append-only (Invariant I2)');
     END
     """,
+    # ── edge_confidence_scores: append-only confidence overlay (ADR-0004) ────
+    # entity_edges.confidence is the immutable AT-DISCOVERY snapshot; the
+    # CURRENT belief strength of an edge is the latest row here, falling back
+    # to the column when no score row exists (old vaults, mid-backfill). Same
+    # supersession pattern as entity_kind_assignments (ADR-0003) and
+    # edge_reviews (ADR-0002): the base row never changes, the current view is
+    # the latest overlay row, reads compose at query time. The 176 flat-0.8
+    # legacy edges are never mutated (I2/I3) — the cold-path scorer appends
+    # their first real score, computed over signals recovered from substrate.
+    # ``components`` stores the full per-term breakdown so "why this number?"
+    # has an answer; ``computed_by`` versions the model so a re-derivation is a
+    # bump with history kept (I7).
+    """
+    CREATE TABLE IF NOT EXISTS edge_confidence_scores (
+        id           TEXT PRIMARY KEY,
+        edge_id      TEXT NOT NULL REFERENCES entity_edges(id),
+        confidence   REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+        components   TEXT NOT NULL,
+        computed_by  TEXT NOT NULL,
+        computed_at  TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS edge_confidence_scores_edge_idx "
+    "ON edge_confidence_scores(edge_id, computed_at)",
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_confidence_scores_no_update
+    BEFORE UPDATE ON edge_confidence_scores
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_confidence_scores is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_confidence_scores_no_delete
+    BEFORE DELETE ON edge_confidence_scores
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_confidence_scores is append-only (Invariant I2)');
+    END
+    """,
     # ── proposed_corrections: the entity-audit review queue (ADR-0002) ───────
     # MUTABLE derived state, not substrate — the audit worker regenerates it, a
     # decision updates its status, the pruner can clear applied rows. The
