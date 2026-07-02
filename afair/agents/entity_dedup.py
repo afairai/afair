@@ -163,6 +163,17 @@ class EntityDeduplicator(ColdPathWorker):
     name = "entity_deduplicator"
     interval_seconds = 6 * 3600
 
+    def __init__(self, *, max_clusters_per_cycle: int = MAX_CLUSTERS_PER_CYCLE) -> None:
+        """``max_clusters_per_cycle`` bounds how many clusters one ``run``
+        judges. The scheduled cold-path instance keeps the small default
+        (:data:`MAX_CLUSTERS_PER_CYCLE`) so a normal cycle stays cheap; the
+        operator drain script (scripts/drain_entity_dedup.py) raises it to
+        work the backlog down in supervised batches. Deliberately NOT a
+        tunable-registry entry — the drain is an explicit operator act, not
+        a self-modification surface (the trust ladder / the I7 note that a
+        worker's own fences stay off the self-improvement tuner)."""
+        self.max_clusters_per_cycle = max_clusters_per_cycle
+
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         stats: dict[str, Any] = {
             "clusters_examined": 0,
@@ -180,7 +191,7 @@ class EntityDeduplicator(ColdPathWorker):
         api_key = _api_key_for_model(model, settings)
 
         for key in _candidate_keys(conn):
-            if stats["clusters_examined"] >= MAX_CLUSTERS_PER_CYCLE:
+            if stats["clusters_examined"] >= self.max_clusters_per_cycle:
                 break
 
             members = _load_members(conn, key)
