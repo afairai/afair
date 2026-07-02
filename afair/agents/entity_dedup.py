@@ -36,6 +36,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from ..substrate.entities import (
     Entity,
+    find_live_merge_from,
     resolve_canonical,
     write_entity_merge,
 )
@@ -143,6 +144,7 @@ class EntityDeduplicator(ColdPathWorker):
             "clusters_merged": 0,
             "entities_merged": 0,
             "skipped_already_merged": 0,
+            "skipped_operator_governed": 0,
             "skipped_recent_decision": 0,
             "skipped_not_same": 0,
             "llm_errors": 0,
@@ -159,6 +161,17 @@ class EntityDeduplicator(ColdPathWorker):
             canonicals = {resolve_canonical(conn, m.entity.id) for m in members}
             if len(canonicals) < 2:
                 stats["skipped_already_merged"] += 1
+                continue
+
+            # ADR-0002 entrenchment: once the operator has touched this
+            # cluster's topology (authored a merge, or explicitly undid one),
+            # the deduplicator defers entirely. An agent_derived belief never
+            # overrides an operator decision — re-merging an operator-reverted
+            # pair every cycle is exactly the failure this guard prevents.
+            # Residual same-kind splits go through the review queue instead
+            # (ADR-0003 Phase 2).
+            if _cluster_operator_governed(conn, [m.entity.id for m in members]):
+                stats["skipped_operator_governed"] += 1
                 continue
 
             # Already judged "keep separate" and the cluster hasn't grown
@@ -210,11 +223,49 @@ class EntityDeduplicator(ColdPathWorker):
                 f"merged={stats['clusters_merged']} "
                 f"entities_merged={stats['entities_merged']} "
                 f"kept_separate={stats['skipped_not_same']} "
+                f"skipped_operator_governed={stats['skipped_operator_governed']} "
                 f"skipped_recent={stats['skipped_recent_decision']} "
                 f"errors={stats['llm_errors']}"
             ),
         )
         return stats
+
+
+def _cluster_operator_governed(conn: sqlite3.Connection, member_ids: list[str]) -> bool:
+    """True if the operator / correction system has ruled on this cluster.
+
+    Two signals, either suffices:
+      (a) a LIVE merge among the members authored by someone other than
+          this worker (an operator/correction merge), or
+      (b) ANY merge among the members that was explicitly invalidated
+          (a merge here was undone).
+
+    Either way the cluster's topology is operator-governed and the
+    deduplicator must not re-judge it (ADR-0002: agent_derived never
+    overrides operator). Without this, an operator revert + counter-merge
+    forms a resolution cycle that defeats the already-collapsed guard and
+    the worker silently re-merges the pair every cycle.
+    """
+    if not member_ids:
+        return False
+    placeholders = ", ".join("?" for _ in member_ids)
+    row = conn.execute(
+        f"""
+        SELECT 1 FROM entity_merges em
+        WHERE (em.from_entity_id IN ({placeholders})
+               OR em.into_entity_id IN ({placeholders}))
+          AND (
+            (em.merged_by != ?
+             AND NOT EXISTS (
+                 SELECT 1 FROM merge_invalidations mi WHERE mi.merge_id = em.id
+             ))
+            OR EXISTS (SELECT 1 FROM merge_invalidations mi WHERE mi.merge_id = em.id)
+          )
+        LIMIT 1
+        """,  # placeholders are generated "?" marks; all values are bound parameters
+        (*member_ids, *member_ids, DEDUP_PRODUCED_BY),
+    ).fetchone()
+    return row is not None
 
 
 def _recent_keep_separate(conn: sqlite3.Connection, *, entity_key: str, mention_total: int) -> bool:
@@ -410,6 +461,10 @@ def _merge_into_densest(
     merged = 0
     for m in members[1:]:
         if m.entity.id == target.id:
+            continue
+        # Idempotency: a member with a live merge out is already resolved
+        # elsewhere — writing another row would only duplicate history.
+        if find_live_merge_from(conn, m.entity.id) is not None:
             continue
         write_entity_merge(
             conn,
