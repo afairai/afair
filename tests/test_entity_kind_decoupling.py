@@ -339,8 +339,14 @@ def test_same_name_same_kind_still_links_exact_without_llm(
     assert stats["llm_calls"] == 0
     m1, m2 = iter_mentions_for_event(db, h1)[0], iter_mentions_for_event(db, h2)[0]
     assert m1.entity_id == m2.entity_id
-    assert m2.match_method == "exact"
-    assert m2.confidence == 1.0
+    # Whichever event the canonicalizer processes first in the batch creates the
+    # entity ('new'); the other exact-links to it at confidence 1.0. The order
+    # between two same-millisecond writes is not guaranteed (ULIDs aren't
+    # monotonic within a ms), so assert the symmetric invariant, not a fixed
+    # direction — the earlier `m2.match_method == "exact"` flaked on fast runners.
+    assert {m1.match_method, m2.match_method} == {"new", "exact"}
+    exact_mention = m2 if m2.match_method == "exact" else m1
+    assert exact_mention.confidence == 1.0
 
 
 def test_fast_path_links_to_a_v1_entity(
