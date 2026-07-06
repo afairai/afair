@@ -394,26 +394,48 @@ class EntityCanonicalizer(ColdPathWorker):
 def _find_uncanonicalized_events(
     conn: sqlite3.Connection, max_events: int
 ) -> list[tuple[Event, dict[str, Any]]]:
-    """Events whose latest extractor interpretation has entities/relations
-    but no entity_mentions row yet for this event_hash.
+    """Events whose latest SUCCESSFUL extractor interpretation has no
+    entity_mentions row yet for this event_hash.
 
-    Joins interpretations (LIKE 'extractor:%') with a NOT EXISTS against
-    entity_mentions on event_hash. Returns oldest-first so the graph
-    catches up to recent activity in temporal order.
+    Selection is done in SQL via the same latest-success-per-hash idiom the
+    extraction-retry worker uses (``select_retry_candidates``): a ROW_NUMBER
+    window partitioned by ``event_hash`` over success rows only, taking
+    ``rn = 1``. This closes a starvation bug — the old query returned ALL
+    ``extractor:%`` rows (failed ones included) and filtered them in Python
+    AFTER a ``seen_hashes.add`` that ran BEFORE the status check, so a
+    permanent-failure row could both occupy one of the bounded
+    ``MAX_EVENTS_PER_CYCLE`` slots forever AND mask a real success row for
+    the same hash. Filtering to successes in SQL means failed extractions
+    never consume a slot, and rn=1 guarantees exactly one row per hash so no
+    Python-side dedup is needed.
+
+    Returns oldest-first (by event ``created_at``) so the graph catches up in
+    temporal order. Legacy rows without a ``$.status`` field are excluded,
+    identical to the old ``None != "success"`` skip.
     """
     rows = conn.execute(
         """
-        SELECT i.event_id, i.event_hash, i.extraction, e.created_at
-        FROM interpretations i
-        JOIN events e ON e.id = i.event_id
-        WHERE i.produced_by LIKE 'extractor:%'
+        WITH latest_success AS (
+            SELECT i.event_id, i.event_hash, i.extraction,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY i.event_hash
+                       ORDER BY i.produced_at DESC, i.version DESC, i.id DESC
+                   ) AS rn
+            FROM interpretations i
+            WHERE i.produced_by LIKE 'extractor:%'
+              AND json_extract(i.extraction, '$.status') = 'success'
+        )
+        SELECT l.event_id, l.event_hash, l.extraction, e.created_at
+        FROM latest_success l
+        JOIN events e ON e.id = l.event_id
+        WHERE l.rn = 1
           AND NOT EXISTS (
               SELECT 1 FROM entity_mentions m
-              WHERE m.event_hash = i.event_hash
+              WHERE m.event_hash = l.event_hash
           )
           AND NOT EXISTS (
               SELECT 1 FROM interpretations m
-              WHERE m.event_hash = i.event_hash
+              WHERE m.event_hash = l.event_hash
                 AND m.produced_by = ?
           )
         ORDER BY e.created_at ASC
@@ -423,21 +445,8 @@ def _find_uncanonicalized_events(
     ).fetchall()
 
     out: list[tuple[Event, dict[str, Any]]] = []
-    seen_hashes: set[str] = set()
     for row in rows:
-        if row["event_hash"] in seen_hashes:
-            continue  # multiple extractor rows per event possible (#retryN); dedupe
-        seen_hashes.add(row["event_hash"])
         extraction = json.loads(row["extraction"])
-        if extraction.get("status") != "success":
-            continue  # failed extractions don't have usable entities
-        if not extraction.get("entities") and not extraction.get("relations"):
-            # Nothing to canonicalize, but mark as "processed" with a
-            # no-op mention-less marker so we don't re-scan forever.
-            # Cheapest: skip. The NOT EXISTS query will keep returning
-            # this row, but the canonicalize-one-event helper is fast
-            # for empty inputs.
-            pass
         event = read_event_by_hash(conn, row["event_hash"])
         if event is None:
             continue

@@ -29,7 +29,7 @@ from afair.agents.entity_canonicalizer import (
     CASCADE_PRODUCED_BY,
     EntityCanonicalizer,
 )
-from afair.agents.interpretation import write_interpretation
+from afair.agents.interpretation import write_failed_interpretation, write_interpretation
 from afair.agents.invalidation import write_invalidation
 from afair.agents.llm import LLMError, LLMResult
 from afair.settings import Settings
@@ -1193,3 +1193,87 @@ def test_score_row_failure_does_not_lose_edge(
     # No score row was persisted (the write raised), but the column stands.
     assert latest_edge_confidence_batch(db, [edges[0].id]) == {}
     assert edges[0].confidence != 0.8
+
+
+# ── P0-1: failed extractions must not starve event selection ───────────────
+
+
+def _write_failed_event(db: sqlite3.Connection, text: str, error_type: str) -> None:
+    """An event whose only extractor interpretation is a status:failed row."""
+    from afair.agents.prompts import EXTRACTOR_SCHEMA_VERSION
+
+    event = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": text}
+    )
+    write_failed_interpretation(
+        db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        error_type=error_type,
+        error_message=f"seeded {error_type}",
+    )
+
+
+def test_failed_extractions_do_not_starve_selection(db: sqlite3.Connection) -> None:
+    """REGRESSION: permanent-failure interpretation rows must never occupy the
+    bounded MAX_EVENTS_PER_CYCLE slots. With MAX=10 failed events written
+    before a single fresh success, the old query returned the 10 oldest
+    (all failed) rows, filtered them all out in Python, and returned [] — the
+    success starved forever. The fix filters to successes in SQL, so the fresh
+    success is the only candidate."""
+    for i in range(ec.MAX_EVENTS_PER_CYCLE):
+        _write_failed_event(db, f"failed event {i}", "pdf_extraction_error")
+    success_hash = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+    )
+
+    found = ec._find_uncanonicalized_events(db, ec.MAX_EVENTS_PER_CYCLE)
+    assert [e.content_hash for e, _ in found] == [success_hash]
+
+
+def test_retry_success_after_failure_is_selected(db: sqlite3.Connection) -> None:
+    """An event that failed extraction then succeeded on retry (a later success
+    row for the same hash) must be selectable — the earlier bug's seen_hashes
+    add-before-status-check masked exactly this case."""
+    from afair.agents.prompts import EXTRACTOR_SCHEMA_VERSION
+
+    event = write_event(
+        db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "Sajinth runs Athara"},
+    )
+    # First attempt fails (transient), then a retry succeeds — both rows live.
+    write_failed_interpretation(
+        db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        error_type="llm_timeout",
+        error_message="timed out once",
+    )
+    write_interpretation(
+        db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by="extractor:anthropic/claude-haiku-4-5",
+        extraction={
+            "status": "success",
+            "best_guess_kind": "fact",
+            "summary": "Sajinth runs Athara",
+            "entities": [
+                {"name": "Sajinth", "type": "person"},
+                {"name": "Athara", "type": "organization"},
+            ],
+            "relations": [],
+        },
+    )
+
+    found = ec._find_uncanonicalized_events(db, ec.MAX_EVENTS_PER_CYCLE)
+    assert [e.content_hash for e, _ in found] == [event.content_hash]
