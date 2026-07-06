@@ -150,11 +150,17 @@ def test_default_recall_demotes_the_decayed_one_off(ctx: ServerContext) -> None:
 
 def test_default_recall_surfaces_temporal_relevance(ctx: ServerContext) -> None:
     _evergreen_hash, decayed_hash = _seed_pair(ctx)
+    # Default (compact) recall surfaces the temporal_class.
     result = handlers.recall(query="aurora")
     decayed = next(h for h in result.hits if h.content_hash == decayed_hash)
     assert decayed.interpretation is not None
     assert decayed.interpretation["temporal_class"] == "one_off"
-    assert decayed.interpretation["temporal_relevance"] < 1.0
+    assert "temporal_relevance" not in decayed.interpretation  # dropped in compact
+    # The relevance scalar is a full/standard field.
+    full = handlers.recall(query="aurora", verbosity="full")
+    decayed_full = next(h for h in full.hits if h.content_hash == decayed_hash)
+    assert decayed_full.interpretation is not None
+    assert decayed_full.interpretation["temporal_relevance"] < 1.0
 
 
 def test_deep_depth_bypasses_temporal_rerank(

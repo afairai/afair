@@ -286,7 +286,9 @@ def test_recall_without_canonicalizer_run_omits_overlay(
     )
     # NO canonicalizer run here.
 
-    result = handlers.recall(query="Sajinth", depth="shallow")
+    # Raw extractor entities are a full/standard field; compact never serves
+    # them. Ask for full to assert the pre-canonicalizer shape.
+    result = handlers.recall(query="Sajinth", depth="shallow", verbosity="full")
     interp = result.hits[0].interpretation
     assert interp is not None
     # Extractor's raw "entities" key is present (from the seed).

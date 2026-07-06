@@ -307,6 +307,24 @@ Depth = Literal["auto", "shallow", "normal", "deep"]
 - ``deep``     — Same as normal until the Phase 3+ reasoning agent lands.
 """
 
+RecallVerbosity = Literal["compact", "standard", "full"]
+"""How much of each hit's interpretation/conflicts/list detail recall serves.
+
+- ``compact`` (default) — the AI-useful minimum: capped summary + payload text,
+                 canonical entities and edges trimmed to the top few, only
+                 caveat-bearing conflicts. Everything dropped is one
+                 ``verbosity="full"`` or ``recall(by_id=..., full_payload=True)``
+                 away — the interpretation dict is a summary view, not a frozen
+                 surface.
+- ``standard`` — today's full interpretation minus the redundant raw entity
+                 list (when canonical entities are present) and null edge
+                 validity bounds.
+- ``full``     — every field, byte-identical to the pre-P1-2 builder.
+
+Orthogonal to ``full_payload`` (which controls payload MATERIALIZATION) and to
+``by_id``/``by_content_hash`` lookups (which always serve the full shape — the
+re-fetch escape hatch)."""
+
 
 class ConflictFlag(BaseModel):
     """One verdict pair from the cold-path Conflict-Resolver (Phase 3).
@@ -544,6 +562,11 @@ class RecallResult(BaseModel):
     decisions: list[CorrectionOutcomeView] = []
     """Per-decision outcomes when this call carried ``decide=`` (single or
     batch). Empty on calls that didn't decide anything. Additive per I1."""
+    next_cursor: str | None = None
+    """Opaque paging cursor for search/browse results: pass it back verbatim as
+    ``cursor`` to fetch the next page. Null when there is no next page (or on
+    single-event lookups). Best-effort — rankings are recomputed per call.
+    Additive per I1."""
 
 
 # ── recall feedback ─────────────────────────────────────────────────────────

@@ -227,7 +227,7 @@ def build_server(settings: Settings) -> FastMCP:
         query: str | None = None,
         scope: str | None = None,
         depth: schemas.Depth = "auto",
-        limit: int = 20,
+        limit: int | None = None,
         by_id: str | None = None,
         by_content_hash: str | None = None,
         full_payload: bool = False,
@@ -236,6 +236,8 @@ def build_server(settings: Settings) -> FastMCP:
         decide: schemas.CorrectionDecision | list[schemas.CorrectionDecision] | None = None,
         pending_limit: int | None = None,
         pending_offset: int = 0,
+        verbosity: schemas.RecallVerbosity = "compact",
+        cursor: str | None = None,
     ) -> schemas.RecallResult:
         # decide= applies corrections (entity merges/retractions, observe
         # events) — a write, so it needs write scope like remember/observe.
@@ -257,6 +259,8 @@ def build_server(settings: Settings) -> FastMCP:
             decide=decide,
             pending_limit=pending_limit,
             pending_offset=pending_offset,
+            verbosity=verbosity,
+            cursor=cursor,
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")

@@ -596,7 +596,9 @@ def test_recall_surfaces_interpretation_when_present(
         content=TextContent(type="text", text="Sajinth proposed a new roadmap"),
         context="email thread",
     )
-    r = handlers.recall(query="Sajinth", depth="shallow")
+    # Raw extractor entities are a full/standard field (compact serves only
+    # canonical entities); ask for full to see the verbatim extractor output.
+    r = handlers.recall(query="Sajinth", depth="shallow", verbosity="full")
     assert len(r.hits) == 1
     interp = r.hits[0].interpretation
     assert interp is not None

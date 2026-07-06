@@ -184,11 +184,26 @@ ARGUMENTS (all optional; combine as needed):
                   as-of questions ("what did I know back then", "show me past
                   appointments"). Default recall instead de-prioritizes
                   memories whose moment has passed, without dropping them.
-  - limit: Default 20. Max hits to return.
+  - limit: Max hits to return. Omitted → 10 in compact verbosity, 20
+    otherwise. Server cap 100 (larger values are clamped, not rejected).
+  - verbosity: "compact" (default), "standard", or "full". Controls how
+    much of each hit's interpretation/conflicts/linked-list detail is
+    served — NOT the payload (see full_payload).
+      "compact" → the AI-useful minimum: capped summary + payload text,
+                  top canonical entities and edges, only caveat-bearing
+                  conflicts. Use this by default.
+      "standard"→ the full interpretation minus the redundant raw entity
+                  list and null edge validity bounds.
+      "full"    → every field. Use standard/full, or by_id + full_payload,
+                  when you need salient_facts / raw entities / the complete
+                  conflict history. by_id/by_content_hash always serve full.
+  - cursor: Opaque paging token for search/browse. Pass the ``next_cursor``
+    from a prior recall back here verbatim to get the next page. Best-effort:
+    rankings are recomputed per call. A bad cursor serves page 1 with a note.
   - full_payload: Default false. When true, each hit's payload is the full
     untruncated content (for text-large events, the blob is read back into
-    text). When false, text payloads are clipped at ~500 chars.
-    Lookup modes (by_id, by_content_hash) imply full_payload=true.
+    text). When false, text payloads are clipped (~500 chars standard/full,
+    ~300 compact). Lookup modes (by_id, by_content_hash) imply full_payload=true.
   - stats: Default false. When true, the response includes a
     ``summary`` field with total_events, by_kind, by_origin counts,
     useful for "what's the lay of the land" queries. Combines with any
@@ -228,10 +243,13 @@ RETURN:
    "depth_used": "shallow" | "normal" | "deep",
    "note": null | "...",
    "summary": null | {total_events, by_kind, by_origin},
-   "decisions": [{"proposal_id": "...", "status": "...", "note": "..."}, ...]}
+   "decisions": [{"proposal_id": "...", "status": "...", "note": "..."}, ...],
+   "next_cursor": null | "..."}
 
 ``decisions`` is populated only when this call carried ``decide=`` — one
-outcome per decision sent, in order (empty otherwise).
+outcome per decision sent, in order (empty otherwise). ``next_cursor`` is
+non-null when more results exist; pass it back as ``cursor`` for the next
+page.
 
 Each hit's payload is either the truncated summary or the full content,
 depending on the full_payload flag (and lookup mode). ``truncated`` tells

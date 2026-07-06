@@ -119,6 +119,7 @@ from .schemas import (
     RecallFeedback,
     RecallHit,
     RecallResult,
+    RecallVerbosity,
     RememberContent,
     RememberResult,
     TextContent,
@@ -137,6 +138,21 @@ DEFAULT_ORIGIN = "agent"
 
 # Snippet length for text in recall summaries (when full_payload=False).
 SUMMARY_TEXT_CHARS = 500
+
+# ── recall verbosity + paging (P1-2) ─────────────────────────────────────────
+# Compact is the default shape: the AI-useful minimum per hit. Everything it
+# drops is re-fetchable via verbosity="full" or recall(by_id=..., full_payload=True).
+COMPACT_TEXT_CHARS = 300  # payload text / observe subject+result / compound part text
+COMPACT_CONTEXT_CHARS = 200  # payload context
+COMPACT_SUMMARY_CHARS = 280  # interpretation.summary
+COMPACT_MAX_ENTITIES = 5  # interpretation.canonical_entities
+COMPACT_MAX_EDGES = 5  # interpretation.entity_edges
+COMPACT_MAX_LINKED_IDS = 3  # hit.linked_event_ids
+COMPACT_CONFLICT_REASON_CHARS = 160
+COMPACT_DEFAULT_LIMIT = 10
+DEFAULT_RECALL_LIMIT = 20
+MAX_RECALL_LIMIT = 100
+MAX_RECALL_OFFSET = 200
 
 # Background pool used to overlap the embedding call with the (cheap)
 # local FTS query during recall. Pool is process-level so it survives
@@ -209,20 +225,31 @@ class InvalidateTargetError(ValueError):
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
-def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+def _payload_summary(
+    payload: dict[str, Any],
+    *,
+    text_cap: int = SUMMARY_TEXT_CHARS,
+    context_cap: int | None = None,
+) -> dict[str, Any]:
     """Build a truncation-safe view of a payload for recall results.
 
-    Text bodies are capped at SUMMARY_TEXT_CHARS. Binary metadata passes
-    through. Observe-event fields (action/subject/result) pass through
-    verbatim. Unknown content_types still produce a reasonable summary.
-    """
+    ``text_cap`` bounds text bodies (and, in compact, observe subject/result +
+    compound part text). ``context_cap`` bounds ``context`` when set (compact
+    only; None = verbatim). Binary metadata passes through. Unknown
+    content_types still produce a reasonable summary.
+
+    Standard/full pass ``text_cap=SUMMARY_TEXT_CHARS`` and ``context_cap=None``,
+    which reproduces the pre-P1-2 output byte-for-byte (observe subject/result
+    stay verbatim — the extra clipping only kicks in when ``text_cap`` is below
+    the default, i.e. compact)."""
+    compact = text_cap < SUMMARY_TEXT_CHARS
     content_type = payload.get("content_type", "unknown")
     summary: dict[str, Any] = {"content_type": content_type}
 
     if content_type == "text":
         text = payload.get("text", "")
         if isinstance(text, str):
-            summary["text"] = text[:SUMMARY_TEXT_CHARS]
+            summary["text"] = text[:text_cap]
     elif content_type == "text-large":
         for k in ("blob_hash", "size_bytes", "mime"):
             if k in payload:
@@ -234,7 +261,13 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
     elif content_type == "event":
         for k in ("action", "subject", "result"):
             if k in payload:
-                summary[k] = payload[k]
+                value = payload[k]
+                # action is a short verb; subject/result can be long. Clip the
+                # two long fields to text_cap in compact; leave verbatim
+                # otherwise (standard/full parity).
+                if compact and k in ("subject", "result") and isinstance(value, str):
+                    value = value[:text_cap]
+                summary[k] = value
     elif content_type == "compound":
         # Compound events surface each part's identity + a truncated
         # text preview. Blob parts stay as references; the caller
@@ -249,7 +282,7 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
             if part.get("type") == "text":
                 part_text = part.get("text", "")
                 if isinstance(part_text, str):
-                    part_view["text"] = part_text[:SUMMARY_TEXT_CHARS]
+                    part_view["text"] = part_text[:text_cap]
             elif part.get("type") == "blob-ref":
                 for k in ("blob_hash", "size_bytes", "mime", "filename_hint"):
                     if k in part:
@@ -260,7 +293,10 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
     # Common metadata across content types
     for k in ("context", "type_hint", "language", "target_hash", "reason"):
         if payload.get(k) is not None:
-            summary[k] = payload[k]
+            value = payload[k]
+            if k == "context" and context_cap is not None and isinstance(value, str):
+                value = value[:context_cap]
+            summary[k] = value
 
     return summary
 
@@ -295,12 +331,13 @@ def _materialize_full_payload(payload: dict[str, Any], vault_dir: Any) -> dict[s
     return materialized
 
 
-def _text_was_truncated(payload: dict[str, Any]) -> bool:
-    """True iff the payload-summary form would clip the text."""
+def _text_was_truncated(payload: dict[str, Any], cap: int = SUMMARY_TEXT_CHARS) -> bool:
+    """True iff the payload-summary form would clip the text at ``cap`` (so the
+    ``truncated`` flag stays honest per verbosity level)."""
     if payload.get("content_type") != "text":
         return False
     text = payload.get("text", "")
-    return isinstance(text, str) and len(text) > SUMMARY_TEXT_CHARS
+    return isinstance(text, str) and len(text) > cap
 
 
 _INTERPRETATION_SURFACE_KEYS = (
@@ -331,6 +368,76 @@ def _interpretation_summary(extraction: dict[str, Any]) -> dict[str, Any] | None
     return surface or None
 
 
+def _strip_null_validity(edge: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``valid_from``/``valid_to`` from an edge view when they are null
+    (they are non-null only for genuinely time-bounded relations, a small
+    minority — omitting the nulls is pure wire savings, no information loss)."""
+    return {k: v for k, v in edge.items() if not (k in ("valid_from", "valid_to") and v is None)}
+
+
+def _shape_interpretation(
+    extraction: dict[str, Any] | None,
+    overlay: dict[str, Any] | None,
+    verbosity: str,
+) -> dict[str, Any] | None:
+    """Build the per-hit ``interpretation`` dict at the requested verbosity.
+
+    - ``full``: today's shape verbatim — the extractor surface subset plus the
+      entity/temporal overlay merged in (byte-parity with the pre-P1-2 builder).
+    - ``standard``: full, minus the raw ``entities`` list when canonical
+      entities are present (redundant) and minus null edge validity bounds.
+    - ``compact``: the AI-useful minimum — best_guess_kind + capped summary,
+      canonical entities trimmed to ``{id, canonical_name, kind}`` (≤N), edges
+      trimmed (≤N, null validity dropped), surprise_score, temporal_class. All
+      other extractor/overlay fields are dropped (re-fetchable via full/by_id).
+    """
+    if verbosity != "compact":
+        base = _interpretation_summary(extraction) if extraction is not None else None
+        if overlay:
+            base = base if base is not None else {}
+            base.update(overlay)
+        if base is None:
+            return None
+        if verbosity == "standard":
+            # (1) raw entities are redundant once canonical entities exist.
+            if "canonical_entities" in base and "entities" in base:
+                base = {k: v for k, v in base.items() if k != "entities"}
+            # (2) omit null edge validity bounds.
+            edges = base.get("entity_edges")
+            if edges:
+                base = dict(base)
+                base["entity_edges"] = [_strip_null_validity(e) for e in edges]
+        return base or None
+
+    # compact
+    interp: dict[str, Any] = {}
+    if extraction:
+        bgk = extraction.get("best_guess_kind")
+        if bgk:
+            interp["best_guess_kind"] = bgk
+        summary = extraction.get("summary")
+        if summary:
+            interp["summary"] = (
+                summary[:COMPACT_SUMMARY_CHARS] if isinstance(summary, str) else summary
+            )
+    if overlay:
+        canonical = overlay.get("canonical_entities")
+        if canonical:
+            interp["canonical_entities"] = [
+                {"id": e["id"], "canonical_name": e["canonical_name"], "kind": e["kind"]}
+                for e in canonical[:COMPACT_MAX_ENTITIES]
+            ]
+        edges = overlay.get("entity_edges")
+        if edges:
+            interp["entity_edges"] = [_strip_null_validity(e) for e in edges[:COMPACT_MAX_EDGES]]
+        # surprise_score may be 0.0 (all-familiar) — keep it explicitly.
+        if "surprise_score" in overlay:
+            interp["surprise_score"] = overlay["surprise_score"]
+        if "temporal_class" in overlay:
+            interp["temporal_class"] = overlay["temporal_class"]
+    return interp or None
+
+
 def _invalidation_to_summary(info: InvalidationInfo | None) -> InvalidationSummary | None:
     if info is None:
         return None
@@ -347,10 +454,17 @@ def _event_to_hit(
     entity_overlay: dict[str, Any] | None = None,
     interpretation_extraction: dict[str, Any] | None = None,
     linked_event_ids: list[str] | None = None,
+    verbosity: str = "standard",
 ) -> RecallHit:
     """Build one RecallHit. When ``full_payload`` is True the payload is
     materialized in full (text-large blobs read back from the object
     store); when False, the payload is the truncated summary view.
+
+    ``verbosity`` shapes the interpretation/conflicts/linked-list detail
+    (``compact`` | ``standard`` | ``full`` — see ``_shape_interpretation``). It
+    is orthogonal to ``full_payload`` (payload materialization). ``standard``
+    (the default here) preserves the pre-P1-2 shape apart from two harmless
+    subtractions; single-event lookups pass ``full``.
 
     All per-hit DB lookups (interpretation, bind, invalidation, conflict,
     entity overlay) MUST be batched at the call site and passed in as
@@ -361,13 +475,16 @@ def _event_to_hit(
     pre-computed ``canonical_entities`` + ``entity_edges`` for this
     event's content_hash. The recall handler batch-fetches these once
     per call and threads the per-event slice in here."""
+    compact = verbosity == "compact"
     if full_payload:
         ctx = get_context()
         payload_view = _materialize_full_payload(event.payload, ctx.vault_dir)
         truncated = False
     else:
-        payload_view = _payload_summary(event.payload)
-        truncated = _text_was_truncated(event.payload)
+        text_cap = COMPACT_TEXT_CHARS if compact else SUMMARY_TEXT_CHARS
+        context_cap = COMPACT_CONTEXT_CHARS if compact else None
+        payload_view = _payload_summary(event.payload, text_cap=text_cap, context_cap=context_cap)
+        truncated = _text_was_truncated(event.payload, text_cap)
 
     # interpretation_extraction is the raw dict from the batch helper.
     # When unset (legacy callers that didn't migrate), fall back to the
@@ -377,30 +494,34 @@ def _event_to_hit(
         interp = read_latest_interpretation(db, event.content_hash)
         interpretation_extraction = interp.extraction if interp is not None else None
 
-    interpretation: dict[str, Any] | None = (
-        _interpretation_summary(interpretation_extraction)
-        if interpretation_extraction is not None
-        else None
-    )
-    # Layer in canonical entities + edges. We keep them inside the
-    # ``interpretation`` dict so no new RecallHit fields are needed (the
-    # surface freeze from 2026-05-26 stays intact — Phase 4 enrichment is
-    # additive within an existing dict shape).
-    if entity_overlay:
-        if interpretation is None:
-            interpretation = {}
-        # The overlay builder only puts useful values in the dict — empty
-        # lists are never set there. So we pass everything through, INCLUDING
-        # falsy-but-meaningful numerics like ``surprise_score=0.0`` (a hit
-        # whose entities are all familiar). A blanket truthy-guard here
-        # would silently drop those.
-        interpretation.update(entity_overlay)
+    # Shape the interpretation dict at the requested verbosity. The overlay
+    # (canonical entities + edges + surprise + temporal) is merged inside the
+    # shaper so no RecallHit field is added (the 2026-05-26 surface freeze holds;
+    # only the free-form dict content varies).
+    interpretation = _shape_interpretation(interpretation_extraction, entity_overlay, verbosity)
 
     # Same fall-back for linked_event_ids when the caller didn't batch.
     if linked_event_ids is None:
         linked_event_ids = get_linked_event_ids(db, event.content_hash)
+    if compact and linked_event_ids:
+        linked_event_ids = linked_event_ids[:COMPACT_MAX_LINKED_IDS]
 
-    conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in (conflicts or [])]
+    if compact:
+        # Keep only conflicts that carry a user-facing signal (unresolved OR a
+        # caveat template); drop the caveat-less confirms/compatible/unrelated/
+        # evolves. Cap each reason. Coverage is computed pre-filter elsewhere.
+        kept: list[dict[str, Any]] = []
+        for c in conflicts or []:
+            verdict = str(c.get("verdict", ""))
+            if is_unresolved_conflict(verdict) or _verdict_meta(verdict).caveat is not None:
+                c2 = dict(c)
+                reason = c2.get("reason")
+                if isinstance(reason, str):
+                    c2["reason"] = reason[:COMPACT_CONFLICT_REASON_CHARS]
+                kept.append(c2)
+        conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in kept]
+    else:
+        conflict_flags = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
         event_id=event.id,
         content_hash=event.content_hash,
@@ -1262,7 +1383,7 @@ def recall(
     query: str | None = None,
     scope: str | None = None,
     depth: Depth = "auto",
-    limit: int = 20,
+    limit: int | None = None,
     by_id: str | None = None,
     by_content_hash: str | None = None,
     full_payload: bool = False,
@@ -1271,6 +1392,8 @@ def recall(
     decide: CorrectionDecision | list[CorrectionDecision] | None = None,
     pending_limit: int | None = None,
     pending_offset: int = 0,
+    verbosity: RecallVerbosity = "compact",
+    cursor: str | None = None,
 ) -> RecallResult:
     """Read the vault. Six call modes share this signature:
 
@@ -1285,7 +1408,15 @@ def recall(
     ContextSummary to the response.
 
     Lookup modes (``by_id``/``by_content_hash``) imply ``full_payload=True``
-    semantically — when you ask for one specific event you want it whole.
+    semantically — when you ask for one specific event you want it whole, and
+    they always serve the ``full`` shape regardless of ``verbosity``.
+
+    ``verbosity`` (default ``compact``) shapes how much of each hit's
+    interpretation/conflicts/list detail is served; it is orthogonal to
+    ``full_payload`` (payload materialization). ``limit`` (omitted → 10 compact /
+    20 otherwise) is clamped to ``MAX_RECALL_LIMIT``. ``cursor`` pages
+    search/browse results best-effort — pass the returned ``next_cursor`` back
+    verbatim; rankings are recomputed per call.
 
     ``scope`` is a free-text substring matched against the interpretation's
     topic_signal (Phase 3.5 — currently no-op until topic_signal lands).
@@ -1297,6 +1428,25 @@ def recall(
     db = connect_for_thread()
     ctx = get_context()
     note: str | None = None
+
+    # Effective page size (P1-2): omitted limit defaults to 10 in compact, 20
+    # otherwise; any explicit value is clamped to [1, MAX_RECALL_LIMIT].
+    eff_limit = (
+        limit
+        if limit is not None
+        else (COMPACT_DEFAULT_LIMIT if verbosity == "compact" else DEFAULT_RECALL_LIMIT)
+    )
+    eff_limit = max(1, min(eff_limit, MAX_RECALL_LIMIT))
+
+    # Cursor paging (P1-2): a best-effort byte offset into the recomputed
+    # ranking. Parse leniently — a bad cursor never fails a recall, it just
+    # serves page 1 with a note.
+    offset = 0
+    if cursor is not None:
+        try:
+            offset = max(0, min(int(cursor), MAX_RECALL_OFFSET))
+        except (TypeError, ValueError):
+            note = _combine_notes(note, "ignored malformed cursor")
 
     # Recall-feedback signal (additive optional arg per I1). Written
     # to tuner_state as kind='observation' for the tuner to read
@@ -1411,6 +1561,9 @@ def recall(
                         interp_for_target.extraction if interp_for_target else None
                     ),
                     linked_event_ids=linked_map.get(target.content_hash, []),
+                    # by_id/by_content_hash are the re-fetch escape hatch: always
+                    # serve the complete shape regardless of the verbosity arg.
+                    verbosity="full",
                 )
             ],
             depth_used="shallow",
@@ -1425,9 +1578,15 @@ def recall(
     events: list[Event]
     depth_used: Depth = depth
 
+    # Overfetch by (offset + page + 1): the +1 makes has_more exact, the offset
+    # covers the skipped prefix. Bounded so a huge cursor can't fan out the
+    # underlying scans. Everything below fetches fetch_n, then we slice the
+    # requested window after all reordering.
+    fetch_n = min(offset + eff_limit + 1, MAX_RECALL_OFFSET + MAX_RECALL_LIMIT + 1)
+
     if query is None or not query.strip():
         # No query, no by_id — return most-recent N events (browse mode).
-        events = list(iter_events(db, limit=limit))
+        events = list(iter_events(db, limit=fetch_n))
         depth_used = "shallow"
         invalidations = _attach_invalidations(events, db)
     else:
@@ -1441,37 +1600,42 @@ def recall(
         # surface form, pull those events as a third ranking signal.
         # Returns [] when nothing matches — pure no-op for non-entity
         # queries.
-        entity_hits = _events_via_entity_match(db, query, limit=limit)
+        entity_hits = _events_via_entity_match(db, query, limit=fetch_n)
 
         if depth == "shallow" or not ctx.semantic_recall_enabled:
-            fts_hits = search_fts(db, query, limit=limit)
-            events = rrf_merge(fts_hits, entity_hits, limit=limit) if entity_hits else fts_hits
+            fts_hits = search_fts(db, query, limit=fetch_n)
+            events = rrf_merge(fts_hits, entity_hits, limit=fetch_n) if entity_hits else fts_hits
             depth_used = "shallow"
         else:
             api_key = _api_key_for_embedding(ctx)
             emb_future = _RECALL_POOL.submit(
                 embed_query, model=ctx.embedding_model, text=query, api_key=api_key
             )
-            fts_hits = search_fts(db, query, limit=limit)
+            fts_hits = search_fts(db, query, limit=fetch_n)
             try:
                 embedding = emb_future.result()
             except EmbeddingError:
-                events = rrf_merge(fts_hits, entity_hits, limit=limit) if entity_hits else fts_hits
+                events = (
+                    rrf_merge(fts_hits, entity_hits, limit=fetch_n) if entity_hits else fts_hits
+                )
                 depth_used = "shallow"
-                note = "semantic recall unavailable; returned FTS-only results"
+                note = _combine_notes(
+                    note, "semantic recall unavailable; returned FTS-only results"
+                )
             else:
-                vec_hits = search_vec(db, embedding, limit=limit)
+                vec_hits = search_vec(db, embedding, limit=fetch_n)
                 # Fuse FTS+vec first (hybrid baseline), then layer in the
                 # entity-match boost. Double-counted appearances naturally
                 # rank higher — events that BOTH match by name AND match
                 # by text/embedding deserve the front of the list.
-                hybrid = rrf_merge(fts_hits, vec_hits, limit=limit)
-                events = rrf_merge(hybrid, entity_hits, limit=limit) if entity_hits else hybrid
+                hybrid = rrf_merge(fts_hits, vec_hits, limit=fetch_n)
+                events = rrf_merge(hybrid, entity_hits, limit=fetch_n) if entity_hits else hybrid
                 depth_used = "normal"
                 if depth == "deep":
-                    note = (
+                    note = _combine_notes(
+                        note,
                         "deep depth is not yet richer than normal "
-                        "(Phase 3+ reasoning agent pending); returned hybrid results"
+                        "(Phase 3+ reasoning agent pending); returned hybrid results",
                     )
 
         # Temporal intent ("current role", "latest …") → prefer the newest
@@ -1502,6 +1666,15 @@ def recall(
         # browse mode stays chronological).
         events = _article_first_order(events, invalidated=set(invalidations))
 
+    # Cursor slice (P1-2): the searches overfetched by (offset + page + 1), and
+    # invalidations were computed on that fuller list above (a dict superset is
+    # harmless). Now cut the requested window so every per-hit cost below —
+    # conflicts, overlay, interp/linked batches, coverage — stays page-sized.
+    # The +1 overfetch makes has_more exact.
+    has_more = len(events) > offset + eff_limit
+    events = events[offset : offset + eff_limit]
+    next_cursor = str(offset + eff_limit) if has_more else None
+
     # invalidations is computed per-branch above (browse + query) and reused
     # here so the per-hit annotation does not re-query.
     conflicts = _attach_conflicts(events, db)
@@ -1529,6 +1702,7 @@ def recall(
                     interp_map[e.content_hash].extraction if e.content_hash in interp_map else None
                 ),
                 linked_event_ids=linked_map.get(e.content_hash, []),
+                verbosity=verbosity,
             )
             for e in events
         ],
@@ -1539,6 +1713,7 @@ def recall(
         pending_corrections=pending,
         pending_corrections_count=pending_count,
         decisions=decisions_out,
+        next_cursor=next_cursor,
     )
 
 

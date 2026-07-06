@@ -203,7 +203,9 @@ def test_surprise_components_match_score(ctx: ServerContext, settings: Settings)
     )
     EntityCanonicalizer().run(ctx.db, settings)
 
-    result = handlers.recall(query="Sajinth", depth="shallow")
+    # surprise_components is a full/standard field (compact keeps only the
+    # scalar surprise_score); ask for full to inspect the component math.
+    result = handlers.recall(query="Sajinth", depth="shallow", verbosity="full")
     interp = result.hits[0].interpretation
     assert interp is not None
     score = interp["surprise_score"]
