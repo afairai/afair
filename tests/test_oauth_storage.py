@@ -248,6 +248,43 @@ def test_expired_refresh_token_is_rejected(db: sqlite3.Connection) -> None:
     assert storage.lookup_refresh_token(db, token) is None
 
 
+def test_find_revoked_refresh_token(db: sqlite3.Connection) -> None:
+    """A revoked token is invisible to lookup but visible to the reuse-detection
+    helper, carrying its client_id + user_sub for family invalidation."""
+    token = storage.issue_refresh_token(
+        db, client_id="nf_test", user_sub="operator", scope="read", ttl_seconds=60
+    )
+    # Not yet revoked → reuse helper returns None.
+    assert storage.find_revoked_refresh_token(db, token) is None
+    storage.revoke_refresh_token(db, token)
+    reused = storage.find_revoked_refresh_token(db, token)
+    assert reused is not None
+    assert reused.client_id == "nf_test"
+    assert reused.user_sub == "operator"
+
+
+def test_revoke_refresh_tokens_for_user_client(db: sqlite3.Connection) -> None:
+    """Family invalidation revokes every live token for a (client, user) pair,
+    leaving other clients/users untouched."""
+    t1 = storage.issue_refresh_token(
+        db, client_id="nf_a", user_sub="operator", scope=None, ttl_seconds=60
+    )
+    t2 = storage.issue_refresh_token(
+        db, client_id="nf_a", user_sub="operator", scope=None, ttl_seconds=60
+    )
+    other = storage.issue_refresh_token(
+        db, client_id="nf_b", user_sub="operator", scope=None, ttl_seconds=60
+    )
+    revoked = storage.revoke_refresh_tokens_for_user_client(
+        db, client_id="nf_a", user_sub="operator"
+    )
+    assert revoked == 2
+    assert storage.lookup_refresh_token(db, t1) is None
+    assert storage.lookup_refresh_token(db, t2) is None
+    # A different client's token survives.
+    assert storage.lookup_refresh_token(db, other) is not None
+
+
 # ── JWT issuance + validation ──────────────────────────────────────────────
 
 

@@ -35,6 +35,7 @@ import json
 import urllib.parse
 from typing import TYPE_CHECKING
 
+import structlog
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ...substrate import open_db
@@ -49,6 +50,9 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from ...settings import Settings
+
+
+log = structlog.get_logger(__name__)
 
 
 # ── DCR hardening (Sec audit I1) ───────────────────────────────────────────
@@ -694,21 +698,73 @@ async def _grant_authorization_code(
 
 
 async def _grant_refresh_token(settings: Settings, form: object) -> Response:
+    """RFC 6749 §6 with the auth-code path's rigor: client binding, secret
+    check for confidential clients, single-use rotation, and reuse detection.
+
+    Previously this looked up the token, re-checked the allowlist, and reissued
+    an access token WITHOUT binding to the presenting client, without rotating,
+    and without reuse detection — a leaked refresh token was replayable forever.
+    """
     token = _form_str(form, "refresh_token")
+    client_id = _form_str(form, "client_id")
     if not token:
         return _error("invalid_request", description="refresh_token is required")
+    if not client_id:
+        return _error("invalid_request", description="client_id is required")
 
     db = open_db(settings.vault_dir)
     try:
+        client = storage.get_client(db, client_id)
+        if client is None:
+            return _error("invalid_client", status=401)
+        # Confidential client → verify secret (mirrors the auth-code branch).
+        if client.has_secret:
+            secret = _form_str(form, "client_secret")
+            if not secret or not storage.verify_client_secret(db, client_id, secret):
+                return _error(
+                    "invalid_client",
+                    description="client_secret missing or wrong",
+                    status=401,
+                )
+
         record = storage.lookup_refresh_token(db, token)
         if record is None:
+            # Reuse detection: a presented token that exists but is already
+            # revoked is a rotated-out (possibly stolen) credential being
+            # replayed. Invalidate the whole family for that client+user so a
+            # thief can't ride it, then reject.
+            reused = storage.find_revoked_refresh_token(db, token)
+            if reused is not None and reused.client_id == client_id:
+                revoked = storage.revoke_refresh_tokens_for_user_client(
+                    db, client_id=client_id, user_sub=reused.user_sub
+                )
+                log.warning(
+                    "oauth.refresh_token_reuse",
+                    client_id=client_id,
+                    family_revoked=revoked,
+                )
             return _error("invalid_grant", description="invalid or expired refresh_token")
+
+        # Bind the token to the presenting client.
+        if record.client_id != client_id:
+            return _error("invalid_grant", description="refresh_token does not match client")
+
         # Re-check allowlist (operator may have removed the user since issuance)
         if record.user_sub.lower() not in settings.allowlist:
             storage.revoke_refresh_token(db, token)
             return _error("invalid_grant", description="user no longer permitted")
 
         issued = jwt_mod.issue_access_token(settings=settings, subject=record.user_sub, email=None)
+        # Rotate: mint a fresh refresh token and revoke the presented one, so a
+        # captured token is single-use. Both in the same connection.
+        new_refresh = storage.issue_refresh_token(
+            db,
+            client_id=client_id,
+            user_sub=record.user_sub,
+            scope=record.scope,
+            ttl_seconds=settings.refresh_token_ttl_seconds,
+        )
+        storage.revoke_refresh_token(db, token)
     finally:
         db.close()
 
@@ -717,6 +773,7 @@ async def _grant_refresh_token(settings: Settings, form: object) -> Response:
             "access_token": issued.token,
             "token_type": "Bearer",
             "expires_in": settings.access_token_ttl_seconds,
+            "refresh_token": new_refresh,
             "scope": record.scope or "",
         }
     )

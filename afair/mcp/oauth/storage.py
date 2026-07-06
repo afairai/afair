@@ -431,3 +431,51 @@ def revoke_refresh_token(conn: sqlite3.Connection, token: str) -> bool:
             (_now_iso(), _hash_token(token)),
         )
     return (cursor.rowcount or 0) > 0
+
+
+def find_revoked_refresh_token(conn: sqlite3.Connection, token: str) -> RefreshTokenRecord | None:
+    """Return the record for an ALREADY-REVOKED token hash, else None.
+
+    Distinct from :func:`lookup_refresh_token`, which requires the token to be
+    unrevoked and unexpired. This exists solely for rotation reuse detection:
+    a client presenting a token that was previously rotated out (revoked) is
+    replaying a rotated-out — possibly stolen — credential, and the caller
+    invalidates the whole token family for that client+user in response.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM oauth_refresh_tokens
+        WHERE token_hash = ? AND revoked_at IS NOT NULL
+        """,
+        (_hash_token(token),),
+    ).fetchone()
+    if row is None:
+        return None
+    return RefreshTokenRecord(
+        token_hash=row["token_hash"],
+        client_id=row["client_id"],
+        user_sub=row["user_sub"],
+        scope=row["scope"],
+        expires_at=int(datetime.fromisoformat(row["expires_at"]).timestamp()),
+    )
+
+
+def revoke_refresh_tokens_for_user_client(
+    conn: sqlite3.Connection, *, client_id: str, user_sub: str
+) -> int:
+    """Family invalidation: revoke every live refresh token for a
+    (client_id, user_sub) pair. Returns the number of tokens revoked.
+
+    Used on rotation reuse detection — one replayed rotated-out token
+    invalidates the entire family so a thief can't ride a stolen token.
+    """
+    with conn:
+        cursor = conn.execute(
+            """
+            UPDATE oauth_refresh_tokens
+            SET revoked_at = ?
+            WHERE client_id = ? AND user_sub = ? AND revoked_at IS NULL
+            """,
+            (_now_iso(), client_id, user_sub),
+        )
+    return cursor.rowcount or 0

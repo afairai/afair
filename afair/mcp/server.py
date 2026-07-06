@@ -64,6 +64,7 @@ from .export_async_routes import (
     export_status_endpoint,
 )
 from .export_route import export_endpoint
+from .host_canon import HostCanonicalizationMiddleware
 from .oauth import routes as oauth_routes
 from .rate_limit import (
     InternalPathRateLimitMiddleware,
@@ -471,6 +472,16 @@ def build_app(settings: Settings) -> Starlette:
         # Security headers — applied to every response, including 4xx
         # rejections from middlewares below. Belt-and-suspenders.
         Middleware(SecurityHeadersMiddleware),
+        # Host canonicalization — redirect browser/discovery GETs and 421 a
+        # mis-hosted MCP POST when a client dialed the .fly.dev alias instead
+        # of the vanity issuer (connect-DX footgun). No-op unless fly + an
+        # explicit issuer. Sits here so its redirect/421 still carries the
+        # security headers + request id, before auth/rate-limit state spends.
+        Middleware(
+            HostCanonicalizationMiddleware,
+            environment=settings.environment,
+            issuer=settings.oauth_issuer,
+        ),
         # gzip — compression sees responses from middlewares below.
         # min_size=500 avoids compressing tiny payloads.
         Middleware(GZipMiddleware, minimum_size=500, compresslevel=5),
