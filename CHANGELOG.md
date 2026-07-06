@@ -10,6 +10,23 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.15](https://github.com/afairai/afair/compare/v0.1.14...v0.1.15) (2026-07-06)
+
+
+### Features
+
+* **audit:** suppress structural-junk kind-review proposals ([2eef552](https://github.com/afairai/afair/commit/2eef5528b923cc5f478ecd4423b0ea29e11cd544))
+* **edges:** gate observe/transient/vague-predicate edge derivation + retro-sweep ([8b3754d](https://github.com/afairai/afair/commit/8b3754d02167c3b4a23c8fbbbfac6b8942416845))
+* **edges:** serve-gated reviews + auto-expiry of never-served low-confidence edges ([dd93ca3](https://github.com/afairai/afair/commit/dd93ca3161902a8bf9c20b3cb238318c76cfdc3a))
+
+
+### Bug Fixes
+
+* **audit:** require both sides structural to suppress a merge review ([259a621](https://github.com/afairai/afair/commit/259a62124282057467bea3a2a0aba90301d95211))
+* **corrections:** honor to_kind on confirm, not only reject ([0071712](https://github.com/afairai/afair/commit/0071712fa3c3682588ee2f4021b8b646b9cd2e25))
+* **edges:** drop involve/retain from the non-durable predicate denylist ([f9cd80c](https://github.com/afairai/afair/commit/f9cd80c62a294dc0fe8ffc29749e9352e63d5f89))
+* **edges:** gate auto-expiry behind a serve-tracking epoch so deploy can't mass-retire the legacy graph ([378b07a](https://github.com/afairai/afair/commit/378b07a6e18c960e1bb1b7e81fee847a0430f523))
+
 ## [0.1.14](https://github.com/afairai/afair/compare/v0.1.13...v0.1.14) (2026-07-06)
 
 
