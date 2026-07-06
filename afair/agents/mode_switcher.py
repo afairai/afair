@@ -55,6 +55,7 @@ naturally-substrate-shaped data.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -323,6 +324,16 @@ def _write_mode_transition(
         "cumulative_salience": round(cumulative_salience, 3),
         "cumulative_surprise": round(cumulative_surprise, 3),
         "window_size": window,
+        # A monotonic decision timestamp makes each genuine transition a
+        # DISTINCT event. created_at is NOT part of the content_hash, and the
+        # rounded salience/surprise floats collide across cycles — without this
+        # a second A->B transition with the same rounded scores hashed to the
+        # first event, hit ON CONFLICT(content_hash) DO NOTHING, wrote no row,
+        # and read_current_mode kept returning the intervening opposite mode
+        # while pe.record still logged "success" against the OLD event id. The
+        # transition silently never happened. The decision time is real
+        # provenance, so it belongs in the payload rather than a bare nonce.
+        "decided_at": datetime.now(UTC).isoformat(),
     }
     event = write_event(
         conn,

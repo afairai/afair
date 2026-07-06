@@ -20,9 +20,11 @@ from afair.agents.mode_switcher import (
     DEFAULT_SURPRISE_DMN_THRESHOLD,
     MODE_CEN,
     MODE_DMN,
+    MODE_SWITCH_KIND,
     MODE_SWITCHER_ORIGIN,
     ModeSwitcher,
     _decide_target_mode,
+    _write_mode_transition,
     read_current_mode,
 )
 from afair.agents.salience import (
@@ -201,6 +203,57 @@ def test_read_recent_salience_orders_most_recent_first(
 def test_read_current_mode_defaults_to_dmn(db: sqlite3.Connection) -> None:
     """Clean vault → DMN (no transition events yet)."""
     assert read_current_mode(db) == MODE_DMN
+
+
+def test_repeated_transition_with_identical_scores_is_not_deduped(
+    db: sqlite3.Connection,
+) -> None:
+    """A later transition that happens to carry the SAME rounded salience/surprise
+    and from/to as an earlier one must still write a distinct event.
+
+    Regression for §3e: without a monotonic component in the payload, the third
+    transition below (DMN->CEN with the same rounded scores as the first) hashed
+    to the first event, hit ON CONFLICT DO NOTHING, and wrote nothing — so
+    read_current_mode reported the intervening DMN forever.
+    """
+    import time
+
+    def _count() -> int:
+        return db.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE kind = ? AND origin = ?",
+            (MODE_SWITCH_KIND, MODE_SWITCHER_ORIGIN),
+        ).fetchone()["n"]
+
+    _write_mode_transition(
+        db,
+        to_mode=MODE_CEN,
+        from_mode=MODE_DMN,
+        cumulative_salience=0.812,
+        cumulative_surprise=0.401,
+        window=10,
+    )
+    time.sleep(0.01)
+    _write_mode_transition(
+        db,
+        to_mode=MODE_DMN,
+        from_mode=MODE_CEN,
+        cumulative_salience=0.100,
+        cumulative_surprise=0.050,
+        window=10,
+    )
+    time.sleep(0.01)
+    # Identical rounded scores + same from/to as the first transition.
+    _write_mode_transition(
+        db,
+        to_mode=MODE_CEN,
+        from_mode=MODE_DMN,
+        cumulative_salience=0.812,
+        cumulative_surprise=0.401,
+        window=10,
+    )
+
+    assert _count() == 3, "three genuine transitions must be three distinct events"
+    assert read_current_mode(db) == MODE_CEN
 
 
 def test_mode_switcher_does_nothing_when_no_salience(
