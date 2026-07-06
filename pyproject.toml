@@ -72,6 +72,10 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.15.20",
     "mypy>=1.13.0",
+    # JSON Schema draft-2020-12 validation for the MCP surface guard
+    # (tests/test_mcp_surface.py). Already present transitively; pinned as an
+    # explicit dev dep so the surface lint has a first-class contract.
+    "jsonschema>=4.26.0",
 ]
 
 [build-system]

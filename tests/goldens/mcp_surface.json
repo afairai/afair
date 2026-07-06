@@ -1,0 +1,1019 @@
+{
+  "instructions_sha256": "fe12ed575af027e4650a25688acb5e75aac5364b66d20ba442e925aa65f75356",
+  "resources": [
+    {
+      "description": "Snapshot of the user's current vault state. Read at session start so the AI knows what's been on the user's mind without having to recall first.",
+      "mimeType": "application/json",
+      "name": "Session start context",
+      "uri": "afair://session-start"
+    }
+  ],
+  "server": {
+    "name": "afair"
+  },
+  "tools": [
+    {
+      "annotations": null,
+      "description": "Log a structured event from your own agent activity to the user's vault.\n\nThis tool is for YOU (the AI agent) to record what YOU did. Different\nfrom ``remember`` (which is for content the USER chose to save). ``observe``\nis your auto-journal so that future sessions of you, or other AI agents\nthe user works with, know what happened. The user wants visibility\ninto what their AI does, partly so they can audit, partly so the\nnext session has continuity.\n\nDefault to verbose observation. The user's salience worker and\nmode-switcher read observe events to decide attention state; richer\nobserve data leads to better cognitive routing on subsequent recalls.\n\nWHEN TO CALL:\n  - After completing a substantive task: shipping code, sending an email,\n    making a decision, finishing a meeting, running an analysis, editing\n    a file.\n  - When you start a significant work session (\"started_task\").\n  - On any agent action whose existence the user might want to recall\n    later (\"what did Claude do yesterday in this project?\").\n  - On error or failure that's worth tracking for diagnosis.\n\nWHEN NOT TO CALL:\n  - For every micro-step, don't observe each individual file read.\n  - For purely conversational acks.\n  - For things the user explicitly typed (that's ``remember`` territory if\n    durable, nothing if not).\n\nARGUMENTS:\n  - event: A JSON object. The only REQUIRED key is \"action\" (a non-empty\n    string verb that names what kind of thing happened). Recognized\n    optional keys:\n      \"subject\": what was acted upon (filename, person, ticket, ...)\n      \"result\":  outcome (\"success\", \"failed: X\", free text)\n    Beyond those, ANY additional fields are preserved verbatim. Use\n    whatever shape fits your agent's natural mental model. A JSON-string-\n    serialized object is also accepted and parsed, and a bare string\n    becomes the action — the event is never rejected on shape.\n\n    Examples:\n      {\"action\": \"edit_file\", \"subject\": \"events.py\",\n       \"result\": \"added inline-vs-spill logic\"}\n      {\"action\": \"sent_email\", \"subject\": \"sajinth@example.com\",\n       \"result\": \"follow-up on roadmap\", \"thread_id\": \"...\"}\n      {\"action\": \"deployed\", \"subject\": \"afair-prod\",\n       \"result\": \"v0.1.3\", \"duration_s\": 47}\n      {\"action\": \"drafted_message\", \"subject\": \"Mara\",\n       \"result\": \"birthday note for Saturday\"}\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\"}\n",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "additionalProperties": true,
+            "description": "An agent-self-logged event. ``action`` is required; other keys are\nrecognized or preserved verbatim.\n\nConfigured to allow arbitrary additional fields so different AI clients\ncan use whatever shape fits their mental model. The extras are size-\nand nesting-bounded — see ``_bound_extras``.",
+            "properties": {
+              "action": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "result": {
+                "anyOf": [
+                  {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "subject": {
+                "anyOf": [
+                  {
+                    "maxLength": 1000,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "event"
+        ],
+        "type": "object"
+      },
+      "meta": {
+        "fastmcp": {
+          "version": "1"
+        }
+      },
+      "name": "observe",
+      "outputSchema": {
+        "properties": {
+          "content_hash": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "event_id",
+          "content_hash"
+        ],
+        "type": "object"
+      },
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "Read the user's memory vault, afair, the persistent substrate they\nshare across every session and every AI tool. CALL THIS BEFORE you\nrespond to anything where the user's history might be relevant. Always.\n\nThe user installed afair so their context doesn't have to be repeated\nto every new conversation. A session where you have access to afair\nand don't call it is worse than a session without afair, because\nyou're silently failing to use the memory they chose to maintain.\n\nWHEN TO CALL:\n  - At the START of every substantive task. Don't ask \"do you want\n    me to check?\" Just check. Recall is cheap; missing context isn't.\n  - Before answering questions that benefit from prior context:\n    preferences, past decisions, names, ongoing projects, history with\n    people (at work and outside it), important dates, recurring themes,\n    deadlines, commitments.\n  - When the user asks \"do you remember X?\", \"what did we say about Y?\",\n    \"remind me of Z?\".\n  - When the user wants the FULL content of a specific event (\"show me the\n    whole document\"): use ``by_id`` or ``by_content_hash`` with\n    ``full_payload=True``.\n  - When you want a snapshot of the vault's contents (\"what's in there?\"):\n    use ``stats=True``.\n  - On topic shifts mid-conversation. New topic = fresh recall.\n\nWHEN NOT TO CALL:\n  - Pure compute questions (\"what's 2+2\", \"translate this\") that don't\n    depend on the user's history.\n  - When you just retrieved the same query a moment ago in this session.\n  - Trivial conversational responses where no memory could help.\n\nARGUMENTS (all optional; combine as needed):\n  - query: Natural-language search. Examples: \"what did Sajinth say\n    about the roadmap\", \"deadlines for the API project\", \"what does Mara\n    like to drink\", \"when is my sister's birthday\".\n  - by_id: ULID of one specific event. Returns that event in full.\n    Use after a prior recall hit when you need the whole content.\n  - by_content_hash: sha256-prefixed hash of one specific event.\n    Same lookup semantics as by_id.\n  - scope: Optional substring filter. Reserved, currently no-op until\n    Phase 3.5 emergent context detection lands.\n  - depth: One of \"auto\" (default), \"shallow\", \"normal\", \"deep\".\n      \"auto\"    → system picks based on query shape (identifiers and\n                  single tokens → shallow; multi-token natural language\n                  → normal hybrid). Recommended default.\n      \"shallow\" → FTS5 keyword only. Cheapest.\n      \"normal\"  → Hybrid FTS5 + vector. Local embedding inference, ~120ms.\n      \"deep\"    → Hybrid like normal, but the flat history lens: temporal\n                  relevance decay is OFF, so past-dated and superseded\n                  memories rank by match strength alone. Use for history /\n                  as-of questions (\"what did I know back then\", \"show me past\n                  appointments\"). Default recall instead de-prioritizes\n                  memories whose moment has passed, without dropping them.\n  - limit: Max hits to return. Omitted → 10 in compact verbosity, 20\n    otherwise. Server cap 100 (larger values are clamped, not rejected).\n  - verbosity: \"compact\" (default), \"standard\", or \"full\". Controls how\n    much of each hit's interpretation/conflicts/linked-list detail is\n    served — NOT the payload (see full_payload).\n      \"compact\" → the AI-useful minimum: capped summary + payload text,\n                  top canonical entities and edges, only the top\n                  caveat-bearing conflicts. Use this by default.\n      \"standard\"→ the full interpretation minus the redundant raw entity\n                  list and null edge validity bounds.\n      \"full\"    → every field. Use standard/full, or by_id + full_payload,\n                  when you need salient_facts / raw entities / the complete\n                  conflict history. by_id/by_content_hash always serve full.\n  - cursor: Opaque paging token for search/browse. Pass the ``next_cursor``\n    from a prior recall back here verbatim to get the next page. Best-effort:\n    rankings are recomputed per call. A bad cursor serves page 1 with a note.\n  - full_payload: Default false. When true, each hit's payload is the full\n    untruncated content (for text-large events, the blob is read back into\n    text). When false, text payloads are clipped (~500 chars standard/full,\n    ~300 compact). Lookup modes (by_id, by_content_hash) imply full_payload=true.\n  - stats: Default false. When true, the response includes a\n    ``summary`` field with total_events, by_kind, by_origin counts,\n    useful for \"what's the lay of the land\" queries. Combines with any\n    other mode.\n  - feedback: Optional dict reporting on hits from a PRIOR recall.\n    Shape:\n        {\"useful_event_ids\": [event_id, ...],\n         \"not_useful_event_ids\": [event_id, ...],\n         \"missing_topic\": \"free-text note if expected content was absent\"}\n    This is the signal the self-improvement tuner reads to validate\n    parameter changes (sharper salience, smarter mode-switching,\n    better surprise calibration). After a recall, the NEXT time you\n    call recall, include feedback referring to the prior hits. Don't\n    ask whether to. Just send it. Empty payload is a no-op.\n  - decide: Confirm/reject pending review proposals. Accepts a SINGLE\n    decision or a LIST of up to 50 (batch-drain the queue in one call).\n    Each: {\"proposal_id\": \"...\", \"verdict\": \"confirm\"|\"reject\"|\"retract\",\n    \"to_kind\": \"...\"}. The per-decision outcomes come back in\n    ``decisions`` (see RETURN). A bad decision in a batch is reported as\n    that item's outcome (status \"error\"); the rest still apply.\n  - pending_limit / pending_offset: Page the review queue. pending_limit\n    (default 20, server cap 200) sets the page size; pending_offset skips\n    that many rows. Passing pending_limit alone includes the list even\n    without stats=True. While DRAINING the queue, decide a page then\n    re-fetch at pending_offset=0 — deciding removes rows from the open\n    set, so advancing the offset would skip the new head.\n\nRETURN:\n  {\"hits\": [{\"event_id\": \"...\", \"content_hash\": \"...\", \"created_at\": \"...\",\n             \"kind\": \"...\", \"origin\": \"...\",\n             \"payload\": {...}, \"truncated\": bool,\n             \"interpretation\": {...} | null,\n             \"linked_event_ids\": [...],\n             \"parent_hashes\": [...],\n             \"invalidation\": {...} | null,\n             \"conflicts\": [...]}],\n   \"depth_used\": \"shallow\" | \"normal\" | \"deep\",\n   \"note\": null | \"...\",\n   \"summary\": null | {total_events, by_kind, by_origin},\n   \"decisions\": [{\"proposal_id\": \"...\", \"status\": \"...\", \"note\": \"...\"}, ...],\n   \"next_cursor\": null | \"...\"}\n\n``decisions`` is populated only when this call carried ``decide=`` — one\noutcome per decision sent, in order (empty otherwise). ``next_cursor`` is\nnon-null when a next page is reachable; pass it back verbatim as ``cursor``.\nIt is null once the pageable window is exhausted OR capped (the server bounds\nhow deep paging can go — at that edge a note says the window was capped, so\na client paging \"until next_cursor is None\" always terminates).\n\nEach hit's payload is either the truncated summary or the full content,\ndepending on the full_payload flag (and lookup mode). ``truncated`` tells\nyou which form you got.\n\nIf hits is empty for a query, the user genuinely has no relevant memory\nyet. Consider asking them for context rather than guessing.\n\nIf ``invalidation`` is non-null on a hit, the fact was marked superseded\nby a later event. For current-state questions, prefer hits where\ninvalidation is null. For historical questions, treat all hits as\nrelevant context.\n",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "by_content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "decide": {
+            "anyOf": [
+              {
+                "description": "The operator's verdict on one pending proposal — an entity-audit\ncorrection or a Schema-Evolver ontology revision.\n\nThe client first sees proposals via ``recall(stats=True).pending_corrections``,\nasks the user, then passes the decision back on its next recall:\n``recall(decide=CorrectionDecision(proposal_id=..., verdict=\"confirm\"))``.\nA confirm applies the change through the append-only primitives and\nrecords it; a reject closes the proposal untouched. Deciding an\nalready-decided proposal is a no-op. Ids carrying the ``ont_`` prefix\nroute to the ontology queue (ADR-0003 Phase 5) — same argument, same\nloop, no new tool.\n\nWhy optional + on the existing tool: I1 forbids new tools. Additive optional\nargs are allowed, exactly like ``feedback``.",
+                "properties": {
+                  "proposal_id": {
+                    "type": "string"
+                  },
+                  "to_kind": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "verdict": {
+                    "enum": [
+                      "confirm",
+                      "reject",
+                      "retract",
+                      "revert"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "proposal_id",
+                  "verdict"
+                ],
+                "type": "object"
+              },
+              {
+                "items": {
+                  "description": "The operator's verdict on one pending proposal — an entity-audit\ncorrection or a Schema-Evolver ontology revision.\n\nThe client first sees proposals via ``recall(stats=True).pending_corrections``,\nasks the user, then passes the decision back on its next recall:\n``recall(decide=CorrectionDecision(proposal_id=..., verdict=\"confirm\"))``.\nA confirm applies the change through the append-only primitives and\nrecords it; a reject closes the proposal untouched. Deciding an\nalready-decided proposal is a no-op. Ids carrying the ``ont_`` prefix\nroute to the ontology queue (ADR-0003 Phase 5) — same argument, same\nloop, no new tool.\n\nWhy optional + on the existing tool: I1 forbids new tools. Additive optional\nargs are allowed, exactly like ``feedback``.",
+                  "properties": {
+                    "proposal_id": {
+                      "type": "string"
+                    },
+                    "to_kind": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    "verdict": {
+                      "enum": [
+                        "confirm",
+                        "reject",
+                        "retract",
+                        "revert"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "verdict"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "depth": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "shallow",
+              "normal",
+              "deep"
+            ],
+            "type": "string"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "description": "Optional caller-supplied signal on PRIOR recall hits.\n\nThe MCP-client AI calls ``recall(...)`` once to get hits, then on\nits NEXT recall passes a ``feedback`` payload referring to those\nearlier hits. The signal drives the self-improvement tuner — see\nthe recursive self-improvement design.\n\nAll fields optional. Empty payload is a no-op. IDs over the cap\nare truncated silently to keep one inflated client from flooding\nthe substrate.\n\nWhy optional + on the existing tool: I1 forbids new tools.\nAdditive optional args on an existing tool are allowed (shipped\nsignatures keep working for clients that don't send feedback).",
+                "properties": {
+                  "missing_topic": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "not_useful_event_ids": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "useful_event_ids": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "full_payload": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "pending_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "pending_offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "stats": {
+            "default": false,
+            "type": "boolean"
+          },
+          "verbosity": {
+            "default": "compact",
+            "enum": [
+              "compact",
+              "standard",
+              "full"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "meta": {
+        "fastmcp": {
+          "version": "1"
+        }
+      },
+      "name": "recall",
+      "outputSchema": {
+        "description": "Result of any `recall` call.\n\nSix call modes share this shape:\n  - ``recall(query=...)``                      → search via FTS+vector\n  - ``recall(by_id=...)``                      → single-event lookup\n  - ``recall(by_content_hash=...)``            → single-event lookup\n  - ``recall(stats=True)``                     → summary + recent hits\n  - ``recall(query=..., full_payload=True)``   → search, untruncated\n  - ``recall()``                               → most-recent N hits\n\n``summary`` is only populated when ``stats=True`` was requested.\n``coverage`` is the honesty layer (see RecallCoverage) — populated on\nquery/browse results, null on single-event lookups.\n``pending_corrections`` lists open entity-audit AND ontology proposals —\npopulated on ``stats=True`` (and on any call that carried a ``decide``,\nso the client sees the remaining queue after acting).\n``pending_corrections_count`` is the TRUE total of open proposals\n(entity-audit + ontology) and is populated on EVERY call — a cheap\nnudge signal; call ``stats=True`` to fetch the list itself.",
+        "properties": {
+          "coverage": {
+            "anyOf": [
+              {
+                "description": "Honesty layer over a recall result — \"what the vault does NOT (confidently)\ntell you about this query.\"\n\nThe point is to make recall *honest about its own limits*, so an AI client\ncan hedge or ask a follow-up instead of treating thin/stale/contradicted\nmemory as settled fact. Computed entirely from signals the hits already\ncarry (created_at, conflicts, invalidation, interpretation confidence) — no\nextra LLM call.\n\nAll fields default to the \"nothing to flag\" value, so an empty/None\ncoverage block means \"no caveats\". ``caveats`` holds the human-readable\nlines an agent can surface verbatim; the structured fields let it branch.\n\nAdditive per Invariant I1 — a new optional field on RecallResult, the three\nfrozen verbs are unchanged.",
+                "properties": {
+                  "caveats": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Caveats",
+                    "type": "array"
+                  },
+                  "invalidated_hits": {
+                    "default": 0,
+                    "title": "Invalidated Hits",
+                    "type": "integer"
+                  },
+                  "low_confidence_edges": {
+                    "default": 0,
+                    "title": "Low Confidence Edges",
+                    "type": "integer"
+                  },
+                  "stale_newest_event_days": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Stale Newest Event Days"
+                  },
+                  "thin_evidence": {
+                    "default": false,
+                    "title": "Thin Evidence",
+                    "type": "boolean"
+                  },
+                  "unresolved_contradictions": {
+                    "default": 0,
+                    "title": "Unresolved Contradictions",
+                    "type": "integer"
+                  }
+                },
+                "title": "RecallCoverage",
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "decisions": {
+            "default": [],
+            "items": {
+              "description": "Per-decision outcome when recall carried ``decide=`` (single or batch).\n\nAdditive response field per I1 — mirrors the substrate ``CorrectionOutcome``\nso a draining client sees exactly what happened to each proposal it sent.",
+              "properties": {
+                "note": {
+                  "title": "Note",
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "title": "Proposal Id",
+                  "type": "string"
+                },
+                "status": {
+                  "title": "Status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "proposal_id",
+                "status",
+                "note"
+              ],
+              "title": "CorrectionOutcomeView",
+              "type": "object"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "depth_used": {
+            "enum": [
+              "auto",
+              "shallow",
+              "normal",
+              "deep"
+            ],
+            "title": "Depth Used",
+            "type": "string"
+          },
+          "hits": {
+            "items": {
+              "description": "One match returned by `recall`.\n\n``payload`` is either the truncated summary view (default — for\nskim-many-results UX) or the full untruncated payload, depending on\nwhether the caller passed ``full_payload=True``. ``truncated``\ntells the caller which form they got. For ``content_type ==\n'text-large'`` with ``full_payload=True``, the inline text is read\nback from the object store and surfaced in ``payload.text`` so\ncallers see one consistent shape regardless of where bytes lived.\n\n``interpretation`` is the latest successful Extractor output —\nbest_guess_kind, summary, entities, salient_facts, language,\nconfidence, source_attribution. Null when extraction failed or is\nin flight.\n\n``linked_event_ids`` are content_hashes the Bind agent automatically\nfound to be semantically similar to this hit. Empty list when the\nBind agent hasn't processed this event yet or found no neighbors.\n\n``invalidation`` is non-null when a later event recorded a\ncontradiction or supersession for this hit. Recall does NOT filter\ninvalidated hits — they surface alongside current ones so the AI\ncan decide based on query intent (current state vs history).\n\n``conflicts`` lists Conflict-Resolver verdicts touching this event\n(cold-path output). Each entry references the OTHER event in the\npair plus the verdict + reason.\n\n``parent_hashes`` is the lineage list set at write time (empty for\nmost events). Populated for events with explicit ``parent_hashes``\nin the original write OR for invalidation events (which carry the\ntarget's hash there).",
+              "properties": {
+                "conflicts": {
+                  "default": [],
+                  "items": {
+                    "description": "One verdict pair from the cold-path Conflict-Resolver (Phase 3).\n\nSurfaces on a recall hit when a later cycle of the Conflict-Resolver\njudged this event against some other event in the vault. The\n``verdict`` is one of the relation taxonomy in ``afair/agents/verdicts.py``\n(updates / reverts / evolves / conflicts / false_conflict / confirms /\nunrelated / name_clash / unsure). Historical rows may carry older strings\n(contradicts / compatible / unclear), which normalize on read.\nThe AI client uses these to decide whether to surface or suppress\nconflicting facts when answering the user.",
+                    "properties": {
+                      "confidence": {
+                        "default": 0.0,
+                        "title": "Confidence",
+                        "type": "number"
+                      },
+                      "reason": {
+                        "default": "",
+                        "title": "Reason",
+                        "type": "string"
+                      },
+                      "verdict": {
+                        "title": "Verdict",
+                        "type": "string"
+                      },
+                      "with_content_hash": {
+                        "title": "With Content Hash",
+                        "type": "string"
+                      },
+                      "with_event_id": {
+                        "title": "With Event Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "with_event_id",
+                      "with_content_hash",
+                      "verdict"
+                    ],
+                    "title": "ConflictFlag",
+                    "type": "object"
+                  },
+                  "title": "Conflicts",
+                  "type": "array"
+                },
+                "content_hash": {
+                  "title": "Content Hash",
+                  "type": "string"
+                },
+                "created_at": {
+                  "title": "Created At",
+                  "type": "string"
+                },
+                "event_id": {
+                  "title": "Event Id",
+                  "type": "string"
+                },
+                "interpretation": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Interpretation"
+                },
+                "invalidation": {
+                  "anyOf": [
+                    {
+                      "description": "Surfacing of a fact's bi-temporal invalidation status.\n\nPresent when a later event with ``kind='invalidate'`` referenced this\nhit's ``content_hash``. The AI client uses this to decide whether to\ntreat the hit as currently-true (``invalidation is None``) or as\nhistorical context. The original event remains in the substrate\nforever per I2 — this is just the projection.",
+                      "properties": {
+                        "at": {
+                          "title": "At",
+                          "type": "string"
+                        },
+                        "by_event_id": {
+                          "title": "By Event Id",
+                          "type": "string"
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "default": null,
+                          "title": "Reason"
+                        }
+                      },
+                      "required": [
+                        "at",
+                        "by_event_id"
+                      ],
+                      "title": "InvalidationSummary",
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "linked_event_ids": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Linked Event Ids",
+                  "type": "array"
+                },
+                "origin": {
+                  "title": "Origin",
+                  "type": "string"
+                },
+                "parent_hashes": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Parent Hashes",
+                  "type": "array"
+                },
+                "payload": {
+                  "additionalProperties": true,
+                  "title": "Payload",
+                  "type": "object"
+                },
+                "truncated": {
+                  "title": "Truncated",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "event_id",
+                "content_hash",
+                "created_at",
+                "kind",
+                "origin",
+                "payload",
+                "truncated"
+              ],
+              "title": "RecallHit",
+              "type": "object"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Next Cursor"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Note"
+          },
+          "pending_corrections": {
+            "default": [],
+            "items": {
+              "description": "One open proposal awaiting the operator's decision — an entity-audit\ncorrection OR a Schema-Evolver ontology revision (ADR-0003 Phase 5).\n\nSurfaced on ``recall(stats=True)`` (the session-start / check-in call) so\nthe AI client can raise it conversationally and, on a yes, confirm it via\n``recall(decide=...)``. ``prompt`` is a ready-to-ask yes/no question; the\nstructured fields let the client explain or branch.\n\nAdditive per Invariant I1 — a new optional field on RecallResult; the three\nfrozen verbs keep their signatures. Ontology proposals reuse the same view\n(same list, same decide loop): their ``kind`` is ``'ontology_<action>'``,\nthe entity fields stay empty, and ``subject_slug`` names the kind the\nrevision touches.",
+              "properties": {
+                "confidence": {
+                  "title": "Confidence",
+                  "type": "number"
+                },
+                "entity_id": {
+                  "default": "",
+                  "title": "Entity Id",
+                  "type": "string"
+                },
+                "entity_name": {
+                  "default": "",
+                  "title": "Entity Name",
+                  "type": "string"
+                },
+                "evidence": {
+                  "title": "Evidence",
+                  "type": "string"
+                },
+                "id": {
+                  "title": "Id",
+                  "type": "string"
+                },
+                "kind": {
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "prompt": {
+                  "title": "Prompt",
+                  "type": "string"
+                },
+                "subject_slug": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Subject Slug"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "prompt",
+                "evidence",
+                "confidence"
+              ],
+              "title": "ProposedCorrectionView",
+              "type": "object"
+            },
+            "title": "Pending Corrections",
+            "type": "array"
+          },
+          "pending_corrections_count": {
+            "default": 0,
+            "title": "Pending Corrections Count",
+            "type": "integer"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "description": "Vault-wide summary populated when ``recall(stats=True)`` is called.\n\nStandalone counts give the AI a sense of vault size + composition\nwithout having to enumerate hits. Useful at session start (\"what's\nthe lay of the land\") and for periodic check-ins.",
+                "properties": {
+                  "by_kind": {
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "title": "By Kind",
+                    "type": "object"
+                  },
+                  "by_origin": {
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "title": "By Origin",
+                    "type": "object"
+                  },
+                  "total_events": {
+                    "title": "Total Events",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "total_events",
+                  "by_kind",
+                  "by_origin"
+                ],
+                "title": "ContextSummary",
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "hits",
+          "depth_used"
+        ],
+        "title": "RecallResult",
+        "type": "object"
+      },
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "Save something to the user's persistent memory vault, afair, the\nsubstrate that travels across their sessions, AI tools, and years.\nUse it generously.\n\nThe user explicitly installed afair so their context doesn't reset.\nIf a fact crosses your attention and looks even slightly worth more\nthan the current message, save it. The cost of forgetting is the\nuser re-explaining themselves next session; the cost of an extra\nremember is one append-only row that dedupes if identical.\n\nWHEN TO CALL:\n  - The user explicitly says \"remember\", \"save\", \"note that\", \"keep this\",\n    \"don't forget\", \"make a note\", \"add to memory\", or any clear save-this\n    signal.\n  - The user shares a durable fact worth retaining across sessions, from\n    any part of life: a work decision or deadline, a colleague's role, a\n    friend's or family member's name and what matters to them, a birthday\n    or anniversary, a preference (food, travel, how they like to work), a\n    personal goal, something they are working through.\n  - The user shows you content (an email, a meeting note, a document, a\n    screenshot, a photo, a PDF, an audio clip) whose substance has reason\n    to outlive this conversation.\n  - You make a significant decision together with the user that should\n    survive into future sessions.\n  - The user corrects an earlier fact (\"actually Sajinth is at Athara,\n    not elvah\"). Write the new fact AND pass the old event's content_hash\n    in ``invalidates`` to mark it superseded.\n\nDEFAULT: when in doubt, remember. Don't ask for permission. Don't\nnarrate \"I'll remember this for you.\" Just call it.\n\nWHEN NOT TO CALL:\n  - Conversational filler (\"ok thanks\", \"got it\", \"sounds good\").\n  - Content the user is actively dictating to another destination.\n  - Things you can easily re-derive from current code or state.\n  - Personal details about other people that the user has not asked you\n    to track.\n\nARGUMENTS:\n  - content: A discriminated union. Either:\n      {\"type\": \"text\", \"text\": \"...\"}                          for any text, OR\n      {\"type\": \"binary\", \"data_b64\": \"...\", \"mime\": \"image/png\",\n       \"filename_hint\": \"screenshot.png\"}                       for binary.\n    Max 10 MB raw bytes. A JSON-string-serialized object (the same shape\n    sent as a string) is also accepted and parsed, and a bare string is\n    stored as text — the write is never rejected on shape.\n  - context: Optional. Where this came from or what it relates to.\n    Examples: \"email thread with Sajinth\", \"Tuesday standup\",\n    \"dinner with Mara\", \"Mum's birthday weekend\". Aids future\n    recall.\n  - type_hint: Optional. What kind of thing this is, if you have a guess.\n    Examples: \"email\", \"meeting_minutes\", \"decision\", \"screenshot\".\n    Advisory only. The system may classify differently.\n  - parent_hashes: Optional. Content hashes of events this one references\n    (corrections, replies, threads).\n  - invalidates: Optional. List of content_hashes that this new fact\n    supersedes. Each target gets its own append-only invalidation event\n    referencing it. Use when the user corrects a prior fact or a meeting\n    outcome supersedes an earlier plan.\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\",\n   \"deduplicated\": false, \"invalidated\": [\"sha256:...\", ...]}\n\n  - deduplicated=true means an event with identical content+context already\n    existed; nothing was added but the existing event_id is returned.\n  - invalidated lists the content_hashes that were marked superseded in\n    this call.\n\nThe substrate is the user's vault, not yours. Be a thoughtful librarian:\nsave signal worth keeping; don't hoard ephemera.\n",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "description": "Text variant of the remember content union.\n\nNB: ``text`` length isn't capped by Pydantic so the handler can raise\na typed :class:`ContentTooLargeError` with the actual size in the\nmessage. Defense-in-depth: the body-size middleware (12 MB raw cap)\nis the first gate; the handler is the second.",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Binary variant of the remember content union.\n\n`data_b64` is base64 of the raw bytes. `mime` is required.",
+                "properties": {
+                  "data_b64": {
+                    "type": "string"
+                  },
+                  "filename_hint": {
+                    "anyOf": [
+                      {
+                        "maxLength": 500,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "mime": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "data_b64",
+                  "mime"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Reference to an already-uploaded blob in the object store.\n\nUsed after a streaming-upload via /internal/blob/upload — the\nbytes are already on disk, this just wires an event to them.\nBypasses the 10 MB JSON-body cap so files up to the deployment\nlimit (typically 1 GB) can be remembered without holding the\nblob in RAM.\n\n``blob_hash`` MUST be ``sha256:<64-hex>`` — the streaming endpoint\nreturns it after the upload completes. If the hash doesn't exist\nin the object store the handler raises ``InvalidateTargetError``\n(similar semantics to a missing invalidates target).",
+                "properties": {
+                  "blob_hash": {
+                    "maxLength": 71,
+                    "minLength": 71,
+                    "type": "string"
+                  },
+                  "filename_hint": {
+                    "anyOf": [
+                      {
+                        "maxLength": 500,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "mime": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "blob-ref",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "blob_hash",
+                  "mime"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Atomic event composed of multiple parts.\n\nUse when a single semantic memory has more than one representation\nthat should travel together: meeting = transcript + slides +\nscreenshot; receipt = photo + extracted line items; podcast = mp3\n+ transcript + show-notes-markdown.\n\nEach part is either inline text or a blob-ref to a previously\nstreamed-uploaded blob. The compound is stored as ONE event row\n(one content_hash) with the parts array in the payload; recall\nreturns it as a single hit with the parts inline.\n\nWhy not just call remember() three times with parent_hashes\nlinking? Because atomicity matters: a meeting is one observation,\nnot three. parent_hashes is for events that ACTUALLY reference\nearlier events (an update supersedes a previous claim); compound\nis for events that have multiple FACETS.",
+                "properties": {
+                  "parts": {
+                    "items": {
+                      "oneOf": [
+                        {
+                          "description": "One text payload inside a compound event.",
+                          "properties": {
+                            "label": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 200,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "default": null
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "const": "text",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "text"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "description": "One already-uploaded blob inside a compound event.",
+                          "properties": {
+                            "blob_hash": {
+                              "maxLength": 71,
+                              "minLength": 71,
+                              "type": "string"
+                            },
+                            "filename_hint": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 500,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "default": null
+                            },
+                            "label": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 200,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "default": null
+                            },
+                            "mime": {
+                              "maxLength": 200,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "type": {
+                              "const": "blob-ref",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "blob_hash",
+                            "mime"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "maxItems": 20,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "type": {
+                    "const": "compound",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "parts"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "invalidates": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "parent_hashes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "type_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "meta": {
+        "fastmcp": {
+          "version": "1"
+        }
+      },
+      "name": "remember",
+      "outputSchema": {
+        "description": "Result of a `remember` call.\n\n``invalidated`` carries the content_hashes that were marked superseded\nin this call (via the ``invalidates`` kwarg). Empty list when none\nwere invalidated. Invalidation is append-only (I2-conformant) — the\ntarget events stay in the substrate, the invalidation is a new event\nwith ``kind='invalidate'`` referencing them.",
+        "properties": {
+          "content_hash": {
+            "type": "string"
+          },
+          "deduplicated": {
+            "type": "boolean"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "invalidated": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "event_id",
+          "content_hash",
+          "deduplicated"
+        ],
+        "type": "object"
+      },
+      "title": null
+    }
+  ]
+}
