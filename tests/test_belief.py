@@ -74,6 +74,14 @@ def test_predicate_crispness_catches_verbose_profile_language() -> None:
         "is the CEO of",
         "reports to",
         "lives in",
+        # over-broad stems removed from the denylist — these are real relations
+        "is involved in",
+        "involves",
+        "retains counsel from",
+        "retains",
+        # "appears" membership form survives; only the hedge is gated
+        "appears in",
+        "appears on",
     ],
 )
 def test_predicate_is_durable_keeps_real_relations(predicate: str) -> None:
@@ -89,7 +97,6 @@ def test_predicate_is_durable_keeps_real_relations(predicate: str) -> None:
         "awaits",
         "is awaiting",
         "contrasts with",
-        "retains value",  # the operator's own "retains value" example
         "is related to",
         "related to",
         "is associated with",
@@ -99,12 +106,10 @@ def test_predicate_is_durable_keeps_real_relations(predicate: str) -> None:
         "refers to",
         "discusses",
         "criticizes",
-        "involves",
-        "is involved in",
         "regarding",
         "about",
         "seems",
-        "appears",
+        "appears to be",
         "may be",
         "might be",
     ],

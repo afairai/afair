@@ -113,17 +113,18 @@ _NON_DURABLE_PREDICATE_STEMS: frozenset[str] = frozenset(
         "criticize",
         "criticizes",
         "criticized",
-        "retain",
-        "retains",
-        "involve",
-        "involves",
-        "involved in",
         "regarding",
         "about",
         "seems",
-        "appears",
+        # "appears" alone over-matches membership ("appears in podcast X"); only
+        # the hedge form ("appears to be Y") is non-durable.
+        "appears to",
         "may be",
         "might be",
+        # NOTE: "involve*" and "retain*" are deliberately NOT here — they are
+        # genuine durable relations ("is involved in <project>", "retains
+        # counsel from <firm>"), so gating them would drop and (via the B4
+        # sweep) invalidate real edges.
     }
 )
 
