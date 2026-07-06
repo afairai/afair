@@ -173,6 +173,7 @@ def _apply_correction(
     detail: dict[str, Any],
     decided_by: str,
     proposal_id: str,
+    to_kind_override: str | None = None,
 ) -> str:
     """Apply a confirmed correction through the append-only primitives.
 
@@ -182,9 +183,16 @@ def _apply_correction(
     MORE-correct or equal state (the proposal simply stays open and
     re-confirms cleanly), never a falsely-reported one — so the
     multi-statement window is safe here, unlike edge-review reject.
+
+    ``to_kind_override`` (sub-batch D) lets the caller's ``to_kind`` win over
+    the detected ``detail['to_kind']`` on a retype confirm ("yes, re-type it —
+    but to *this* kind, not the one you guessed"). Both are already
+    registry-validated in ``decide_correction``. A ``merge`` confirm ignores
+    the override (documented — merge has no kind to correct).
     """
     reason = f"operator-confirmed audit proposal {proposal_id}"
     if kind == "retype":
+        target_kind = to_kind_override or detail["to_kind"]
         # Record the confirm as an observe event and anchor the assignment to
         # it (entity_kind_assignments.source_event_id) — I7 (recorded change).
         ev = write_event(
@@ -194,7 +202,7 @@ def _apply_correction(
             payload={
                 "action": "confirm_correction",
                 "subject": proposal_id,
-                "result": f"retype {detail['from_kind']} -> {detail['to_kind']}",
+                "result": f"retype {detail['from_kind']} -> {target_kind}",
                 "name": detail["name"],
             },
         )
@@ -204,18 +212,18 @@ def _apply_correction(
         current_kind = resolve_entity_kind(conn, target)
         if current_kind is None:
             return "no-op (entity not found)"
-        if current_kind == detail["to_kind"]:
+        if current_kind == target_kind:
             return "no-op (already the target kind)"
         assign_entity_kind(
             conn,
             entity_id=target,
-            kind_slug=detail["to_kind"],
+            kind_slug=target_kind,
             assigned_by=decided_by,
             reason=reason,
             confidence=1.0,
             source_event_id=ev.id,
         )
-        return f"re-typed '{detail['name']}': {current_kind} → {detail['to_kind']}"
+        return f"re-typed '{detail['name']}': {current_kind} → {target_kind}"
     if kind == "merge":
         into_id = detail["into_entity_id"]
         write_entity_merge(
@@ -394,25 +402,30 @@ def _decide_merge_review(
     decided_by: str,
     now: str,
 ) -> CorrectionOutcome:
-    """A cross-kind auto-merge review. ``confirm`` keeps the picked kind (no
-    change); ``reject`` with a ``to_kind`` re-types the merged entity to the
-    correct kind; ``reject`` without one just flags it."""
+    """A cross-kind auto-merge review. A ``to_kind`` that differs from the
+    auto-picked kind re-types the merged entity — under EITHER verdict, because
+    the operator explicitly named a target kind and applying it does exactly
+    what they asked (sub-batch D — honor to_kind on confirm; the earlier code
+    silently dropped a confirm+to_kind, so a corrected kind typed alongside a
+    "yes" was lost). Without a differing ``to_kind``: ``confirm`` keeps the
+    picked kind, ``reject`` just flags it."""
     merged_kind = detail["merged_kind"]
     into_name = detail["into_name"]
-    if verdict == "confirm":
-        _set_status(conn, proposal_id, "confirmed", now, decided_by)
-        return CorrectionOutcome(
-            proposal_id=proposal_id,
-            status="confirmed",
-            note=f"kept '{into_name}' as {merged_kind}",
-        )
-    # reject — the auto-picked kind is wrong.
+    # to_kind wins under either verdict — the operator named a target kind.
     if to_kind is not None and to_kind != merged_kind:
         note = _retype_merged_entity(
             conn, detail=detail, to_kind=to_kind, decided_by=decided_by, proposal_id=proposal_id
         )
         _set_status(conn, proposal_id, "applied", now, decided_by)
         return CorrectionOutcome(proposal_id=proposal_id, status="applied", note=note)
+    if verdict == "confirm":
+        # confirm with no target kind (or the same kind) → keep it, no-op.
+        _set_status(conn, proposal_id, "confirmed", now, decided_by)
+        return CorrectionOutcome(
+            proposal_id=proposal_id,
+            status="confirmed",
+            note=f"kept '{into_name}' as {merged_kind}",
+        )
     _set_status(conn, proposal_id, "rejected", now, decided_by)
     return CorrectionOutcome(
         proposal_id=proposal_id,
@@ -432,8 +445,13 @@ def decide_correction(
     """Record the operator's decision on one proposal; apply it where a confirm
     (or a corrective reject) implies a change.
 
-    ``to_kind`` carries the corrected kind for a ``merge_review`` reject ("no,
-    Clario is a project, not a product"). It's validated against the kind
+    ``to_kind`` carries the corrected kind for a ``merge_review`` or a
+    ``retype`` proposal ("no, Clario is a project, not a product"). It is
+    honored on EITHER verdict for those two kinds (sub-batch D): a
+    ``merge_review`` confirm+to_kind now re-types instead of silently dropping
+    the target, and a ``retype`` confirm+to_kind overrides the detector's
+    guessed kind. It is IGNORED for ``merge``, ``edge_review`` and ontology
+    proposals (they carry no kind to correct). It's validated against the kind
     registry (ADR-0003 Phase 1): the slug must resolve to a live registry
     kind — a bad value is a ValueError, not a silently-stored cast.
 
@@ -538,6 +556,7 @@ def decide_correction(
         detail=detail,
         decided_by=decided_by,
         proposal_id=proposal_id,
+        to_kind_override=to_kind,
     )
     _set_status(conn, proposal_id, "applied", now, decided_by)
     return CorrectionOutcome(proposal_id=proposal_id, status="applied", note=applied_note)

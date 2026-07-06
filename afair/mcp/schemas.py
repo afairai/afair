@@ -644,9 +644,12 @@ class CorrectionDecision(BaseModel):
     previously APPLIED ontology revision by appending the compensating
     revision (I7; ontology proposals only)."""
     to_kind: str | None = None
-    """For a ``merge_review`` reject: the corrected entity kind ("no, Clario is
-    a project, not a product"). The assisting AI maps the user's natural-language
-    answer to one of the known kinds. Ignored for other proposal kinds."""
+    """The corrected entity kind ("no, Clario is a project, not a product"). The
+    assisting AI maps the user's natural-language answer to one of the known
+    kinds. Honored on EITHER verdict for ``merge_review`` and ``retype``
+    proposals (a confirm+to_kind re-types too, not just a reject); ignored for
+    ``merge``, ``edge_review`` and ontology proposals (they carry no kind to
+    correct)."""
 
 
 Decide = CorrectionDecision | list[CorrectionDecision] | None

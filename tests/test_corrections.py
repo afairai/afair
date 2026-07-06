@@ -224,6 +224,80 @@ def test_decide_rejects_bad_to_kind(db: sqlite3.Connection, settings: Settings) 
         decide_correction(db, proposal_id=mr.id, verdict="reject", to_kind="banana")
 
 
+# ── sub-batch D: to_kind honored on CONFIRM, not just reject ──────────────────
+
+
+def test_merge_review_confirm_with_to_kind_retypes(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """D regression: a confirm that ALSO names a corrected kind must apply the
+    retype — the old code silently dropped the to_kind on confirm, losing the
+    operator's correction. merged=product, confirm+to_kind=project → applied +
+    ONE assignment row landing 'project'."""
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = mr.detail["into_entity_id"]
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="confirm", to_kind="project")
+    assert out.status == "applied"
+    assert resolve_entity_kind(db, product_id) == "project"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 1
+    # Recorded (I7): the retype anchored to an observe event.
+    assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 1
+    assert all(p.id != mr.id for p in read_pending_corrections(db))
+
+
+def test_merge_review_confirm_with_same_kind_is_a_noop(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """confirm+to_kind == the already-picked kind → confirmed, nothing applied
+    (no redundant assignment row)."""
+    _seed_proposals(db, settings)
+    mr = next(p for p in read_pending_corrections(db) if p.kind == "merge_review")
+    product_id = mr.detail["into_entity_id"]
+
+    out = decide_correction(db, proposal_id=mr.id, verdict="confirm", to_kind="product")
+    assert out.status == "confirmed"
+    assert resolve_entity_kind(db, product_id) == "product"
+    assert db.execute("SELECT COUNT(*) FROM entity_kind_assignments").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 0
+
+
+def test_retype_confirm_to_kind_overrides_detected_kind(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """D: on a retype confirm, a caller-supplied to_kind overrides the
+    detector's guessed kind. maxime.team was detected person→product; the
+    operator confirms but corrects the target to 'concept'."""
+    _seed_proposals(db, settings)
+    retype = next(p for p in read_pending_corrections(db) if p.kind == "retype")
+    person_id = retype.entity_id
+    assert retype.detail["to_kind"] == "product"  # what the detector guessed
+
+    out = decide_correction(db, proposal_id=retype.id, verdict="confirm", to_kind="concept")
+    assert out.status == "applied"
+    assert resolve_entity_kind(db, person_id) == "concept"  # override won
+    rows = db.execute(
+        "SELECT kind_slug FROM entity_kind_assignments WHERE entity_id = ?", (person_id,)
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["kind_slug"] == "concept"
+
+
+def test_retype_confirm_without_override_uses_detected_kind(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """No override → the detected to_kind still applies (byte-compatible with
+    the pre-D confirm path)."""
+    _seed_proposals(db, settings)
+    retype = next(p for p in read_pending_corrections(db) if p.kind == "retype")
+    person_id = retype.entity_id
+
+    out = decide_correction(db, proposal_id=retype.id, verdict="confirm")
+    assert out.status == "applied"
+    assert resolve_entity_kind(db, person_id) == "product"  # the detected kind
+
+
 def _append_kind_revision(
     conn: sqlite3.Connection, *, action: str, from_slug: str, to_slug: str | None = None
 ) -> None:
