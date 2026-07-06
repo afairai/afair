@@ -924,6 +924,20 @@ def _api_key_for_embedding(ctx: Any) -> str | None:
 # ── remember ────────────────────────────────────────────────────────────────
 
 
+def _truncate_preserve(value: str | None, cap: int) -> tuple[str | None, str | None]:
+    """Truncate an over-long ``remember`` field to ``cap``, returning
+    ``(truncated, full_original_or_None)``.
+
+    Mirrors ``ObserveEvent._truncate_long_fields``: the field is never rejected
+    for length (write-first intake); when it exceeds the cap the full original
+    is returned separately so the caller can preserve it under ``<field>_full``
+    in the payload. Returns the value unchanged and ``None`` when within cap.
+    """
+    if value is not None and len(value) > cap:
+        return value[:cap], value
+    return value, None
+
+
 def remember(
     content: RememberContent,
     context: str | None = None,
@@ -945,12 +959,14 @@ def remember(
     # cheap protection against floods that would explode the FTS index,
     # exhaust the validator, or serialize a million invalidation
     # transactions inside a single request handler.
-    if context is not None and len(context) > schemas.MAX_CONTEXT_CHARS:
-        msg = f"context must be <= {schemas.MAX_CONTEXT_CHARS} chars; got {len(context)}"
-        raise ValueError(msg)
-    if type_hint is not None and len(type_hint) > schemas.MAX_TYPE_HINT_CHARS:
-        msg = f"type_hint must be <= {schemas.MAX_TYPE_HINT_CHARS} chars; got {len(type_hint)}"
-        raise ValueError(msg)
+    # Over-long ``context`` / ``type_hint`` are truncated to their caps rather
+    # than rejected — write-first intake, mirroring ObserveEvent's field
+    # handling. The full original is preserved under ``<field>_full`` in the
+    # payload (injected below) so nothing the caller sent is lost (I2 spirit);
+    # a client that hands in a 5KB context persists rather than being dropped
+    # at the handler boundary.
+    context, context_full = _truncate_preserve(context, schemas.MAX_CONTEXT_CHARS)
+    type_hint, type_hint_full = _truncate_preserve(type_hint, schemas.MAX_TYPE_HINT_CHARS)
     if parent_hashes is not None and len(parent_hashes) > schemas.MAX_PARENT_HASHES_PER_CALL:
         msg = (
             f"parent_hashes must be <= {schemas.MAX_PARENT_HASHES_PER_CALL} entries; "
@@ -1078,6 +1094,14 @@ def remember(
             context=context,
             type_hint=type_hint,
         )
+
+    # Preserve any over-long context/type_hint originals losslessly in the
+    # payload (write-first truncate-preserve, §3b). ``<field>_full`` mirrors the
+    # observe convention; the truncated primary field stays the FTS-indexed one.
+    if context_full is not None:
+        payload["context_full"] = context_full
+    if type_hint_full is not None:
+        payload["type_hint_full"] = type_hint_full
 
     # Single-pass write: ``write_event_with_status`` returns the row plus a
     # was_inserted bool, so we don't have to compute the content hash twice

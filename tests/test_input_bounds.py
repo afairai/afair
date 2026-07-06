@@ -77,25 +77,39 @@ def test_invalidates_above_cap_rejected() -> None:
         )
 
 
+def _payload_of(ctx: ServerContext, content_hash: str) -> dict:
+    event = read_event_by_hash(ctx.db, content_hash)
+    assert event is not None
+    return event.payload
+
+
 # ── I4 — context + type_hint string-length bound ───────────────────────────
 
 
-def test_context_above_cap_rejected() -> None:
-    huge = "x" * (schemas.MAX_CONTEXT_CHARS + 1)
-    with pytest.raises(ValueError, match="context must be"):
-        handlers.remember(
-            content=TextContent(type="text", text="ok"),
-            context=huge,
-        )
+def test_context_above_cap_truncated_and_preserved(ctx: ServerContext) -> None:
+    # Write-first intake: an over-long context is truncated to the cap, never
+    # rejected; the full original is preserved under ``context_full``.
+    huge = "x" * (schemas.MAX_CONTEXT_CHARS + 100)
+    r = handlers.remember(
+        content=TextContent(type="text", text="ok"),
+        context=huge,
+    )
+    assert r.ok
+    payload = _payload_of(ctx, r.content_hash)
+    assert payload["context"] == "x" * schemas.MAX_CONTEXT_CHARS
+    assert payload["context_full"] == huge
 
 
-def test_type_hint_above_cap_rejected() -> None:
-    huge = "x" * (schemas.MAX_TYPE_HINT_CHARS + 1)
-    with pytest.raises(ValueError, match="type_hint must be"):
-        handlers.remember(
-            content=TextContent(type="text", text="ok"),
-            type_hint=huge,
-        )
+def test_type_hint_above_cap_truncated_and_preserved(ctx: ServerContext) -> None:
+    huge = "y" * (schemas.MAX_TYPE_HINT_CHARS + 100)
+    r = handlers.remember(
+        content=TextContent(type="text", text="ok"),
+        type_hint=huge,
+    )
+    assert r.ok
+    payload = _payload_of(ctx, r.content_hash)
+    assert payload["type_hint"] == "y" * schemas.MAX_TYPE_HINT_CHARS
+    assert payload["type_hint_full"] == huge
 
 
 def test_legitimate_context_passes(ctx: ServerContext) -> None:
