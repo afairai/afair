@@ -656,9 +656,15 @@ def _write_article(
 ) -> Any:
     """Write the article as a NEW substrate event.
 
-    parent_hashes are the entity_ids — the article is a node aggregating
-    its entity's mentions; lineage is traversable. FTS indexes the summary
-    + context so recall surfaces the article on keyword search.
+    parent_hashes are the SOURCE EVENT content hashes the article was synthesized
+    from (``article.citations``) — aligning with every other writer, whose
+    parent_hashes reference ``events.content_hash`` (consolidator, invalidations).
+    Storing entity ids there instead broke lineage traversal / any I3 lineage
+    view, since parent_hashes semantically joins content_hash. The entity ids stay
+    available in the payload (``entity_ids``), so the fix is loss-free. Article
+    content hashes include parent_hashes, so a changed citation set mints a new
+    event — fine, articles are periodic snapshots. FTS indexes the summary +
+    context so recall surfaces the article on keyword search.
     """
     entity_kind = group.kinds[0] if len(group.kinds) == 1 else "mixed"
     context = f"Entity article: {group.canonical_name}" + (
@@ -684,5 +690,5 @@ def _write_article(
         origin="agent",
         kind=ENTITY_ARTICLE_KIND,
         payload=payload,
-        parent_hashes=group.entity_ids,
+        parent_hashes=article.citations,
     )

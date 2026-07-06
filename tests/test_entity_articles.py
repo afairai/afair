@@ -238,6 +238,32 @@ def test_article_carries_source_citations(conn, monkeypatch) -> None:
     assert len(citations) == 3  # the three seeded source events
 
 
+def test_article_parent_hashes_are_source_event_hashes(conn, monkeypatch) -> None:
+    """§3h: parent_hashes must reference source event content_hashes (like every
+    other writer), not entity ids — so lineage traversal via read_event_by_hash
+    resolves. entity_ids stay available in the payload."""
+    from afair.substrate import read_event_by_hash
+
+    for i in range(3):
+        _seed_mention(conn, name="Letta", kind="product", text=f"Letta note {i}")
+    _stub_llm(monkeypatch)
+    ea.EntityArticleWorker().run(conn, Settings())
+
+    article = _articles(conn)[0]
+    parent_hashes = json.loads(article["parent_hashes"]) if article["parent_hashes"] else []
+    payload = json.loads(article["payload"])
+
+    assert parent_hashes, "article must carry source-event parent_hashes"
+    # Every parent hash resolves to a real event (lineage traversal works).
+    for h in parent_hashes:
+        assert read_event_by_hash(conn, h) is not None, h
+    # They are the source events, matching the payload citations — NOT entity ids.
+    assert set(parent_hashes) == set(payload["citations"])
+    assert not any(h.startswith("entity:") for h in parent_hashes)
+    # entity_ids preserved in the payload (loss-free).
+    assert payload["entity_ids"]
+
+
 def test_supersession_heals_a_crash_orphaned_article(conn, monkeypatch) -> None:
     """Race M1 — if a past cycle crashed between writing a new article and
     invalidating the prior, the orphan would otherwise live forever. The next
