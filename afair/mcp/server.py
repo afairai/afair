@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 import structlog
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent as MCPTextContent
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.gzip import GZipMiddleware
@@ -73,6 +75,12 @@ from .tokens_route import mint_endpoint as tokens_mint_endpoint
 from .tokens_route import revoke_endpoint as tokens_revoke_endpoint
 
 log = structlog.get_logger(__name__)
+
+# Advertised outputSchema for the recall tool. Because recall returns a
+# ``ToolResult`` (for null-free serialization, P1-2 §4.3), FastMCP can't infer
+# the schema from the return annotation — we pass it explicitly so the wire
+# contract is unchanged for clients that read outputSchema.
+_RECALL_OUTPUT_SCHEMA = schemas.RecallResult.model_json_schema()
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -222,7 +230,7 @@ def build_server(settings: Settings) -> FastMCP:
             invalidates=invalidates,
         )
 
-    @mcp.tool(description=descriptions.RECALL, version="1")
+    @mcp.tool(description=descriptions.RECALL, version="1", output_schema=_RECALL_OUTPUT_SCHEMA)
     def recall(
         query: str | None = None,
         scope: str | None = None,
@@ -238,7 +246,7 @@ def build_server(settings: Settings) -> FastMCP:
         pending_offset: int = 0,
         verbosity: schemas.RecallVerbosity = "compact",
         cursor: str | None = None,
-    ) -> schemas.RecallResult:
+    ) -> ToolResult:
         # decide= applies corrections (entity merges/retractions, observe
         # events) — a write, so it needs write scope like remember/observe.
         # feedback= only writes a best-effort tuner_state telemetry row
@@ -246,7 +254,7 @@ def build_server(settings: Settings) -> FastMCP:
         # empty batch (decide=[]) decides nothing, so it needs no write scope.
         if decide is not None and (not isinstance(decide, list) or decide):
             enforce_write_scope()
-        return handlers.recall(
+        result = handlers.recall(
             query=query,
             scope=scope,
             depth=depth,
@@ -261,6 +269,17 @@ def build_server(settings: Settings) -> FastMCP:
             pending_offset=pending_offset,
             verbosity=verbosity,
             cursor=cursor,
+        )
+        # Null-free serialization (P1-2 §4.3). fastmcp double-ships a TextContent
+        # body + structuredContent; pydantic's default serializer includes every
+        # null field. Return a ToolResult so BOTH copies drop None values —
+        # exclude_none only (never exclude_defaults, which would silently strip
+        # semantically-meaningful zeros/false the clients read). Every field is
+        # optional-with-default, so an exclude_none dump still validates against
+        # the advertised outputSchema passed to the decorator.
+        return ToolResult(
+            content=[MCPTextContent(type="text", text=result.model_dump_json(exclude_none=True))],
+            structured_content=result.model_dump(exclude_none=True),
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")

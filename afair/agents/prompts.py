@@ -104,10 +104,12 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
         "summary": {
             "type": "string",
             "description": "One-sentence summary, max ~240 characters.",
+            "maxLength": 400,
         },
         "entities": {
             "type": "array",
             "description": "Named entities mentioned in the event.",
+            "maxItems": 20,
             "items": {
                 "type": "object",
                 "properties": {
@@ -132,6 +134,7 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
                 "not emit the triple. Prefer a few well-grounded relations over "
                 "many speculative ones. When in doubt, omit."
             ),
+            "maxItems": 20,
             "items": {
                 "type": "object",
                 "properties": {
@@ -169,7 +172,8 @@ EXTRACTOR_TOOL_SCHEMA: dict[str, Any] = {
         "salient_facts": {
             "type": "array",
             "description": "Atomic facts worth remembering for later retrieval.",
-            "items": {"type": "string"},
+            "maxItems": 10,
+            "items": {"type": "string", "maxLength": 300},
         },
         "language": {
             "type": "string",

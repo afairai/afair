@@ -138,6 +138,69 @@ def _tool_data(result: object) -> dict:
     return result.data if hasattr(result, "data") else result.structured_content  # type: ignore[attr-defined,no-any-return]
 
 
+def _has_no_none(obj: object) -> bool:
+    """Recursively assert no None appears anywhere in a structured value."""
+    if obj is None:
+        return False
+    if isinstance(obj, dict):
+        return all(_has_no_none(v) for v in obj.values())
+    if isinstance(obj, list):
+        return all(_has_no_none(v) for v in obj)
+    return True
+
+
+@pytest.mark.asyncio
+async def test_recall_serialization_is_null_free_with_output_schema(tmp_path: Path) -> None:
+    """P1-2 §4.3: recall returns a ToolResult whose structuredContent + text
+    body are both null-free (exclude_none), and the advertised output_schema is
+    preserved despite the ToolResult return annotation."""
+    import json
+
+    from fastmcp.tools import ToolResult
+
+    from afair.mcp.schemas import RecallResult
+
+    server = build_server(_settings_for(tmp_path))
+    await server.call_tool(
+        "remember",
+        {"content": {"type": "text", "text": "Sajinth proposed a roadmap"}, "context": "email"},
+    )
+    result = await server.call_tool("recall", {"query": "Sajinth"})
+    assert isinstance(result, ToolResult)
+
+    sc = result.structured_content
+    assert sc is not None
+    assert _has_no_none(sc)  # no None anywhere in the structured payload
+
+    # The TextContent body parses back to exactly the structured content.
+    text_items = [c for c in result.content if getattr(c, "type", None) == "text"]
+    assert text_items
+    assert json.loads(text_items[0].text) == sc
+
+    # The advertised outputSchema survives the ToolResult return annotation.
+    tools = await server.list_tools()
+    recall_tool = next(t for t in tools if t.name == "recall")
+    assert recall_tool.output_schema is not None
+    schema = RecallResult.model_json_schema()
+    assert recall_tool.output_schema.get("title") == schema["title"]
+    assert set(recall_tool.output_schema["properties"]) == set(schema["properties"])
+    assert "next_cursor" in recall_tool.output_schema["properties"]
+    assert "decisions" in recall_tool.output_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_remember_observe_results_unchanged(tmp_path: Path) -> None:
+    """remember/observe still return their plain result models (no ToolResult
+    wrapper) — only recall changed shape."""
+    server = build_server(_settings_for(tmp_path))
+    r = await server.call_tool(
+        "remember", {"content": {"type": "text", "text": "x"}, "context": "c"}
+    )
+    assert _tool_data(r)["ok"] is True
+    o = await server.call_tool("observe", {"event": {"action": "edit_file"}})
+    assert _tool_data(o)["ok"] is True
+
+
 # ── stringified-object params (write-first intake at the live call layer) ─────
 #
 # Regression coverage for the HIGH-severity data-loss bug: FastMCP validates

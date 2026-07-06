@@ -532,6 +532,54 @@ def test_tool_schema_required_fields_present() -> None:
         assert "description" in defn or "type" in defn, f"property {name} has neither"
 
 
+def test_tool_schema_carries_surface_caps() -> None:
+    """P1-2 §4.4: the schema advertises the maxLength/maxItems backstops."""
+    from afair.agents.prompts import EXTRACTOR_SCHEMA_VERSION, EXTRACTOR_TOOL_SCHEMA
+
+    props = EXTRACTOR_TOOL_SCHEMA["properties"]
+    assert props["summary"]["maxLength"] == 400
+    assert props["salient_facts"]["maxItems"] == 10
+    assert props["salient_facts"]["items"]["maxLength"] == 300
+    assert props["entities"]["maxItems"] == 20
+    assert props["relations"]["maxItems"] == 20
+    # A cap is a constraint, not a shape change — the version must NOT bump.
+    assert EXTRACTOR_SCHEMA_VERSION == 2
+
+
+def test_validate_extraction_caps_oversize_surface() -> None:
+    """Write-side enforcement (providers honor JSON-Schema caps unreliably):
+    an oversize extraction is bounded before it reaches the interpretation
+    layer, so one runaway run can't inflate every future recall."""
+    oversize = {
+        "best_guess_kind": "fact",
+        "summary": "S" * 1000,
+        "salient_facts": ["f" * 500 for _ in range(30)],
+        "entities": [{"name": f"E{i}", "type": "person"} for i in range(50)],
+        "relations": [
+            {"subject": "a", "predicate": "p", "object": "b", "evidence": "e"} for _ in range(50)
+        ],
+    }
+    out = extractor._validate_extraction(oversize)
+    assert isinstance(out, dict)
+    assert len(out["summary"]) == 400
+    assert len(out["salient_facts"]) == 10
+    assert all(len(f) <= 300 for f in out["salient_facts"])
+    assert len(out["entities"]) == 20
+    assert len(out["relations"]) == 20
+
+
+def test_validate_extraction_leaves_small_surface_untouched() -> None:
+    """The cap never raises and never touches an already-small extraction."""
+    small = {
+        "best_guess_kind": "fact",
+        "summary": "short",
+        "salient_facts": ["one", "two"],
+        "entities": [{"name": "X", "type": "person"}],
+    }
+    out = extractor._validate_extraction(small)
+    assert out == small
+
+
 def test_user_message_includes_text_for_inline_text(ctx: ServerContext) -> None:
     from afair.agents.prompts import build_user_message
     from afair.substrate import write_event

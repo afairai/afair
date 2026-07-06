@@ -688,12 +688,55 @@ def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None
         )
 
 
+MAX_EXTRACTION_SUMMARY_CHARS = 400
+MAX_SALIENT_FACTS = 10
+MAX_SALIENT_FACT_CHARS = 300
+MAX_EXTRACTION_ENTITIES = 20
+MAX_EXTRACTION_RELATIONS = 20
+
+
+def _cap_extraction_surface(data: dict[str, object]) -> dict[str, object]:
+    """Bound the recall-served fields at write time so one verbose extractor
+    run can't inflate every future recall (the interpretation layer is
+    derived/mutable — I2-clean; historical rows are left as-is per I3 and
+    are instead capped at serve time by recall's verbosity shaping).
+
+    Providers enforce JSON-Schema maxLength/maxItems unreliably, so this
+    write-side cap is the real gate. Never raises — every branch guards the
+    incoming type and leaves anything unexpected untouched."""
+    summary = data.get("summary")
+    if isinstance(summary, str) and len(summary) > MAX_EXTRACTION_SUMMARY_CHARS:
+        data["summary"] = summary[:MAX_EXTRACTION_SUMMARY_CHARS]
+
+    facts = data.get("salient_facts")
+    if isinstance(facts, list):
+        capped = [
+            (f[:MAX_SALIENT_FACT_CHARS] if isinstance(f, str) else f)
+            for f in facts[:MAX_SALIENT_FACTS]
+        ]
+        data["salient_facts"] = capped
+
+    entities = data.get("entities")
+    if isinstance(entities, list) and len(entities) > MAX_EXTRACTION_ENTITIES:
+        data["entities"] = entities[:MAX_EXTRACTION_ENTITIES]
+
+    relations = data.get("relations")
+    if isinstance(relations, list) and len(relations) > MAX_EXTRACTION_RELATIONS:
+        data["relations"] = relations[:MAX_EXTRACTION_RELATIONS]
+
+    return data
+
+
 def _validate_extraction(data: dict[str, object]) -> dict[str, object] | str:
     """Light validation. Returns the data dict on success, error string on failure.
 
     Intentionally permissive — refining the schema lives in the
     Interpretation layer per I3, not in writer-side enforcement that
     would reject otherwise-useful extractions.
+
+    On success the recall-served fields are bounded (:func:`_cap_extraction_surface`)
+    so a runaway extraction can't bloat every future recall. Both extractor call
+    sites flow through here, so one insertion covers them.
     """
     required = ("best_guess_kind", "summary")
     for key in required:
@@ -701,7 +744,7 @@ def _validate_extraction(data: dict[str, object]) -> dict[str, object] | str:
             return f"missing required field: {key}"
         if not isinstance(data[key], str):
             return f"field {key} must be a string"
-    return data
+    return _cap_extraction_surface(data)
 
 
 # Silence the noisy litellm logger in tests — we have our own structured logs.

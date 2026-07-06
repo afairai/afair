@@ -79,10 +79,17 @@ to maintain.
 
 ### Recall hit shape (advanced)
 
+Recall is **compact by default**: each hit serves the AI-useful minimum
+(capped summary, top canonical entities + edges, caveat-bearing
+conflicts). For the complete interpretation (`salient_facts`, raw
+`entities`, full conflict history) pass `verbosity="full"` or re-fetch
+the one event with `recall(by_id=..., full_payload=True)`.
+
 Each `recall` hit carries:
 - `payload`: the truncated event (use `full_payload=True` for the
   whole thing).
-- `interpretation.summary` / `salient_facts`: the LLM-distilled view.
+- `interpretation.summary`: the LLM-distilled one-liner. `salient_facts`
+  and raw `entities` are served at `verbosity="standard"`/`"full"`.
 - `interpretation.canonical_entities`: disambiguated people / orgs
   / projects ("Sajinth from elvah" ≠ "Sajinth from Athara").
 - `interpretation.entity_edges`: subject-predicate-object relations.
@@ -91,6 +98,8 @@ Each `recall` hit carries:
 - `invalidation`: non-null when the fact was later superseded.
   Filter these out for "current state" questions; keep them for
   "history" questions.
+- `next_cursor`: non-null when more results exist — pass it back as
+  `cursor` to page.
 ```
 
 ---
