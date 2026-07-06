@@ -180,6 +180,34 @@ def test_remember_with_invalidates_unknown_target_raises(ctx: ServerContext) -> 
         )
 
 
+def test_remember_bad_invalidates_target_writes_nothing(ctx: ServerContext) -> None:
+    """A bad target must reject the whole call BEFORE the content event is
+    written — no partial write. Regression for the validate-after-write bug
+    where the content event (and any good invalidations) persisted, then the
+    call raised on a later bad hash."""
+    good = handlers.remember(content=TextContent(type="text", text="prior fact"))
+    events_before = ctx.db.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+
+    with pytest.raises(InvalidateTargetError, match="not found"):
+        handlers.remember(
+            content=TextContent(type="text", text="new fact supersedes prior"),
+            invalidates=[good.content_hash, "sha256:" + "0" * 64],
+        )
+
+    # Neither the content event nor the good-target invalidation was written.
+    events_after = ctx.db.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+    assert events_after == events_before
+    assert (
+        ctx.db.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE payload LIKE '%new fact supersedes prior%'"
+        ).fetchone()["n"]
+        == 0
+    )
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM events WHERE kind = 'invalidate'").fetchone()[
+        "n"
+    ] == 0
+
+
 def test_remember_cannot_invalidate_an_invalidation_event(ctx: ServerContext) -> None:
     """Nested invalidations are not supported. The first invalidate goes
     through; trying to invalidate THE invalidation event must fail."""

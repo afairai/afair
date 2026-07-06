@@ -967,6 +967,25 @@ def remember(
     ctx = get_context()
     db = connect_for_thread()
 
+    # Validate the invalidation targets BEFORE writing any content, so a bad
+    # target rejects the whole call atomically. Previously this ran AFTER the
+    # content write, so a malformed hash in ``invalidates`` left the content
+    # event (and any earlier invalidations) already committed while the call
+    # still raised — a partial write the caller couldn't see. This pass is
+    # read-only (I2: no substrate mutation); the actual invalidation writes
+    # still happen after the content event so lineage references a real id.
+    for target_hash in invalidates or []:
+        target = read_event_by_hash(db, target_hash)
+        if target is None:
+            msg = f"invalidates target not found: {target_hash!r}"
+            raise InvalidateTargetError(msg)
+        if target.kind == INVALIDATE_KIND:
+            msg = (
+                f"invalidates target {target_hash!r} is itself an "
+                "invalidation event; nested invalidations are not supported"
+            )
+            raise InvalidateTargetError(msg)
+
     # When text spills to the object store (text-large), the canonical payload
     # holds only a blob_hash, so the FTS index would miss the body. Carry the
     # full text as the searchable body so a large paste stays findable by its
@@ -1083,21 +1102,11 @@ def remember(
         schedule_extraction(event.id)
     already_existed = not was_inserted
 
-    # Process invalidations AFTER the main write. Each target must:
-    #   - exist in the substrate
-    #   - not be itself an invalidation event (no nested invalidations)
+    # Write the invalidations AFTER the main write. Targets were already
+    # validated (existence + not-itself-an-invalidation) before the content
+    # write above, and nothing between mutates them, so this loop only writes.
     invalidated_ok: list[str] = []
     for target_hash in invalidates or []:
-        target = read_event_by_hash(db, target_hash)
-        if target is None:
-            msg = f"invalidates target not found: {target_hash!r}"
-            raise InvalidateTargetError(msg)
-        if target.kind == INVALIDATE_KIND:
-            msg = (
-                f"invalidates target {target_hash!r} is itself an "
-                "invalidation event; nested invalidations are not supported"
-            )
-            raise InvalidateTargetError(msg)
         # Reason: pull from the new event's content if text, else generic.
         reason = (
             content.text if isinstance(content, TextContent) else f"superseded by event {event.id}"
