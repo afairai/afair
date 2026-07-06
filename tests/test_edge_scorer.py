@@ -628,3 +628,54 @@ def test_predicate_lower_index_used(db: sqlite3.Connection) -> None:
     detail = " ".join(str(row["detail"]) for row in plan)
     assert "entity_edges_predicate_lower_idx" in detail
     assert "SCAN e" not in detail
+
+
+def test_paged_pool_does_not_starve_a_distinct_subject(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION (Fable review): with the pool monopolized by many
+    low-confidence edges on ONE subject, a distinct subject that sorts past the
+    first pool page must still be proposed. The old single-pool code drew only
+    EDGE_REVIEW_CANDIDATE_POOL rows once; if those were all the same subject,
+    INSERT OR IGNORE absorbed all but one and rank-(pool+1) subjects were never
+    reached — this cycle or any future cycle. Keyset paging restores
+    walk-until-K."""
+    from afair.substrate import read_pending_corrections
+
+    monkeypatch.setattr(es, "EDGE_REVIEW_CANDIDATE_POOL", 4)
+
+    # Four weak edges all on the SAME subject (Person0), distinct objects, so
+    # they fill the first page but collapse to one proposal via UNIQUE(subject).
+    _ev, subj0, _obj0, _e0 = _seed_edge(
+        db,
+        text="Person0 is loosely connected to the Thing0",
+        predicate="is loosely connected to the",
+        extraction_confidence=None,
+        with_interpretation=False,
+        subj_conf=0.5,
+        obj_conf=0.5,
+        subject_name="Person0",
+        object_name="Thing0",
+    )
+    for j in range(1, 4):
+        _seed_edge(
+            db,
+            text=f"Person0 is loosely connected to the Thing{j}",
+            predicate="is loosely connected to the",
+            extraction_confidence=None,
+            with_interpretation=False,
+            subj=subj0,
+            subj_conf=0.5,
+            obj_conf=0.5,
+            object_name=f"Thing{j}",
+        )
+    # One weak edge on a DISTINCT subject, created last → sorts past page 1.
+    _seed_weak_edge(db, 99)
+
+    EdgeConfidenceScorer().run(db, settings)
+
+    reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    subjects = {p.detail["subject_name"] for p in reviews}
+    assert "Person99" in subjects  # past-pool subject is NOT starved
+    # The monopolizing subject gets exactly one open proposal, not four.
+    assert sum(1 for p in reviews if p.detail["subject_name"] == "Person0") == 1

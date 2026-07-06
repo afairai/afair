@@ -77,12 +77,14 @@ on the same subject waits until the first is decided (the pruner clears applied
 rows)."""
 
 EDGE_REVIEW_CANDIDATE_POOL = 50
-"""SQL-side cap on the low-confidence edge pool a single cycle considers for
-review proposals. Generous headroom over ``MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE``
-so the true K lowest-confidence edges are virtually always in the pool. Replaces
-the old "load ALL live edges then build IN(...) lists over the whole set", which
-exceeded SQLite's 32,766-variable limit on a large graph and failed the cycle
-every 240s forever (ADR-0004 C4 scaling fix)."""
+"""Page size for the keyset-paged review-candidate stream. Bounds the host
+parameters per statement (replacing the old "load ALL live edges then build
+IN(...) lists over the whole set", which exceeded SQLite's 32,766-variable limit
+on a large graph and failed the cycle every 240s forever). This is a PAGE size,
+not a hard candidate ceiling — ``_propose_edge_reviews`` keeps drawing pages via
+keyset continuation until K proposals land or candidates are exhausted, so a
+noisy entity monopolizing the lowest-confidence slots can't starve rank-N+1
+subjects (ADR-0004 C4 scaling fix)."""
 
 EDGE_SCORER_PRODUCED_BY = "edge_confidence_scorer:v0"
 
@@ -346,10 +348,11 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
 
     Selects live (non-invalidated), unreviewed edges whose SERVED confidence is
     below the threshold — those resolve to `proposed` (served < threshold <
-    the auto-confirm floor). Lowest confidence first, capped per cycle. Each is
-    inserted into ``proposed_corrections`` (kind ``edge_review``) with
-    ``INSERT OR IGNORE`` on the UNIQUE(kind, entity_id), so a re-run never
-    duplicates an open proposal. Returns the number of new proposals.
+    the auto-confirm floor). Lowest confidence first. Each is inserted into
+    ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE`` on
+    the UNIQUE(kind, entity_id), so a re-run never duplicates an open proposal
+    and a second low-confidence edge on the same SUBJECT is absorbed until the
+    first is decided. Returns the number of new proposals.
 
     Selection is done in SQL — a ``latest_scores`` CTE (ROW_NUMBER rn=1
     reproduces the batch helper's latest-score-wins) LEFT-JOINed with
@@ -358,14 +361,64 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     (the column fallback). The old version loaded ALL live edges and built
     IN(...) lists over the whole set through the batch helpers — on a large
     graph that blew past SQLite's 32,766-variable limit and failed the cycle
-    every 240s forever. Bounding the pool to ``EDGE_REVIEW_CANDIDATE_POOL``
-    lowest-confidence candidates removes the unbounded IN-lists entirely; the
-    only deviation is that if those slots are all absorbed by the
-    ``UNIQUE(kind, subject)`` constraint the remainder waits one cycle
-    (self-healing).
+    every 240s forever.
+
+    To bound the host parameters per statement WITHOUT starving subjects, the
+    candidate stream is PAGED via keyset continuation on
+    ``(served_confidence, discovered_at, id)`` in bounded pages of
+    ``EDGE_REVIEW_CANDIDATE_POOL``. This restores the old walk-until-K
+    semantics: if the lowest-confidence edges all share a few subjects and get
+    absorbed by ``UNIQUE(kind, subject)``, paging keeps drawing until K distinct
+    subjects land or the candidates are exhausted — so a noisy entity with many
+    sub-threshold edges can never permanently starve rank-N+1 subjects. (The
+    subject stored on a proposal is the merge-RESOLVED id, which is why the
+    exclusion can't be pushed into SQL as ``NOT EXISTS proposed_corrections ...
+    entity_id = e.subject_id`` — ``e.subject_id`` is raw, so merged subjects
+    would slip through. INSERT OR IGNORE on the resolved subject is the
+    authority.)
     """
-    candidate_rows = conn.execute(
-        """
+    proposed = 0
+    # Keyset cursor: (served_confidence, discovered_at, id) of the last row of
+    # the previous page. Strictly increasing on id (edge PK) → no skips/dups.
+    cursor: tuple[float, str, str] | None = None
+    while proposed < MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE:
+        page = _fetch_review_candidate_page(conn, cursor, EDGE_REVIEW_CANDIDATE_POOL)
+        if not page:
+            break
+        edges = [_row_to_edge(r) for r in page]
+        served = {r["id"]: float(r["served_confidence"]) for r in page}
+        # Bounded (<= page) components fetch for the evidence string.
+        scores = latest_edge_scores_batch(conn, [e.id for e in edges])
+        for edge in edges:
+            conf = served[edge.id]
+            components = scores[edge.id].components if edge.id in scores else {}
+            if _insert_edge_review_proposal(
+                conn, edge=edge, confidence=conf, components=components
+            ):
+                proposed += 1
+                if proposed >= MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE:
+                    break
+        last = page[-1]
+        cursor = (float(last["served_confidence"]), last["discovered_at"], last["id"])
+        if len(page) < EDGE_REVIEW_CANDIDATE_POOL:
+            break  # last page — candidates exhausted
+    return proposed
+
+
+def _fetch_review_candidate_page(
+    conn: sqlite3.Connection,
+    cursor: tuple[float, str, str] | None,
+    page_size: int,
+) -> list[Any]:
+    """One keyset page of low-confidence, live, unreviewed edge candidates,
+    ordered ``(served_confidence, discovered_at, id)`` ascending.
+
+    ``cursor`` is the last row of the previous page; None for the first page.
+    The keyset predicate repeats the ``COALESCE`` expression (a SELECT alias
+    isn't visible in WHERE) as a row-value comparison so the continuation is
+    exact and bound-parameter-free per page.
+    """
+    sql = """
         WITH latest_scores AS (
             SELECT edge_id, confidence,
                    ROW_NUMBER() OVER (
@@ -381,28 +434,14 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
         WHERE i.id IS NULL
           AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
           AND COALESCE(ls.confidence, e.confidence) < ?
-        ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC
-        LIMIT ?
-        """,
-        (EDGE_REVIEW_PROPOSAL_THRESHOLD, EDGE_REVIEW_CANDIDATE_POOL),
-    ).fetchall()
-    if not candidate_rows:
-        return 0
-
-    edges = [_row_to_edge(r) for r in candidate_rows]
-    served = {r["id"]: float(r["served_confidence"]) for r in candidate_rows}
-    # Bounded (<= pool) components fetch for the evidence string.
-    scores = latest_edge_scores_batch(conn, [e.id for e in edges])
-
-    proposed = 0
-    for edge in edges:
-        if proposed >= MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE:
-            break
-        conf = served[edge.id]
-        components = scores[edge.id].components if edge.id in scores else {}
-        if _insert_edge_review_proposal(conn, edge=edge, confidence=conf, components=components):
-            proposed += 1
-    return proposed
+    """
+    params: list[Any] = [EDGE_REVIEW_PROPOSAL_THRESHOLD]
+    if cursor is not None:
+        sql += " AND (COALESCE(ls.confidence, e.confidence), e.discovered_at, e.id) > (?, ?, ?)"
+        params.extend(cursor)
+    sql += " ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC LIMIT ?"
+    params.append(page_size)
+    return conn.execute(sql, params).fetchall()
 
 
 def _insert_edge_review_proposal(
