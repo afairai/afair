@@ -10,6 +10,23 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.12](https://github.com/afairai/afair/compare/v0.1.11...v0.1.12) (2026-07-06)
+
+
+### Features
+
+* **corrections:** open-row partial unique, detector guards, edge_review prune ([60ce528](https://github.com/afairai/afair/commit/60ce528743b65fee765da05131f52d940a5c8442))
+* **dedup:** auto-confirm floor + referent-aware kind guidance ([29dc2ba](https://github.com/afairai/afair/commit/29dc2ba0fd4f4ab32f30e88d78940aa41e10da01))
+* **mcp:** batch decide + pending-queue pagination on recall ([40a4e38](https://github.com/afairai/afair/commit/40a4e38618665eae6a33316cebe9fec6770adc7e))
+* **mcp:** null-free ToolResult serialization + extractor output caps ([82c64a4](https://github.com/afairai/afair/commit/82c64a45d77fec4343ca2bc4e9ed363eeb4cd6e8))
+* **mcp:** recall verbosity levels, limit cap, cursor pagination ([83e3d9c](https://github.com/afairai/afair/commit/83e3d9c0435b3c5b3f8f59bc5246999e75a157aa))
+
+
+### Bug Fixes
+
+* **mcp:** cap compact conflicts + review nits ([40f76b7](https://github.com/afairai/afair/commit/40f76b70d6c9baf4833d14d36bbe10feaae29b03))
+* **mcp:** terminate cursor pagination + clamp pending_limit lower bound ([21b3ba1](https://github.com/afairai/afair/commit/21b3ba1280f75a5f5d70b5ac88048ea4e680ead7))
+
 ## [0.1.11](https://github.com/afairai/afair/compare/v0.1.10...v0.1.11) (2026-07-06)
 
 
