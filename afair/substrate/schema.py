@@ -452,11 +452,15 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     # ── proposed_corrections: the entity-audit review queue (ADR-0002) ───────
     # MUTABLE derived state, not substrate — the audit worker regenerates it, a
-    # decision updates its status, the pruner can clear applied rows. The
-    # *applied* correction (retype / merge) is the append-only part; this table
-    # is just the suggestion the operator confirms. One open proposal per
-    # (kind, entity) — re-running the audit won't duplicate or overwrite a
-    # decided one (INSERT OR IGNORE on the UNIQUE).
+    # decision updates its status, the pruner ages out decided edge_review rows.
+    # The *applied* correction (retype / merge / edge review) is the append-only
+    # part; this table is just the suggestion the operator confirms. Contract:
+    # one OPEN proposal per (kind, entity) — enforced by the partial unique index
+    # below (status='proposed' only). Decided history PERSISTS as the detectors'
+    # anti-re-nag memory (entity_audit checks it explicitly via NOT EXISTS, so a
+    # closed question is never re-opened). Decided edge_review rows ARE prunable
+    # because their durable never-re-review guard is the append-only edge_reviews
+    # table (edge_scorer's NOT EXISTS), not the queue row.
     """
     CREATE TABLE IF NOT EXISTS proposed_corrections (
         id            TEXT PRIMARY KEY,
@@ -471,11 +475,14 @@ SCHEMA_DDL: tuple[str, ...] = (
         status        TEXT NOT NULL DEFAULT 'proposed'
                       CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
         decided_at    TEXT,
-        decided_by    TEXT,
-        UNIQUE(kind, entity_id)
+        decided_by    TEXT
     ) STRICT
     """,
     "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx ON proposed_corrections(status)",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique
+    ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'
+    """,
     # ── pipeline_events: end-to-end lifecycle tracing (Phase 0.5 obs) ───────
     # Every step in an event's journey gets a row:
     #   event.written            — write_event_with_status returned ok
@@ -997,12 +1004,14 @@ VEC_DDL: tuple[str, ...] = (
 )
 
 
-# The widened proposed_corrections definition (ADR-0004: adds the 'edge_review'
-# kind). Fresh vaults get this via SCHEMA_DDL; existing vaults, whose frozen
-# CHECK still lists only retype/merge/merge_review, are migrated in place by
-# :func:`migrate_proposed_corrections_kind_check`. Kept byte-identical to the
-# SCHEMA_DDL statement above except for the CHECK list so INSERT ... SELECT *
-# round-trips.
+# The rebuilt proposed_corrections definition — the final shape: the
+# 'edge_review' kind (ADR-0004) AND no inline UNIQUE (the one-open-per-(kind,
+# entity) contract now lives in the partial index proposed_corrections_open_unique,
+# P1-1). Fresh vaults get this shape via SCHEMA_DDL; existing vaults are migrated
+# in place by :func:`migrate_proposed_corrections_kind_check` (CHECK widen) and
+# :func:`migrate_proposed_corrections_open_unique` (drop the inline UNIQUE). Kept
+# column-identical to the SCHEMA_DDL statement above so INSERT ... SELECT *
+# round-trips positionally.
 _PROPOSED_CORRECTIONS_REBUILD_DDL = """
     CREATE TABLE proposed_corrections (
         id            TEXT PRIMARY KEY,
@@ -1017,8 +1026,7 @@ _PROPOSED_CORRECTIONS_REBUILD_DDL = """
         status        TEXT NOT NULL DEFAULT 'proposed'
                       CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
         decided_at    TEXT,
-        decided_by    TEXT,
-        UNIQUE(kind, entity_id)
+        decided_by    TEXT
     ) STRICT
 """
 
@@ -1058,5 +1066,54 @@ def migrate_proposed_corrections_kind_check(conn: Any) -> bool:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
             "ON proposed_corrections(status)"
+        )
+        # The rebuild DDL no longer carries an inline UNIQUE — restore the
+        # one-open-per-(kind, entity) contract as the partial index (P1-1), so a
+        # pre-ADR-0004 vault migrating through here lands on the final shape and
+        # the follow-up migrate_proposed_corrections_open_unique is a no-op.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
+        )
+    return True
+
+
+def migrate_proposed_corrections_open_unique(conn: Any) -> bool:
+    """Drop the table-level ``UNIQUE(kind, entity_id)`` in favor of a partial
+    unique index on OPEN rows only. A decided proposal previously blocked
+    every future proposal for the same (kind, subject) forever — for
+    edge_review that froze ADR-0004's per-subject calibration growth.
+    proposed_corrections is non-substrate (no I2 triggers, see the DDL
+    comment); the guarded transactional rebuild is the same legitimate
+    operation :func:`migrate_proposed_corrections_kind_check` already performs.
+    Idempotent: guarded on the stored table SQL still containing the inline
+    UNIQUE. Existing rows can never violate the partial index (the old
+    constraint was strictly tighter). Returns True on rebuild.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return False
+    if "UNIQUE(kind, entity_id)" not in row["sql"]:
+        # Already index-based (fresh vault / prior run / kind-check rebuilt it) —
+        # just ensure the partial index exists.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
+        )
+        return False
+    with conn:
+        conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
+        conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)
+        conn.execute("INSERT INTO proposed_corrections SELECT * FROM proposed_corrections_old")
+        conn.execute("DROP TABLE proposed_corrections_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
+            "ON proposed_corrections(status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
         )
     return True

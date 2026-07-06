@@ -71,10 +71,16 @@ candidate for the operator's review queue (ADR-0004 C4)."""
 MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE = 3
 """Only the K lowest-confidence uncertain edges are queued per cycle —
 quarantine research says queue only the uncertain so review effort stays
-small. NOTE (review-fatigue behavior): UNIQUE(kind, entity_id) means one open
-edge-review proposal per SUBJECT entity at a time; a second low-confidence edge
-on the same subject waits until the first is decided (the pruner clears applied
-rows)."""
+small. NOTE (review-fatigue behavior): the partial unique index
+``proposed_corrections_open_unique`` (kind, entity_id) WHERE status='proposed'
+means one OPEN edge-review proposal per SUBJECT entity at a time; a second
+low-confidence edge on the same subject waits until the first is decided — and
+the moment it IS decided, the next sub-threshold edge of that subject can queue
+(calibration growth resumes on decide, not on prune). A decided edge itself
+NEVER re-proposes: its durable guard is the append-only ``edge_reviews`` table
+(the ``NOT EXISTS`` in _fetch_review_candidate_page), independent of whether the
+old queue row still exists. The Pruner ages out decided edge_review queue rows
+purely as hygiene."""
 
 EDGE_REVIEW_CANDIDATE_POOL = 50
 """Page size for the keyset-paged review-candidate stream. Bounds the host
@@ -349,10 +355,13 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     Selects live (non-invalidated), unreviewed edges whose SERVED confidence is
     below the threshold — those resolve to `proposed` (served < threshold <
     the auto-confirm floor). Lowest confidence first. Each is inserted into
-    ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE`` on
-    the UNIQUE(kind, entity_id), so a re-run never duplicates an open proposal
-    and a second low-confidence edge on the same SUBJECT is absorbed until the
-    first is decided. Returns the number of new proposals.
+    ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE``,
+    which under the partial unique index ``proposed_corrections_open_unique``
+    (one OPEN row per (kind, subject)) means a re-run never duplicates an open
+    proposal and a second low-confidence edge on the same SUBJECT is absorbed
+    until the first is DECIDED — at which point the slot frees and the next
+    sub-threshold edge of that subject can queue. Returns the number of new
+    proposals.
 
     Selection is done in SQL — a ``latest_scores`` CTE (ROW_NUMBER rn=1
     reproduces the batch helper's latest-score-wins) LEFT-JOINed with
@@ -452,7 +461,8 @@ def _insert_edge_review_proposal(
     components: dict[str, Any],
 ) -> bool:
     """Insert one edge-review proposal (INSERT OR IGNORE). Returns True when a
-    new row landed, False when the UNIQUE(kind, subject) absorbed it."""
+    new row landed, False when the partial unique index (one OPEN row per
+    (kind, subject)) absorbed it."""
     subject_id = resolve_canonical(conn, edge.subject_id)
     object_id = resolve_canonical(conn, edge.object_id)
     subj = read_entity_by_id(conn, subject_id)

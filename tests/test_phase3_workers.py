@@ -84,6 +84,78 @@ def test_pruner_does_not_touch_events_table(db, settings_local: Settings) -> Non
     assert before == after
 
 
+def _pc_entity(db, name: str, kind: str) -> str:
+    from afair.substrate import write_entity
+
+    ev = write_event(
+        db, origin="u", kind="remember", payload={"content_type": "text", "text": name}
+    )
+    return write_entity(
+        db, canonical_name=name, kind=kind, created_by="t", source_event_id=ev.id, confidence=0.8
+    ).id
+
+
+def _pc_insert(
+    db, *, pid: str, kind: str, entity_id: str, status: str, decided_at: str | None
+) -> None:
+    db.execute(
+        """
+        INSERT INTO proposed_corrections (
+            id, kind, entity_id, detail, evidence, confidence, tier,
+            detected_by, detected_at, status, decided_at
+        ) VALUES (?, ?, ?, '{}', 'ev', 0.5, 'review', 'test', ?, ?, ?)
+        """,
+        (pid, kind, entity_id, "2026-01-01T00:00:00+00:00", status, decided_at),
+    )
+    db.commit()
+
+
+def test_pruner_ages_out_only_decided_edge_reviews(db, settings_local: Settings) -> None:
+    """P1-1 hygiene: decided edge_review rows past the retention window are
+    deleted; open edge_reviews, fresh decided edge_reviews, and decided
+    non-edge_review proposals (anti-re-nag memory) are all kept."""
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+
+    e1 = _pc_entity(db, "SubjOldDecided", "product")
+    e2 = _pc_entity(db, "SubjOpen", "product")
+    e3 = _pc_entity(db, "SubjFreshDecided", "product")
+    e4 = _pc_entity(db, "SubjMergeReview", "product")
+
+    _pc_insert(
+        db, pid="old_dec", kind="edge_review", entity_id=e1, status="applied", decided_at=old
+    )
+    _pc_insert(db, pid="open", kind="edge_review", entity_id=e2, status="proposed", decided_at=None)
+    _pc_insert(
+        db, pid="fresh_dec", kind="edge_review", entity_id=e3, status="applied", decided_at=recent
+    )
+    _pc_insert(
+        db, pid="mr_dec", kind="merge_review", entity_id=e4, status="confirmed", decided_at=old
+    )
+
+    stats = Pruner().run(db, settings_local)
+    assert stats["decided_edge_reviews_deleted"] == 1
+
+    remaining = {r["id"] for r in db.execute("SELECT id FROM proposed_corrections").fetchall()}
+    assert remaining == {"open", "fresh_dec", "mr_dec"}  # old decided edge_review gone
+
+    # End-to-end recycle: after prune, a fresh OPEN edge_review for the pruned
+    # subject inserts cleanly (its old decided row no longer exists / never
+    # blocked; the partial index only counts open rows).
+    _pc_insert(
+        db, pid="recycled", kind="edge_review", entity_id=e1, status="proposed", decided_at=None
+    )
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM proposed_corrections WHERE entity_id = ? AND status = 'proposed'",
+            (e1,),
+        ).fetchone()[0]
+        == 1
+    )
+
+
 # ── Conflict-Resolver ─────────────────────────────────────────────────────
 
 

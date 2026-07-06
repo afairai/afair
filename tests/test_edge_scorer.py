@@ -388,6 +388,58 @@ def test_proposals_idempotent_across_cycles(db: sqlite3.Connection, settings: Se
     assert n2 == 1  # INSERT OR IGNORE on the UNIQUE — no duplicate
 
 
+def test_calibration_growth_resumes_after_decide_same_subject(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """P1-1: with the partial unique index (one OPEN row per subject), deciding
+    a subject's queued edge_review frees the slot so its NEXT sub-threshold edge
+    can queue — calibration growth resumes on decide, not on prune. The decided
+    edge itself never re-proposes (its guard is the append-only edge_reviews)."""
+    from afair.substrate import decide_correction, latest_edge_review, read_pending_corrections
+
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "X seed"}
+    )
+    subj_x = _entity(db, "Xsubject", "person", ev)
+
+    def _weak_edge_on_x(obj_name: str) -> Any:
+        _e, _s, _o, edge = _seed_edge(
+            db,
+            text=f"Xsubject is loosely connected to the {obj_name}",
+            predicate="is loosely connected to the",
+            extraction_confidence=None,
+            with_interpretation=False,
+            subj=subj_x,
+            subj_conf=0.5,
+            obj_conf=0.5,
+            object_name=obj_name,
+        )
+        return edge
+
+    edge_a = _weak_edge_on_x("OrgAlpha")
+    edge_b = _weak_edge_on_x("OrgBeta")
+
+    # Cycle 1: one OPEN proposal for subject X (the partial index absorbs the
+    # second edge until the first is decided).
+    EdgeConfidenceScorer().run(db, settings)
+    open_reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert len(open_reviews) == 1
+    first_edge_id = open_reviews[0].detail["edge_id"]
+
+    # Decide it → edge_reviews row written, proposal closed, slot freed.
+    decide_correction(db, proposal_id=open_reviews[0].id, verdict="confirm")
+    assert latest_edge_review(db, first_edge_id) == "confirm"
+
+    # Cycle 2: the OTHER sub-threshold edge of X now queues (growth resumes);
+    # the decided edge never re-proposes (edge_reviews NOT EXISTS).
+    EdgeConfidenceScorer().run(db, settings)
+    open_reviews_2 = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert len(open_reviews_2) == 1
+    second_edge_id = open_reviews_2[0].detail["edge_id"]
+    assert second_edge_id != first_edge_id
+    assert {first_edge_id, second_edge_id} == {edge_a.id, edge_b.id}
+
+
 def test_decide_confirm_records_review_end_to_end(
     db: sqlite3.Connection, settings: Settings
 ) -> None:

@@ -26,7 +26,12 @@ import sqlite_vec  # type: ignore[import-untyped]
 
 from .encryption import derive_sqlcipher_key
 from .kinds import seed_bootstrap_kinds
-from .schema import SCHEMA_DDL, VEC_DDL, migrate_proposed_corrections_kind_check
+from .schema import (
+    SCHEMA_DDL,
+    VEC_DDL,
+    migrate_proposed_corrections_kind_check,
+    migrate_proposed_corrections_open_unique,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -252,6 +257,12 @@ def init_db(
     # on fresh vaults (SCHEMA_DDL already ships the widened CHECK) and on
     # already-migrated ones. Runs in its own transaction inside the helper.
     migrate_proposed_corrections_kind_check(conn)
+    # P1-1: replace the table-level UNIQUE(kind, entity_id) with a partial
+    # unique index on OPEN rows only, so a decided proposal no longer blocks
+    # every future proposal for the same (kind, subject) forever (that froze
+    # ADR-0004 edge-review calibration growth). Guarded + idempotent; runs AFTER
+    # the kind-check widen (which may already rebuild to the final shape).
+    migrate_proposed_corrections_open_unique(conn)
     # Bootstrap the kind registry (ADR-0003 Phase 1). Idempotent — a
     # fresh vault gets the seven seeded, an existing vault gains the
     # registry on its next open, an already-seeded vault no-ops.

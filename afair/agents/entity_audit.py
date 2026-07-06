@@ -159,15 +159,28 @@ def _insert_proposal(
     confidence: float,
     now: datetime,
 ) -> bool:
-    """INSERT OR IGNORE a proposal. Returns True if a new row landed (the
-    UNIQUE(kind, entity_id) means an already-proposed-or-decided one is left
-    untouched — the audit never re-opens a closed proposal)."""
+    """Insert a proposal only when no row of ANY status exists for
+    (kind, entity_id). Returns True if a new row landed.
+
+    P1-1: with the partial unique index (open rows only), a plain
+    ``INSERT OR IGNORE`` would no longer block on DECIDED history, so the audit
+    would re-file every decided-but-still-cross-kind merge each 12h cycle. The
+    explicit ``NOT EXISTS`` preserves the exact prior semantics: a row of any
+    status for (kind, entity_id) blocks — the audit never re-opens a closed
+    question. That durable memory is why decided retype/merge/merge_review rows
+    are KEPT (only edge_review rows age out; their durable guard is the
+    append-only edge_reviews table). The partial index remains the race
+    backstop for two concurrent inserts of the same open proposal."""
     cur = conn.execute(
         """
-        INSERT OR IGNORE INTO proposed_corrections (
+        INSERT INTO proposed_corrections (
             id, kind, entity_id, detail, evidence, confidence, tier,
             detected_by, detected_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, 'review', ?, ?, 'proposed')
+        )
+        SELECT ?, ?, ?, ?, ?, ?, 'review', ?, ?, 'proposed'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM proposed_corrections WHERE kind = ? AND entity_id = ?
+        )
         """,
         (
             str(ULID()),
@@ -178,6 +191,8 @@ def _insert_proposal(
             confidence,
             AUDIT_PRODUCED_BY,
             now.isoformat(),
+            kind,
+            entity_id,
         ),
     )
     return cur.rowcount > 0

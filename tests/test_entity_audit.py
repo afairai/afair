@@ -180,3 +180,35 @@ def test_worker_skips_already_decided_proposal(db: sqlite3.Connection, settings:
     ).fetchall()
     assert len(rows) == 1
     assert rows[0]["status"] == "confirmed"  # untouched
+
+
+def test_decided_row_not_refiled_under_partial_index(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """P1-1 regression: with the partial unique index covering only OPEN rows, a
+    DECIDED (confirmed) merge_review no longer blocks via the constraint — the
+    explicit NOT EXISTS in _insert_proposal is what keeps the audit from
+    re-nagging. Pins that a closed question stays closed (still cross-kind, so
+    the detector still finds the merge)."""
+    from_id, _into = _auto_merge_across_kinds(
+        db, "Clario", "project", "product", by="entity_deduplicator:v0"
+    )
+    EntityAuditWorker().run(db, settings)
+    # Operator confirmed the auto-picked kind — a decided, still-cross-kind row.
+    db.execute(
+        "UPDATE proposed_corrections SET status = 'confirmed', "
+        "decided_at = '2026-01-01T00:00:00+00:00' WHERE entity_id = ?",
+        (from_id,),
+    )
+    db.commit()
+    # The detector STILL reports the merge as cross-kind (confirm wrote no kind).
+    assert len(find_cross_kind_auto_merges(db)) == 1
+    # But the worker files nothing new for it — the NOT EXISTS anti-re-nag guard.
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 0
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM proposed_corrections WHERE entity_id = ?", (from_id,)
+        ).fetchone()[0]
+        == 1
+    )

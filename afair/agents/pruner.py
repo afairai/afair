@@ -10,6 +10,11 @@ Scope (v0):
     After N days we drop them — the success row remains as the live
     interpretation, and the diagnostic value of the failure has long
     since faded.
+  - Decided edge_review queue hygiene (P1-1): decided edge_review rows
+    in ``proposed_corrections`` older than the retention window are
+    deleted. Safe because a decided edge's durable never-re-review guard
+    is the append-only ``edge_reviews`` substrate table, not the queue
+    row (proposed_corrections is non-substrate, no I2 triggers).
 
 What Pruner MUST NEVER touch:
   - The events table — substrate is immutable per I2.
@@ -17,6 +22,11 @@ What Pruner MUST NEVER touch:
     one would break recall for that hash with no easy way to restore.
   - Successful interpretation rows — they ARE the live interpretation;
     deletion would force re-extraction (expensive) on next access.
+  - Open (``status='proposed'``) proposals, and decided NON-edge_review
+    proposals (retype / merge / merge_review) — the latter are
+    entity_audit's anti-re-nag memory (its detectors re-scan the whole
+    graph every cycle and would re-file the identical closed question if
+    the decided row were gone).
 
 Defaults are conservative; the worker is meant to be run-and-forget.
 """
@@ -44,6 +54,16 @@ FAILED_EXTRACTION_RETENTION_DAYS = 30
 row for the same (event_hash, version, base producer) exists. The
 failure stays around for a month for ops debug, then ages out."""
 
+DECIDED_EDGE_REVIEW_RETENTION_DAYS = 30
+"""Decided (status != 'proposed') edge_review queue rows older than this are
+deleted. Safe: the durable never-re-review guard for a decided edge is the
+append-only edge_reviews substrate table (edge_scorer's NOT EXISTS), not the
+queue row. Decided retype/merge/merge_review rows are deliberately KEPT —
+they are entity_audit's anti-re-nag memory (its detectors re-scan the whole
+graph every cycle and would otherwise re-file the identical closed question).
+proposed_corrections is non-substrate (no I2 triggers) so this deletion is
+I2-honest — same footing as the OAuth-row GC above."""
+
 
 class Pruner(ColdPathWorker):
     """OAuth + stale-failure pruning. No LLM; pure SQL."""
@@ -56,6 +76,7 @@ class Pruner(ColdPathWorker):
             "oauth_codes_deleted": 0,
             "oauth_login_state_deleted": 0,
             "stale_failed_extractions_deleted": 0,
+            "decided_edge_reviews_deleted": 0,
         }
         now_iso = datetime.now(UTC).isoformat()
 
@@ -67,6 +88,20 @@ class Pruner(ColdPathWorker):
 
         cutoff = (datetime.now(UTC) - timedelta(days=FAILED_EXTRACTION_RETENTION_DAYS)).isoformat()
         stats["stale_failed_extractions_deleted"] = _prune_stale_failed_extractions(conn, cutoff)
+
+        # Decided edge_review queue hygiene (P1-1). Only edge_review rows, only
+        # decided ones, only past the retention window — never open proposals,
+        # never decided non-edge_review proposals (anti-re-nag memory).
+        er_cutoff = (
+            datetime.now(UTC) - timedelta(days=DECIDED_EDGE_REVIEW_RETENTION_DAYS)
+        ).isoformat()
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM proposed_corrections "
+                "WHERE kind = 'edge_review' AND status != 'proposed' AND decided_at < ?",
+                (er_cutoff,),
+            )
+        stats["decided_edge_reviews_deleted"] = cursor.rowcount or 0
 
         # Settings is unused for now; param retained for the Worker contract.
         _ = settings
