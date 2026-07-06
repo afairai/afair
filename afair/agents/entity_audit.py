@@ -102,6 +102,14 @@ def is_structural_name(name: str) -> bool:
     name (``maxime.team``) stays NON-structural so its person→product retype
     still surfaces; a config filename that merely contains a TLD-shaped segment
     (``fly.dev.toml``) is still structural.
+
+    KNOWN, ACCEPTED false-positive class: real names shaped like a ticket id or
+    a dotted/slashed filename classify as structural — ``Node.js``, ``Next.js``,
+    ``GPT-4``, ``COVID-19``, ``TCP/IP``, ``F-16``. The harm is bounded to
+    review-proposal suppression (the entity, its ``kind_observations``, and
+    manual retype/retract are all intact), so we deliberately do NOT complicate
+    the regexes to chase these — the miss is "no auto-nag to pick a kind", which
+    the operator can always do by hand.
     """
     name = name.strip()
     if not name:
@@ -304,9 +312,12 @@ class EntityAuditWorker(ColdPathWorker):
                     ):
                         stats["retype_proposals"] += 1
             for from_id, detail, evidence, conf in find_cross_kind_auto_merges(conn):
-                # Same suppression on the merge-review side: a cross-kind merge of
-                # two structural names is not a kind the operator should arbitrate.
-                if is_structural_name(detail["from_name"]) or is_structural_name(
+                # Same suppression on the merge-review side — but only when BOTH
+                # names are structural. A REAL entity auto-merged INTO a
+                # structural name (e.g. "afair" -> "operations.md") is arguably
+                # the merge most worth reviewing, so an OR here would wrongly
+                # silence it; require AND so at least one real name still nags.
+                if is_structural_name(detail["from_name"]) and is_structural_name(
                     detail["into_name"]
                 ):
                     stats["suppressed_structural"] += 1

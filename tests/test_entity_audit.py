@@ -211,6 +211,34 @@ def test_worker_suppresses_structural_merge_review(
     assert names == {"Clario"}  # /admin/signups was suppressed
 
 
+def test_worker_reviews_real_entity_merged_into_structural_name(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """C nit: suppression requires BOTH sides structural. A REAL entity merged
+    INTO a structural name ('afair' project -> 'operations.md' product) is the
+    merge most worth reviewing — it must still file a proposal (OR would have
+    wrongly silenced it)."""
+    from afair.substrate import write_entity_merge
+
+    from_id = _entity(db, "afair", "project")  # real name
+    into_id = _entity(db, "operations.md", "product")  # structural name
+    write_entity_merge(
+        db,
+        from_entity_id=from_id,
+        into_entity_id=into_id,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    stats = EntityAuditWorker().run(db, settings)
+    # The merge_review is filed (not suppressed): only ONE side is structural.
+    assert stats["merge_review_proposals"] == 1
+    row = db.execute(
+        "SELECT detail FROM proposed_corrections WHERE kind = 'merge_review'"
+    ).fetchone()
+    assert json.loads(row["detail"])["into_name"] == "operations.md"
+
+
 def test_worker_still_retypes_domain_person(db: sqlite3.Connection, settings: Settings) -> None:
     """C carve-out regression: 'maxime.team' is a bare domain, NOT a structural
     filename, so its person→product retype is STILL proposed (the domain
