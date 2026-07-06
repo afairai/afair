@@ -314,28 +314,38 @@ def _read_top_salient(conn: sqlite3.Connection, *, limit: int) -> list[dict[str,
 
 
 def _read_open_threads(conn: sqlite3.Connection, *, limit: int) -> list[str]:
-    """Pull ``open_threads`` from the most-recent consolidator output.
+    """Pull ``open_threads`` from the most-recent consolidation.
 
-    Consolidator runs once a day per past day. The most recent
-    consolidation row's ``open_threads`` array holds the "still-loose"
-    items the LLM saw. Surfacing them at session start is the
-    "what's unresolved" baseline.
+    The Consolidator writes its daily digest as a substrate EVENT
+    (``kind='consolidation'``), NOT an interpretation row — its
+    ``open_threads`` array lives in that event's payload (see
+    ``consolidator._write_consolidation``). The old read looked for a
+    ``consolidator:%`` interpretation row that production never produces, so
+    this always returned ``[]`` since ship. Reading the event payload is the
+    correct read-projection over the unchanged substrate (I3). Served by the
+    existing ``events_kind_created_at_idx``; no new index.
+
+    Surfacing the still-loose items at session start is the "what's
+    unresolved" baseline.
     """
+    from ..agents.consolidator import CONSOLIDATION_KIND  # lazy — avoid import cycle
+
     row = conn.execute(
         """
-        SELECT extraction FROM interpretations
-        WHERE produced_by LIKE 'consolidator:%'
-        ORDER BY produced_at DESC
+        SELECT payload FROM events
+        WHERE kind = ?
+        ORDER BY created_at DESC
         LIMIT 1
-        """
+        """,
+        (CONSOLIDATION_KIND,),
     ).fetchone()
     if row is None:
         return []
     try:
-        extraction = json.loads(row["extraction"])
+        payload = json.loads(row["payload"])
     except (ValueError, TypeError):
         return []
-    threads = extraction.get("open_threads", []) if isinstance(extraction, dict) else []
+    threads = payload.get("open_threads", []) if isinstance(payload, dict) else []
     if not isinstance(threads, list):
         return []
     cleaned: list[str] = []

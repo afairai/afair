@@ -6,12 +6,10 @@ open_threads pull from the consolidator, and the cache semantics.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from ulid import ULID
 
 from afair.agents.mode_switcher import MODE_CEN, MODE_DMN, MODE_SWITCHER_ORIGIN
 from afair.agents.salience import SalienceWorker
@@ -236,36 +234,30 @@ def test_cumulative_salience_sums_surfaced_events(
 
 
 def _seed_consolidation(db: sqlite3.Connection, threads: list[str]) -> None:
-    """Write a synthetic consolidation interpretation row."""
-    extraction = {
-        "status": "success",
-        "content_type": "daily_consolidation",
-        "themes": ["test theme"],
-        "open_threads": threads,
-    }
-    # Need a source event to anchor the interpretation.
-    event = write_event(
+    """Write a real consolidation via the production path.
+
+    The Consolidator emits its digest as a substrate EVENT
+    (kind='consolidation') whose payload carries open_threads — NOT an
+    interpretation row. Seeding through _write_consolidation ensures the
+    test exercises the layer the reader actually reads (P0-4)."""
+    from afair.agents.consolidator import _DaySummary, _write_consolidation
+
+    source = write_event(
         db,
-        origin="agent:consolidator",
-        kind="consolidate",
-        payload={"content_type": "text", "text": "synthetic consolidation"},
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "a day's worth of activity"},
     )
-    db.execute(
-        """
-        INSERT INTO interpretations (
-            id, event_id, event_hash, version, produced_at,
-            produced_by, extraction
-        ) VALUES (?, ?, ?, 0, ?, 'consolidator:v0:test', ?)
-        """,
-        (
-            str(ULID()),
-            event.id,
-            event.content_hash,
-            datetime.now(UTC).isoformat(),
-            json.dumps(extraction),
+    _write_consolidation(
+        db,
+        target_day=datetime.now(UTC).date(),
+        events=[source],
+        summary=_DaySummary(
+            narrative="Summary of the day.",
+            themes=["test theme"],
+            open_threads=threads,
         ),
     )
-    db.commit()
 
 
 def test_open_threads_surfaces_consolidator_output(db: sqlite3.Connection) -> None:
@@ -276,37 +268,54 @@ def test_open_threads_surfaces_consolidator_output(db: sqlite3.Connection) -> No
 
 
 def test_open_threads_handles_dict_format(db: sqlite3.Connection) -> None:
-    """Some consolidator versions emit {text: ...} shaped threads."""
-    extraction = {
-        "status": "success",
-        "open_threads": [
-            {"text": "merge the docs branch"},
-            {"text": "ping support@"},
-        ],
-    }
-    event = write_event(
+    """Some consolidator versions emit {text: ...} shaped threads. The reader's
+    tolerance loop must flatten them. Seeded as a raw consolidation event
+    because _DaySummary only carries list[str]."""
+    write_event(
         db,
-        origin="agent:consolidator",
-        kind="consolidate",
-        payload={"content_type": "text", "text": "synthetic"},
+        origin="agent",
+        kind="consolidation",
+        payload={
+            "content_type": "text",
+            "text": "synthetic consolidation",
+            "open_threads": [
+                {"text": "merge the docs branch"},
+                {"text": "ping support@"},
+            ],
+        },
     )
-    db.execute(
-        """
-        INSERT INTO interpretations (id, event_id, event_hash, version,
-            produced_at, produced_by, extraction)
-        VALUES (?, ?, ?, 0, ?, 'consolidator:v0:test2', ?)
-        """,
-        (
-            str(ULID()),
-            event.id,
-            event.content_hash,
-            datetime.now(UTC).isoformat(),
-            json.dumps(extraction),
-        ),
-    )
-    db.commit()
     payload = resources.read_session_start(db)
     assert "merge the docs branch" in payload["open_threads"]
+    assert "ping support@" in payload["open_threads"]
+
+
+def test_open_threads_uses_latest_consolidation(db: sqlite3.Connection) -> None:
+    """Two consolidations on different days → the most recent one's threads
+    are surfaced (ORDER BY created_at DESC LIMIT 1)."""
+    from afair.agents.consolidator import _DaySummary, _write_consolidation
+
+    older = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "day one"}
+    )
+    _write_consolidation(
+        db,
+        target_day=datetime.now(UTC).date() - timedelta(days=1),
+        events=[older],
+        summary=_DaySummary(narrative="older", themes=["a"], open_threads=["stale thread"]),
+    )
+    newer = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "day two"}
+    )
+    _write_consolidation(
+        db,
+        target_day=datetime.now(UTC).date(),
+        events=[newer],
+        summary=_DaySummary(narrative="newer", themes=["b"], open_threads=["fresh thread"]),
+    )
+
+    payload = resources.read_session_start(db)
+    assert "fresh thread" in payload["open_threads"]
+    assert "stale thread" not in payload["open_threads"]
 
 
 def test_open_threads_capped_at_limit(db: sqlite3.Connection) -> None:
