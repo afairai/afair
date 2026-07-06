@@ -254,6 +254,14 @@ def read_latest_interpretation(conn: sqlite3.Connection, event_hash: str) -> Int
     payload text. Failed interpretations (status=failed) are skipped —
     they have no useful structured data for the AI client to act on.
 
+    Skipping the failed rows happens in SQL (``status IS NOT 'failed'``, which
+    keeps success and status-less rows) so a failure appended AFTER a success
+    for the same hash (a retry against an already-succeeded event, or a
+    re-extraction on model upgrade) does NOT shadow the earlier success — the
+    query walks past it to the newest usable row. Previously this fetched only
+    the single latest row and returned None when it was failed, hiding the
+    success from recall.
+
     Filters by ``produced_by LIKE 'extractor:%'`` so that bind records
     written by the Bind agent (``binder:v0``) don't shadow the actual
     Extractor output. Bind records are accessed via their own helper.
@@ -264,6 +272,7 @@ def read_latest_interpretation(conn: sqlite3.Connection, event_hash: str) -> Int
         """
         SELECT * FROM interpretations
         WHERE event_hash = ? AND produced_by LIKE 'extractor:%'
+          AND json_extract(extraction, '$.status') IS NOT 'failed'
         ORDER BY produced_at DESC, version DESC
         """,
         (event_hash,),
@@ -271,10 +280,6 @@ def read_latest_interpretation(conn: sqlite3.Connection, event_hash: str) -> Int
     if row is None:
         return None
     extraction = json.loads(row["extraction"])
-    # Skip failed extractions for the recall path. Callers that want them
-    # can query the table directly.
-    if extraction.get("status") == "failed":
-        return None
     return Interpretation(
         id=row["id"],
         event_id=row["event_id"],
@@ -311,26 +316,21 @@ def read_latest_interpretations_batch(
         SELECT * FROM interpretations
         WHERE event_hash IN ({placeholders})
           AND produced_by LIKE 'extractor:%'
+          AND json_extract(extraction, '$.status') IS NOT 'failed'
         ORDER BY event_hash, produced_at DESC, version DESC
         """,
         event_hashes,
     ).fetchall()
 
-    # Walk rows in (hash, produced_at DESC, version DESC) order. First row
-    # per hash is the latest; skip failed extractions; keep the first
-    # success per hash.
+    # Failed rows are filtered in SQL (mirrors the single-event variant), so a
+    # failure appended after a success no longer shadows it. The remaining rows
+    # per hash are all usable, newest-first; keep the first (newest) per hash.
     out: dict[str, Interpretation] = {}
     for row in rows:
         h = row["event_hash"]
         if h in out:
-            continue  # already kept the latest for this hash
+            continue  # already kept the newest usable interpretation for this hash
         extraction = json.loads(row["extraction"])
-        if extraction.get("status") == "failed":
-            # Mark with sentinel so we don't re-evaluate later rows for
-            # this hash — they're all older than the failed-latest, so
-            # the user-facing answer is "no usable extraction".
-            out[h] = _SENTINEL_FAILED  # type: ignore[assignment]
-            continue
         out[h] = Interpretation(
             id=row["id"],
             event_id=row["event_id"],
@@ -341,10 +341,4 @@ def read_latest_interpretations_batch(
             extraction=extraction,
         )
 
-    # Drop the failed sentinels so callers see only real Interpretations.
-    return {k: v for k, v in out.items() if v is not _SENTINEL_FAILED}
-
-
-# Module-private sentinel used by the batch loop to short-circuit
-# multiple rows of the same hash without polluting the public type.
-_SENTINEL_FAILED = object()
+    return out
