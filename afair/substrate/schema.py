@@ -1035,6 +1035,50 @@ SCHEMA_DDL: tuple[str, ...] = (
         updated_at         TEXT NOT NULL
     ) STRICT
     """,
+    # ── event_provenance: server-authoritative client provenance (ADR-0006) ──
+    # A #29 multi-client vault needs "which client wrote this?" without folding
+    # the answer into event identity. ``origin`` is part of the content_hash
+    # (events.py content_hash(kind, origin, payload, parents)), so refining
+    # ``origin`` per-client would silently split the dedup/hash contract — a hard
+    # fork. Instead the authenticated client is stamped into this append-only
+    # SIDECAR keyed by event_id, OUT of the hash: absence = a pre-provenance or
+    # non-HTTP (direct/in-process) write, same overlay discipline as
+    # edge_confidence_scores / edge_serves. The ``client`` slug is derived ONLY
+    # from the credential (token label / OAuth client_name / master / local),
+    # never from client-supplied headers or tool args (I4/I8 data-minimization);
+    # no session_id / tool_call_id is recorded. One row per distinct
+    # (event_id, client): a second client writing the same dedup'd event appends
+    # a second (honest) row; the same client re-stamping is an INSERT OR IGNORE
+    # no-op. Append-only per I2 (triggers below, from day one) — this is the
+    # user's own provenance record, not telemetry, so it is NOT prunable and it
+    # rides the export (I4). See docs/adr/ADR-0006-event-provenance.md.
+    """
+    CREATE TABLE IF NOT EXISTS event_provenance (
+        id          TEXT PRIMARY KEY,
+        event_id    TEXT NOT NULL REFERENCES events(id),
+        client      TEXT NOT NULL,
+        auth_kind   TEXT NOT NULL,
+        verb        TEXT NOT NULL,
+        stamped_at  TEXT NOT NULL,
+        UNIQUE(event_id, client)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS event_provenance_client_idx ON event_provenance(client)",
+    "CREATE INDEX IF NOT EXISTS event_provenance_event_idx ON event_provenance(event_id)",
+    """
+    CREATE TRIGGER IF NOT EXISTS event_provenance_no_update
+    BEFORE UPDATE ON event_provenance
+    BEGIN
+        SELECT RAISE(ABORT, 'event_provenance is append-only (ADR-0006 / Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS event_provenance_no_delete
+    BEFORE DELETE ON event_provenance
+    BEGIN
+        SELECT RAISE(ABORT, 'event_provenance is append-only (ADR-0006 / Invariant I2)');
+    END
+    """,
 )
 
 

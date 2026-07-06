@@ -296,6 +296,9 @@ def test_surprise_does_not_leak_into_recall_hit_top_level(
         "parent_hashes",
         "invalidation",
         "conflicts",
+        # ADR-0006: server-authoritative client provenance is an additive
+        # top-level field (null here — no HTTP request in this unit test).
+        "client",
     }
     assert set(hit.model_dump().keys()) == expected_fields
 

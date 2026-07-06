@@ -39,6 +39,10 @@ What Pruner MUST NEVER touch:
     sweep both key on the presence/absence of a row here. Deleting a stamp
     would let an already-served edge be auto-expired as if never served.
     Append-only (I2 triggers), never pruned.
+  - The event_provenance table (ADR-0006) — the append-only record of which
+    client wrote each event. It is the user's own provenance, not the pipeline's
+    flight recorder, so it rides the export (I4) and is never aged out. I2
+    triggers enforce append-only.
 
 Defaults are conservative; the worker is meant to be run-and-forget.
 """

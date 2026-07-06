@@ -263,3 +263,137 @@ def test_token_comparison_is_constant_time(tmp_path: Path) -> None:
                 },
             )
             assert response.status_code == 401, f"expected 401 for {bad!r}"
+
+
+# ── ADR-0006: client-provenance plumbing ─────────────────────────────────────
+
+
+def test_client_slug_sanitizes() -> None:
+    from afair.mcp.auth import client_slug
+
+    assert client_slug("Claude Code") == "claude-code"
+    assert client_slug("My Bot!!") == "my-bot"
+    assert client_slug(None) == "unknown"
+    assert client_slug("") == "unknown"
+    assert client_slug("   ") == "unknown"  # all-separator collapses then strips
+    # >64 chars is capped.
+    assert len(client_slug("a" * 100)) == 64
+    # Unicode is stripped to the ASCII slug alphabet.
+    slug = client_slug("Résumé Café")
+    assert all(c in "abcdefghijklmnopqrstuvwxyz0123456789._-" for c in slug)
+    # A slug that is already clean survives unchanged.
+    assert client_slug("codex-cli") == "codex-cli"
+
+
+def _drive_middleware(
+    settings: Settings, *, static_token: str | None, authorization: str | None
+) -> dict[str, str | None]:
+    """Drive ``BearerOrJwtMiddleware`` over a fake /mcp ASGI scope and return the
+    provenance scope keys the middleware stamped before calling downstream."""
+    import asyncio
+
+    from afair.mcp.auth import (
+        SCOPE_AUTH_KIND_KEY,
+        SCOPE_CLIENT_KEY,
+        BearerOrJwtMiddleware,
+    )
+
+    captured: dict[str, str | None] = {}
+
+    async def _app(scope: dict, receive: object, send: object) -> None:
+        captured["client"] = scope.get(SCOPE_CLIENT_KEY)
+        captured["auth_kind"] = scope.get(SCOPE_AUTH_KIND_KEY)
+        await send({"type": "http.response.start", "status": 200, "headers": []})  # type: ignore[operator]
+        await send({"type": "http.response.body", "body": b"", "more_body": False})  # type: ignore[operator]
+
+    headers: list[tuple[bytes, bytes]] = []
+    if authorization is not None:
+        headers.append((b"authorization", authorization.encode("latin-1")))
+    scope = {"type": "http", "path": "/mcp", "headers": headers}
+
+    async def _receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _send(_msg: dict) -> None:
+        return None
+
+    mw = BearerOrJwtMiddleware(_app, settings=settings, static_token=static_token)
+    asyncio.run(mw(scope, _receive, _send))
+    return captured
+
+
+def test_middleware_stamps_master_for_static_bearer(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    captured = _drive_middleware(
+        settings, static_token=SAMPLE_TOKEN, authorization=f"Bearer {SAMPLE_TOKEN}"
+    )
+    assert captured == {"client": "master", "auth_kind": "master"}
+
+
+def test_middleware_stamps_slug_for_api_token(tmp_path: Path) -> None:
+    from afair.mcp import api_tokens
+    from afair.mcp.context import ServerContext, set_context
+    from afair.substrate import open_db
+
+    db = open_db(tmp_path)
+    minted = api_tokens.mint(db, label="My Bot!!")
+    set_context(ServerContext(db=db, vault_dir=tmp_path, inline_text_max_bytes=64 * 1024))
+    try:
+        settings = _settings(tmp_path)
+        captured = _drive_middleware(
+            settings, static_token=SAMPLE_TOKEN, authorization=f"Bearer {minted.plaintext}"
+        )
+    finally:
+        db.close()
+    assert captured == {"client": "my-bot", "auth_kind": "api-token"}
+
+
+def _jwt_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
+        jwt_secret="a-secret-long-enough-for-hs256-tests-32+",  # type: ignore[arg-type]
+        identity_allowlist="operator",  # type: ignore[arg-type]
+    )
+
+
+def test_middleware_stamps_client_name_claim_for_jwt(tmp_path: Path) -> None:
+    from afair.mcp.oauth.jwt import issue_access_token
+
+    settings = _jwt_settings(tmp_path)
+    token = issue_access_token(
+        settings=settings, subject="operator", email=None, client_name="Claude Desktop"
+    ).token
+    captured = _drive_middleware(
+        settings, static_token=SAMPLE_TOKEN, authorization=f"Bearer {token}"
+    )
+    assert captured == {"client": "claude-desktop", "auth_kind": "oauth"}
+
+
+def test_middleware_falls_back_to_oauth_for_legacy_jwt(tmp_path: Path) -> None:
+    """A JWT minted before the client_name claim existed carries no claim →
+    the middleware stamps the generic 'oauth' slug, never 'unknown'."""
+    from afair.mcp.oauth.jwt import issue_access_token
+
+    settings = _jwt_settings(tmp_path)
+    token = issue_access_token(settings=settings, subject="operator", email=None).token
+    captured = _drive_middleware(
+        settings, static_token=SAMPLE_TOKEN, authorization=f"Bearer {token}"
+    )
+    assert captured == {"client": "oauth", "auth_kind": "oauth"}
+
+
+def test_jwt_client_name_claim_roundtrips(tmp_path: Path) -> None:
+    from afair.mcp.oauth import jwt as jwt_mod
+
+    settings = _jwt_settings(tmp_path)
+    token = jwt_mod.issue_access_token(
+        settings=settings, subject="operator", email=None, client_name="cursor"
+    ).token
+    claims = jwt_mod.validate(token, settings=settings)
+    assert claims.client_name == "cursor"
+    # A token minted without the claim validates and surfaces None (legacy).
+    legacy = jwt_mod.issue_access_token(settings=settings, subject="operator", email=None).token
+    assert jwt_mod.validate(legacy, settings=settings).client_name is None

@@ -561,3 +561,31 @@ def test_export_edge_confidence_score_follows_its_edge(vault_dir, tmp_path) -> N
     score_rec = records[score_positions[0]]
     assert score_rec["edge_id"] in edge_ids
     assert score_rec["confidence"] == 0.42
+
+
+def test_export_carries_event_provenance(vault_dir, tmp_path) -> None:
+    """The client-provenance sidecar (ADR-0006) rides the export (I4) and
+    streams AFTER its event (FK-safe), with the client slug intact."""
+    from afair.substrate import record_event_provenance
+    from afair.substrate.events import write_event_with_status
+
+    conn = open_db(vault_dir)
+    try:
+        event, _ = write_event_with_status(
+            conn, kind="remember", origin="agent", payload={"content_type": "text", "text": "hi"}
+        )
+        record_event_provenance(
+            conn, event_id=event.id, client="claude-code", auth_kind="oauth", verb="remember"
+        )
+    finally:
+        conn.close()
+
+    records = [json.loads(line) for line in _iter_export(vault_dir, include_blobs=False)]
+    prov = [r for r in records if r["kind"] == "event_provenance"]
+    assert len(prov) == 1
+    assert prov[0]["client"] == "claude-code"
+    assert prov[0]["event_id"] == event.id
+    # Streams after its event (FK-safe replay).
+    event_positions = [i for i, r in enumerate(records) if r["kind"] == "event"]
+    prov_position = next(i for i, r in enumerate(records) if r["kind"] == "event_provenance")
+    assert prov_position > max(event_positions)

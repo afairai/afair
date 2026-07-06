@@ -57,6 +57,7 @@ class TokenClaims:
     iat: int
     jti: str  # JWT ID — useful for revocation
     email: str | None = None  # GitHub user's email (advisory)
+    client_name: str | None = None  # DCR client_name (provenance, ADR-0006)
 
 
 def issue_access_token(
@@ -65,6 +66,7 @@ def issue_access_token(
     subject: str,
     email: str | None,
     audience: str | None = None,
+    client_name: str | None = None,
 ) -> IssuedToken:
     """Mint a short-lived access token for ``subject``.
 
@@ -73,6 +75,12 @@ def issue_access_token(
     resource, NOT to the authorization server's issuer URL. Strict clients
     (Claude.ai included) validate ``aud`` against the resource they intend
     to call and silently reject on mismatch.
+
+    ``client_name`` (optional) is the DCR-registered client name; when present
+    it is carried as a ``client_name`` claim so the write path can stamp
+    server-authoritative provenance (ADR-0006). Additive — a token minted
+    without it validates exactly as before, and an old token missing the claim
+    surfaces ``client_name=None``.
     """
     if settings.jwt_secret is None:
         msg = "AFAIR_JWT_SECRET must be set to issue tokens"
@@ -97,6 +105,8 @@ def issue_access_token(
     }
     if email:
         payload["email"] = email
+    if client_name:
+        payload["client_name"] = client_name
 
     token = jwt.encode(
         payload,
@@ -149,6 +159,7 @@ def validate(
         iat=int(payload["iat"]),
         jti=str(payload.get("jti", "")),
         email=payload.get("email"),
+        client_name=payload.get("client_name"),
     )
 
 

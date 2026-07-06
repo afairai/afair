@@ -50,6 +50,74 @@ SCOPE_TOKEN_SCOPE_KEY = "afair_token_scope"
 read-only minted token cannot perform write verbs (remember/observe).
 Full-access credentials (static bearer, JWT) always set "full"."""
 
+SCOPE_CLIENT_KEY = "afair_client"
+"""ASGI-scope key holding the sanitized client slug of the authenticated
+credential (ADR-0006). Derived ONLY from the credential itself — the master
+bearer, the api-token label, or the OAuth ``client_name`` claim — never from
+client-supplied headers or tool args. The tool layer reads it via
+``current_client()`` to stamp ``event_provenance``."""
+
+SCOPE_AUTH_KIND_KEY = "afair_auth_kind"
+"""ASGI-scope key holding the auth mechanism that produced the client slug:
+'master' | 'api-token' | 'oauth'. Local no-auth mode stamps neither this nor
+``SCOPE_CLIENT_KEY``; ``current_client()`` then reports ('local', 'none')."""
+
+
+_CLIENT_SLUG_KEEP = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+_MAX_CLIENT_SLUG_LEN = 64
+
+
+def client_slug(raw: str | None) -> str:
+    """Sanitize a credential-derived client label into a stable slug (ADR-0006).
+
+    Pure function: lowercases, keeps ``[a-z0-9._-]``, collapses every other run
+    of characters to a single ``-``, strips leading/trailing separators, caps at
+    64 chars, and maps empty/None to ``"unknown"``. Used on the api-token label
+    and the OAuth ``client_name`` claim so an arbitrary user-chosen string
+    becomes a bounded, index-friendly identifier that never carries raw content.
+    """
+    if not raw:
+        return "unknown"
+    out: list[str] = []
+    prev_dash = False
+    for ch in raw.lower():
+        if ch in _CLIENT_SLUG_KEEP:
+            out.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    slug = "".join(out).strip("-._")[:_MAX_CLIENT_SLUG_LEN].strip("-._")
+    return slug or "unknown"
+
+
+def current_client() -> tuple[str, str] | None:
+    """The authenticated ``(client_slug, auth_kind)`` for the current request.
+
+    Mirrors ``enforce_write_scope``'s HTTP-context handling (ADR-0006):
+
+    - No HTTP request context (``get_http_request`` raises) → ``None``. That path
+      is a direct/in-process call (unit tests, cold-path workers); no provenance
+      is stamped.
+    - HTTP context WITH a stamped client (every successful auth path in
+      ``BearerOrJwtMiddleware`` sets both scope keys) → that ``(client,
+      auth_kind)``.
+    - HTTP context WITHOUT a stamped client → local self-host / no-auth mode
+      (the middleware let the request through without stamping) → ``('local',
+      'none')`` so self-hosters also get provenance.
+    """
+    from fastmcp.server.dependencies import get_http_request
+
+    try:
+        request = get_http_request()
+    except Exception:
+        return None  # no HTTP context — direct/in-process call
+    client = request.scope.get(SCOPE_CLIENT_KEY)
+    auth_kind = request.scope.get(SCOPE_AUTH_KIND_KEY)
+    if isinstance(client, str) and isinstance(auth_kind, str):
+        return (client, auth_kind)
+    return ("local", "none")
+
 
 def enforce_write_scope() -> None:
     """Reject write verbs (remember/observe) when the caller's token is read-only.
@@ -225,6 +293,9 @@ class BearerOrJwtMiddleware:
             scope[SCOPE_IDENTITY_KEY] = "static-bearer"
             # The master bearer is full-access by definition.
             scope[SCOPE_TOKEN_SCOPE_KEY] = "full"
+            # Provenance (ADR-0006): the master credential is its own client.
+            scope[SCOPE_CLIENT_KEY] = "master"
+            scope[SCOPE_AUTH_KIND_KEY] = "master"
             await self.app(scope, receive, send)
             return
 
@@ -238,6 +309,9 @@ class BearerOrJwtMiddleware:
             scope[SCOPE_IDENTITY_KEY] = f"api-token:{api_token.id}"
             # Enforce the token's stored scope at the tool boundary (L2).
             scope[SCOPE_TOKEN_SCOPE_KEY] = api_token.scope
+            # Provenance (ADR-0006): the token's user-chosen label, sanitized.
+            scope[SCOPE_CLIENT_KEY] = client_slug(api_token.label)
+            scope[SCOPE_AUTH_KIND_KEY] = "api-token"
             await self.app(scope, receive, send)
             return
 
@@ -264,6 +338,13 @@ class BearerOrJwtMiddleware:
                 scope[SCOPE_IDENTITY_KEY] = f"jwt:{claims.sub.lower()}"
                 # OAuth-issued JWTs grant full access (the user's own session).
                 scope[SCOPE_TOKEN_SCOPE_KEY] = "full"
+                # Provenance (ADR-0006): the DCR client_name claim, sanitized.
+                # Legacy tokens minted before the claim existed carry None →
+                # fall back to a generic 'oauth' slug rather than 'unknown'.
+                scope[SCOPE_CLIENT_KEY] = (
+                    client_slug(claims.client_name) if claims.client_name else "oauth"
+                )
+                scope[SCOPE_AUTH_KIND_KEY] = "oauth"
                 await self.app(scope, receive, send)
                 return
 

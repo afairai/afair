@@ -60,6 +60,7 @@ from ..substrate import (
     build_blob_ref_payload,
     build_compound_payload,
     build_text_payload,
+    count_events_by_client,
     count_pending_corrections,
     count_pending_ontology_proposals,
     iter_events,
@@ -71,11 +72,13 @@ from ..substrate import (
     read_entities_batch,
     read_event_by_hash,
     read_event_by_id,
+    read_event_provenance_batch,
     read_mentions_batch,
     read_object,
     read_pending_corrections,
     read_pending_ontology_proposals,
     record_edge_serves,
+    record_event_provenance,
     resolve_canonical_batch,
     resolve_entity_kind_batch,
     retracted_entity_ids,
@@ -98,6 +101,7 @@ from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
 from ..substrate.search import FTS5_SPECIALS_RE
 from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
+from .auth import current_client
 from .context import connect_for_thread, get_context
 from .schemas import (
     MAX_DECIDE_BATCH,
@@ -130,6 +134,7 @@ from .schemas import (
 
 if TYPE_CHECKING:
     from ..substrate.events import Event
+    from ..substrate.provenance import ProvenanceRow
 
 # Narrowed error set for a tunable-registry lookup fallback (recall must never
 # fail on a tunable hiccup): a whitelist miss (KeyError), a DB hiccup
@@ -137,10 +142,14 @@ if TYPE_CHECKING:
 # programming bug propagates instead of being swallowed.
 _TUNABLE_FALLBACK_ERRORS = (KeyError, sqlite3.Error, ValueError, TypeError)
 
-# All MCP-initiated events carry origin "agent" in v1. Per-client refinement
-# (e.g., "agent:claude-code") happens server-side in a later phase by reading
-# request headers — that change does not alter the MCP tool signatures and
-# therefore does not violate I1.
+# All MCP-initiated events carry origin "agent" in v1. ``origin`` is part of the
+# event content_hash (events.content_hash(kind, origin, payload, parents)), so it
+# MUST stay coarse — refining it per-client would fork the dedup/hash contract.
+# Which client wrote an event is recorded OUT of the hash in the append-only
+# ``event_provenance`` sidecar (ADR-0006), stamped from the authenticated
+# credential right after each write below; recall serves it as an additive
+# ``RecallHit.client`` / ``ContextSummary.by_client``. That refinement does not
+# alter the MCP tool signatures and therefore does not violate I1.
 DEFAULT_ORIGIN = "agent"
 
 # Snippet length for text in recall summaries (when full_payload=False).
@@ -453,6 +462,13 @@ def _invalidation_to_summary(info: InvalidationInfo | None) -> InvalidationSumma
     return InvalidationSummary(at=info.at, by_event_id=info.by_event_id, reason=info.reason)
 
 
+def _earliest_client(rows: list[ProvenanceRow] | None) -> str | None:
+    """The author client for an event (ADR-0006): the earliest-stamped row's
+    client. ``read_event_provenance_batch`` returns rows ordered by stamped_at
+    ASC, so the first is the author. None when the event has no provenance."""
+    return rows[0].client if rows else None
+
+
 def _event_to_hit(
     event: Event,
     db: Any,
@@ -463,6 +479,7 @@ def _event_to_hit(
     entity_overlay: dict[str, Any] | None = None,
     interpretation_extraction: dict[str, Any] | None = None,
     linked_event_ids: list[str] | None = None,
+    client: str | None = None,
     verbosity: str = "standard",
 ) -> RecallHit:
     """Build one RecallHit. When ``full_payload`` is True the payload is
@@ -550,6 +567,9 @@ def _event_to_hit(
         parent_hashes=list(event.parent_hashes or []),
         invalidation=_invalidation_to_summary(invalidation),
         conflicts=conflict_flags,
+        # Provenance (ADR-0006) is served standard/full/by_id; compact omits it
+        # (null is dropped from the wire by the exclude_none serializer).
+        client=None if compact else client,
     )
 
 
@@ -978,6 +998,29 @@ def _truncate_preserve(value: str | None, cap: int) -> tuple[str | None, str | N
     return value, None
 
 
+def _stamp_provenance(db: Any, event_id: str, verb: str) -> None:
+    """Stamp the authenticated client for a just-written event (ADR-0006).
+
+    Runs REGARDLESS of whether the write was a fresh insert or a dedup: a second
+    client writing the same content-hashed event appends its own honest row
+    (``INSERT OR IGNORE`` on ``UNIQUE(event_id, client)`` no-ops a same-client
+    re-stamp). ``current_client()`` is None outside an HTTP request (direct/
+    in-process calls) — then nothing is stamped. Fail-soft: a provenance failure
+    must never fail or meaningfully slow the underlying remember/observe.
+    """
+    ident = current_client()
+    if ident is None:
+        return
+    try:
+        record_event_provenance(
+            db, event_id=event_id, client=ident[0], auth_kind=ident[1], verb=verb
+        )
+    except Exception:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning("provenance.stamp_failed", event_id=event_id)
+
+
 def remember(
     content: RememberContent,
     context: str | None = None,
@@ -1192,6 +1235,11 @@ def remember(
         )
         schedule_extraction(event.id)
     already_existed = not was_inserted
+
+    # Stamp server-authoritative client provenance (ADR-0006). OUTSIDE the
+    # ``if was_inserted`` block on purpose: a dedup'd write from a DIFFERENT
+    # client must still record that this client wrote (touched) the event.
+    _stamp_provenance(db, event.id, "remember")
 
     # Write the invalidations AFTER the main write. Targets were already
     # validated (existence + not-itself-an-invalidation) before the content
@@ -1678,6 +1726,9 @@ def recall(
         overlay = _build_entity_overlay([target], db)
         interp_map = read_latest_interpretations_batch(db, [target.content_hash])
         linked_map = get_linked_event_ids_batch(db, [target.content_hash])
+        # Provenance (ADR-0006): by_id/by_content_hash always serve the full
+        # shape, so always surface the writing client.
+        provenance_map = read_event_provenance_batch(db, [target.id])
         interp_for_target = interp_map.get(target.content_hash)
         return RecallResult(
             hits=[
@@ -1692,6 +1743,7 @@ def recall(
                         interp_for_target.extraction if interp_for_target else None
                     ),
                     linked_event_ids=linked_map.get(target.content_hash, []),
+                    client=_earliest_client(provenance_map.get(target.id)),
                     # by_id/by_content_hash are the re-fetch escape hatch: always
                     # serve the complete shape regardless of the verbosity arg.
                     verbosity="full",
@@ -1830,6 +1882,12 @@ def recall(
     event_hashes = [e.content_hash for e in events]
     interp_map = read_latest_interpretations_batch(db, event_hashes)
     linked_map = get_linked_event_ids_batch(db, event_hashes)
+    # Provenance (ADR-0006): served standard/full only. Compact drops the
+    # ``client`` field from the wire anyway (exclude_none), so skip the batch
+    # query entirely on the compact hot path — one indexed lookup saved.
+    provenance_map = (
+        read_event_provenance_batch(db, [e.id for e in events]) if verbosity != "compact" else {}
+    )
     return RecallResult(
         hits=[
             _event_to_hit(
@@ -1843,6 +1901,7 @@ def recall(
                     interp_map[e.content_hash].extraction if e.content_hash in interp_map else None
                 ),
                 linked_event_ids=linked_map.get(e.content_hash, []),
+                client=_earliest_client(provenance_map.get(e.id)),
                 verbosity=verbosity,
             )
             for e in events
@@ -1875,7 +1934,12 @@ def _build_stats_summary(db: Any) -> ContextSummary:
         total += c
         by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + c
         by_origin[row["origin"]] = by_origin.get(row["origin"], 0) + c
-    return ContextSummary(total_events=total, by_kind=by_kind, by_origin=by_origin)
+    # Provenance breakdown (ADR-0006): a different axis from by_origin — which
+    # writing CLIENT touched the vault. Empty on a pre-provenance vault.
+    by_client = count_events_by_client(db)
+    return ContextSummary(
+        total_events=total, by_kind=by_kind, by_origin=by_origin, by_client=by_client
+    )
 
 
 def _combine_notes(*parts: str | None) -> str | None:
@@ -1965,6 +2029,10 @@ def observe(event: ObserveEvent) -> ObserveResult:
             producer="observe",
         )
         schedule_extraction(written.id)
+
+    # Stamp client provenance (ADR-0006) — outside the was_inserted guard so a
+    # dedup'd observe from a different client still records the write.
+    _stamp_provenance(db, written.id, "observe")
 
     return ObserveResult(
         ok=True,

@@ -262,6 +262,11 @@ def _iter_export(
             ("proposed_corrections", "proposed_correction"),
             ("proposed_ontology_revisions", "proposed_ontology_revision"),
             ("tuner_state", "tuner_state"),
+            # ADR-0006: the client-provenance sidecar is the user's own record of
+            # which AI tool wrote each event — part of the substrate they own, so
+            # it must survive an export → import round-trip (I4). References
+            # events(id), which precede it in the stream, so FK order holds.
+            ("event_provenance", "event_provenance"),
         ):
             rows = conn.execute(
                 f"SELECT * FROM {table} ORDER BY rowid ASC",

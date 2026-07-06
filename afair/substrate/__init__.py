@@ -117,6 +117,12 @@ from .payload import (
     content_hash,
     derive_searchable_text,
 )
+from .provenance import (
+    ProvenanceRow,
+    count_events_by_client,
+    read_event_provenance_batch,
+    record_event_provenance,
+)
 from .schema import SCHEMA_VERSION
 from .search import rrf_merge, search_fts, search_vec
 from .temporal import (
@@ -152,6 +158,7 @@ __all__ = [
     "OntologyDecisionOutcome",
     "PendingCorrection",
     "PendingOntologyProposal",
+    "ProvenanceRow",
     "StreamingObjectWriter",
     "assign_entity_kind",
     "build_binary_payload",
@@ -162,6 +169,7 @@ __all__ = [
     "content_hash",
     "count_corroborating_sources",
     "count_corroborating_sources_batch",
+    "count_events_by_client",
     "count_pending_corrections",
     "count_pending_ontology_proposals",
     "decide_correction",
@@ -198,6 +206,7 @@ __all__ = [
     "read_entity_by_id",
     "read_event_by_hash",
     "read_event_by_id",
+    "read_event_provenance_batch",
     "read_event_temporal",
     "read_event_temporal_batch",
     "read_mentions_batch",
@@ -206,6 +215,7 @@ __all__ = [
     "read_pending_ontology_proposals",
     "record_edge_review",
     "record_edge_serves",
+    "record_event_provenance",
     "register_kind",
     "resolve_canonical",
     "resolve_canonical_batch",

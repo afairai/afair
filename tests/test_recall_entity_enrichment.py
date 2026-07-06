@@ -519,6 +519,8 @@ def test_recall_overlay_does_not_break_mcp_surface(ctx: ServerContext, settings:
         "parent_hashes",
         "invalidation",
         "conflicts",
+        # ADR-0006: additive server-authoritative client-provenance field.
+        "client",
     }
     actual_fields = set(hit.model_dump().keys())
     assert actual_fields == expected_fields

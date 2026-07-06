@@ -239,12 +239,21 @@ RETURN:
              "linked_event_ids": [...],
              "parent_hashes": [...],
              "invalidation": {...} | null,
-             "conflicts": [...]}],
+             "conflicts": [...],
+             "client": null | "..."}],
    "depth_used": "shallow" | "normal" | "deep",
    "note": null | "...",
-   "summary": null | {total_events, by_kind, by_origin},
+   "summary": null | {total_events, by_kind, by_origin, by_client},
    "decisions": [{"proposal_id": "...", "status": "...", "note": "..."}, ...],
    "next_cursor": null | "..."}
+
+``client`` on a hit is the AI tool that wrote the event, derived
+server-side from the writing credential (not something the caller set).
+It is null for events written before provenance existed, and is served at
+verbosity "standard"/"full" and on by_id/by_content_hash lookups. The
+``summary.by_client`` map (on stats=True) counts events per writing client
+— a different axis from by_origin, useful for "which tools have touched
+this vault".
 
 ``decisions`` is populated only when this call carried ``decide=`` — one
 outcome per decision sent, in order (empty otherwise). ``next_cursor`` is

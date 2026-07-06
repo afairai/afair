@@ -674,7 +674,12 @@ async def _grant_authorization_code(
             return _error("invalid_grant", description="PKCE verification failed")
 
         issued = jwt_mod.issue_access_token(
-            settings=settings, subject=ac.user_sub, email=ac.user_email
+            settings=settings,
+            subject=ac.user_sub,
+            email=ac.user_email,
+            # Provenance (ADR-0006): carry the DCR client_name into the token so
+            # the write path can stamp which client wrote each event.
+            client_name=client.client_name,
         )
         refresh = storage.issue_refresh_token(
             db,
@@ -754,7 +759,14 @@ async def _grant_refresh_token(settings: Settings, form: object) -> Response:
             storage.revoke_refresh_token(db, token)
             return _error("invalid_grant", description="user no longer permitted")
 
-        issued = jwt_mod.issue_access_token(settings=settings, subject=record.user_sub, email=None)
+        issued = jwt_mod.issue_access_token(
+            settings=settings,
+            subject=record.user_sub,
+            email=None,
+            # Provenance (ADR-0006): the refresh grant already looked up the
+            # presenting client above; carry its name into the reissued token.
+            client_name=client.client_name,
+        )
         # Rotate: mint a fresh refresh token and revoke the presented one, so a
         # captured token is single-use. Both in the same connection.
         new_refresh = storage.issue_refresh_token(

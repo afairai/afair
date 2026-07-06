@@ -414,6 +414,14 @@ class RecallHit(BaseModel):
     most events). Populated for events with explicit ``parent_hashes``
     in the original write OR for invalidation events (which carry the
     target's hash there).
+
+    ``client`` is the server-authoritative slug of the AI tool that wrote
+    this event (ADR-0006) — derived from the writing credential, NOT from
+    ``origin`` (which stays coarse because it is part of the content hash).
+    Null for events written before provenance existed or outside an HTTP
+    request; the EARLIEST-stamped client (the author) is served. Present at
+    verbosity standard/full and on by_id/by_content_hash lookups; omitted at
+    compact (null fields are dropped from the wire). Additive per I1.
     """
 
     event_id: str
@@ -428,6 +436,7 @@ class RecallHit(BaseModel):
     parent_hashes: list[str] = []
     invalidation: InvalidationSummary | None = None
     conflicts: list[ConflictFlag] = []
+    client: str | None = None
 
 
 class ContextSummary(BaseModel):
@@ -441,6 +450,11 @@ class ContextSummary(BaseModel):
     total_events: int
     by_kind: dict[str, int]
     by_origin: dict[str, int]
+    by_client: dict[str, int] = {}
+    """Distinct events stamped per writing client (ADR-0006). A DIFFERENT axis
+    from ``by_origin`` (user/agent/worker): this answers "which of my AI tools
+    wrote to this vault". Empty for vaults with no provenance rows (all writes
+    pre-date provenance or were non-HTTP). Additive per I1."""
 
 
 class RecallCoverage(BaseModel):
