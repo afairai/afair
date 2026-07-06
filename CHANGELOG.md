@@ -10,6 +10,14 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.16](https://github.com/afairai/afair/compare/v0.1.15...v0.1.16) (2026-07-06)
+
+
+### Features
+
+* **compound:** harden compound-content intake and re-interpretation ([c0ef416](https://github.com/afairai/afair/commit/c0ef4164ddaf6c2ed1d94308e6473d0b6a51113c))
+* **oauth:** host canonicalization + refresh-token rotation, middleware tests ([2381468](https://github.com/afairai/afair/commit/2381468f0aeeb3dc051cc5346b5959f28874533b))
+
 ## [0.1.15](https://github.com/afairai/afair/compare/v0.1.14...v0.1.15) (2026-07-06)
 
 
