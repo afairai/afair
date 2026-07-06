@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from afair.mcp import schemas
 from afair.mcp.context import clear_context
 from afair.mcp.server import build_server
 from afair.settings import Settings
@@ -358,6 +359,64 @@ async def test_observe_bare_string_event_becomes_action(tmp_path: Path) -> None:
     assert payload["action"] == "just did a thing"
 
 
+@pytest.mark.asyncio
+async def test_recall_decide_single_object_as_string_matches_native(tmp_path: Path) -> None:
+    """T9: a JSON-stringified single ``decide`` produces the IDENTICAL outcome to
+    the native object form (the stringified-param class, extended to decide).
+
+    A non-existent proposal id yields a deterministic ``not_found`` outcome, so
+    the decide was parsed + dispatched (not silently dropped)."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    decision = {"proposal_id": "does-not-exist", "verdict": "confirm"}
+
+    native = _tool_data(await server.call_tool("recall", {"decide": decision}))["decisions"]
+    stringed = _tool_data(await server.call_tool("recall", {"decide": json.dumps(decision)}))[
+        "decisions"
+    ]
+
+    assert len(stringed) == 1
+    assert stringed[0]["proposal_id"] == "does-not-exist"
+    assert stringed[0]["status"] == "not_found"
+    assert stringed == native
+
+
+@pytest.mark.asyncio
+async def test_recall_decide_list_as_string_matches_native(tmp_path: Path) -> None:
+    """T10: a JSON-stringified ``decide`` LIST produces the identical batch
+    outcome to the native list form."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    batch = [
+        {"proposal_id": "missing-a", "verdict": "confirm"},
+        {"proposal_id": "missing-b", "verdict": "reject"},
+    ]
+
+    native = _tool_data(await server.call_tool("recall", {"decide": batch}))["decisions"]
+    stringed = _tool_data(await server.call_tool("recall", {"decide": json.dumps(batch)}))[
+        "decisions"
+    ]
+
+    assert len(stringed) == 2
+    assert {d["proposal_id"] for d in stringed} == {"missing-a", "missing-b"}
+    assert stringed == native
+
+
+@pytest.mark.asyncio
+async def test_recall_decide_malformed_json_string_errors_not_dropped(tmp_path: Path) -> None:
+    """T11: a malformed ``decide`` JSON string yields a clear typed error rather
+    than being silently dropped (which would discard the operator's correction).
+    """
+    from pydantic import ValidationError
+
+    # ensure_decide is the narrowing used in the recall body; a malformed JSON
+    # string reaches the union validator and raises, never returns a no-op.
+    with pytest.raises(ValidationError):
+        schemas.ensure_decide("{not valid json")
+
+
 def _string_alt_present(node: dict) -> bool:
     """A plain-string member (no const tag, no object properties) is advertised."""
     members = node.get("anyOf", [node])
@@ -382,27 +441,46 @@ def _discriminator_tags(node: dict) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_advertised_input_schema_is_i1_superset(tmp_path: Path) -> None:
-    """T8: the advertised inputSchema is a strict SUPERSET of the prior contract.
+async def test_advertised_input_schema_is_clean_no_string_pollution(tmp_path: Path) -> None:
+    """T8: the advertised inputSchema is the CLEAN pre-v0.1.9 shape — NO spurious
+    top-level ``{"type":"string"}`` alternative on ``remember.content``,
+    ``observe.event``, or ``recall.decide``.
 
-    Every object variant that was valid before stays valid (all four remember
-    content tags; the observe event object), and a string alternative is added.
-    Locks the I1-additive guarantee so a future change can't silently drop the
-    string acceptance or a content variant from the frozen surface.
+    Regression lock for a user-blocking bug: the v0.1.9 stringified-param fix
+    widened these params to ``<X> | str``, which leaked a top-level
+    ``anyOf: [<object/union>, {type:string}]`` into the advertised schema and
+    broke claude.ai's in-chat tool surfacing (it stopped handing the connector's
+    tools to the assistant). String tolerance is now a coercion, not a schema
+    member — so the object contract stays clean while stringified payloads still
+    parse (asserted by the behavioral tests above). This test would have caught
+    the regression.
     """
     server = build_server(_settings_for(tmp_path))
     tools = {t.name: t for t in await server.list_tools()}
 
+    # remember.content — all four content variants still advertised, NO string alt.
     content = tools["remember"].parameters["properties"]["content"]
     assert _discriminator_tags(content) == {"text", "binary", "blob-ref", "compound"}
-    assert _string_alt_present(content), "remember.content must advertise a string alt"
+    assert not _string_alt_present(content), (
+        "remember.content must NOT advertise a top-level string alternative"
+    )
 
+    # observe.event — object form still advertised, NO string alt.
     event = tools["observe"].parameters["properties"]["event"]
     event_members = event.get("anyOf", [event])
     assert any(m.get("type") == "object" for m in event_members), (
         "observe.event must still advertise its object form"
     )
-    assert _string_alt_present(event), "observe.event must advertise a string alt"
+    assert not _string_alt_present(event), (
+        "observe.event must NOT advertise a top-level string alternative"
+    )
+
+    # recall.decide — the intrinsic CorrectionDecision | list | None union, NO
+    # string alt (a string decide is coerced, not advertised).
+    decide = tools["recall"].parameters["properties"]["decide"]
+    assert not _string_alt_present(decide), (
+        "recall.decide must NOT advertise a top-level string alternative"
+    )
 
 
 @pytest.mark.asyncio

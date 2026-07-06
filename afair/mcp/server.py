@@ -243,12 +243,17 @@ def build_server(settings: Settings) -> FastMCP:
         full_payload: bool = False,
         stats: bool = False,
         feedback: schemas.RecallFeedback | None = None,
-        decide: schemas.CorrectionDecision | list[schemas.CorrectionDecision] | None = None,
+        decide: schemas.DecideInput = None,
         pending_limit: int | None = None,
         pending_offset: int = 0,
         verbosity: schemas.RecallVerbosity = "compact",
         cursor: str | None = None,
     ) -> ToolResult:
+        # Narrow the decide arg back to the concrete union (and re-parse a
+        # JSON-stringified payload), mirroring content/event. No-op when the
+        # BeforeValidator already produced the native form; defense-in-depth if
+        # a future FastMCP bypasses it.
+        decide = schemas.ensure_decide(decide)
         # decide= applies corrections (entity merges/retractions, observe
         # events) — a write, so it needs write scope like remember/observe.
         # feedback= only writes a best-effort tuner_state telemetry row

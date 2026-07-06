@@ -22,10 +22,11 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
+    PlainValidator,
     TypeAdapter,
     ValidationError,
-    WrapValidator,
     model_validator,
 )
 
@@ -189,14 +190,12 @@ RememberContent = Annotated[
 
 _CONTENT_TAGS = {"text", "binary", "blob-ref", "compound"}
 
-# Module-level adapter for the canonical union. Validating through this instead
-# of the WrapValidator's ``handler`` gives DETERMINISTIC discriminated-union
-# validation, independent of the parameter-context schema ordering. In the
-# function-parameter (FieldInfo) context that FastMCP uses, pydantic hoists the
-# union's ``Field(discriminator="type")`` OUTSIDE the WrapValidator, so the
-# wrapped ``handler`` rebuilds the tagged union and rejects non-dicts/wrong tags
-# before coercion can run — the exact bug this restore fixes. The bare adapter
-# has no such ordering hazard.
+# Module-level adapter for the canonical union. ``ensure_remember_content``
+# validates through this bare adapter (rather than through a validator
+# ``handler``) so discriminated-union validation is DETERMINISTIC, independent of
+# any parameter-context schema ordering. ``RememberContentInput`` fronts this via
+# a ``BeforeValidator``, which runs the coercion before the core validation and
+# leaves the advertised schema clean (no widened ``| str`` member).
 _REMEMBER_CONTENT_ADAPTER: TypeAdapter[RememberContent] = TypeAdapter(RememberContent)
 
 
@@ -244,36 +243,46 @@ def ensure_remember_content(v: Any) -> RememberContent:
         return _REMEMBER_CONTENT_ADAPTER.validate_python({"type": "text", "text": raw})
 
 
-def _coerce_remember_content(v: Any, _handler: Any) -> RememberContent:
-    """WrapValidator entry for the ``content`` parameter.
-
-    ``_handler`` is deliberately unused: in the parameter context its wrapped
-    schema is the widened ``RememberContent | str`` union (the ``str`` member we
-    must never return), and its discriminator ordering is the landmine this fix
-    escapes. All validation goes through :func:`ensure_remember_content`, which
-    uses the bare module-level adapter instead.
-    """
-    return ensure_remember_content(v)
-
+# The RAW (non-discriminated) content union — same four variants as
+# ``RememberContent`` but WITHOUT the ``Field(discriminator="type")`` marker.
+# Used only as the ``RememberContentInput`` annotation target + advertised
+# schema: a ``PlainValidator`` supplies the actual validation (via the
+# discriminated ``_REMEMBER_CONTENT_ADAPTER`` inside ``ensure_remember_content``),
+# and a discriminator on the annotation would be HOISTED onto the plain-function
+# schema by pydantic in FastMCP's parameter context and crash the tool build.
+_RememberContentUnion = TextContent | BinaryContent | BlobRefContent | CompoundContent
 
 RememberContentInput = Annotated[
-    RememberContent | str,
-    WrapValidator(_coerce_remember_content),
+    _RememberContentUnion,
+    PlainValidator(ensure_remember_content, json_schema_input_type=_RememberContentUnion),
 ]
-"""The `remember` tool parameter type: the canonical union OR a string, wrapped
-in a write-first coercion so malformed content is normalised (worst case: stored
-as text) instead of rejected.
+"""The `remember` tool parameter type: the four content variants, fronted by a
+write-first ``PlainValidator`` so malformed content is normalised (worst case:
+stored as text) instead of rejected.
 
-The ``| str`` does double duty: (a) it keeps ``RememberContent``'s
-``Field(discriminator=...)`` NESTED inside a Union arg so pydantic can no longer
-hoist the discriminator outside the WrapValidator in the function-parameter
-context (the bug that disabled the coercer at the live call layer); (b) it
-advertises the string alternative in the tool's inputSchema so clients that
-JSON-stringify the argument, or pre-validate client-side, stop refusing it.
+Why a ``PlainValidator`` over the RAW union rather than a ``| str`` union or a
+``BeforeValidator``: the v0.1.9 fix widened this to ``RememberContent | str`` to
+advertise the string alternative and dodge a discriminator-hoisting bug. But the
+``| str`` leaked a top-level ``anyOf: [<union>, {type: string}]`` into the tool's
+advertised inputSchema, which broke claude.ai's in-chat tool surfacing (it
+stopped handing the connector's tools to the assistant).
 
-I1-additive: the advertised acceptance set is a strict SUPERSET — every payload
-valid under the prior object-only schema stays valid, and a string alternative is
-added. No parameter is renamed, removed, or narrowed."""
+A ``BeforeValidator`` alone does not fix it: in FastMCP's function-parameter
+(FieldInfo) context pydantic hoists ``Field(discriminator="type")`` OUTSIDE a
+before-validator, so the discriminated-union core schema runs first and rejects a
+stringified ``content`` before the coercion (observed: remember stringified
+payloads 500'd). A ``PlainValidator`` REPLACES the core schema with
+:func:`ensure_remember_content` entirely — but the discriminator marker must NOT
+be on the annotation, or pydantic tries to apply it to the plain-function schema
+and crashes the tool build. Hence the RAW union here; ``ensure_remember_content``
+still validates through the discriminated adapter internally.
+``json_schema_input_type`` advertises the same four variants, cleanly, with no
+string member. A stringified ``content`` is still parsed and a truly-unparseable
+payload still stores-as-text.
+
+I1-additive: the advertised schema is the four object variants (clean, no string
+member); string tolerance is preserved via coercion rather than the schema. No
+parameter is renamed, removed, or narrowed."""
 
 
 class RememberResult(BaseModel):
@@ -640,6 +649,66 @@ class CorrectionDecision(BaseModel):
     answer to one of the known kinds. Ignored for other proposal kinds."""
 
 
+Decide = CorrectionDecision | list[CorrectionDecision] | None
+"""The concrete ``recall(decide=...)`` value: one decision, a batch, or none."""
+
+# Module-level adapter for the decide union. Validating through this makes the
+# string-coercion path deterministic (same rationale as the remember/observe
+# adapters).
+_DECIDE_ADAPTER: TypeAdapter[Decide] = TypeAdapter(Decide)
+
+
+def _parse_decide_json(v: Any) -> Any:
+    """Decode a JSON-stringified ``decide`` argument before validation.
+
+    Some MCP clients JSON-stringify object/array-typed tool arguments (their
+    serializer flattens nested structures to strings). Without this a stringified
+    ``{...}`` or ``[{...}]`` reached the ``CorrectionDecision | list | None``
+    union as a bare ``str`` and pydantic rejected the WHOLE decide with
+    ``Input should be a valid list/dictionary`` — a silent drop of the operator's
+    correction. A string that does NOT parse as JSON is returned unchanged so the
+    inner union validation raises a clear typed error (never a silent drop).
+
+    This is the SAME stringified-param class fixed for ``content`` / ``event`` in
+    v0.1.9, extended to ``decide``. It is a coercion, NOT a schema widening: the
+    advertised ``anyOf: [CorrectionDecision, array, null]`` gains no spurious
+    string member (I1-additive; no signature break).
+    """
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (ValueError, TypeError):
+            return v  # let the union validator produce the typed error
+    return v
+
+
+def ensure_decide(v: Any) -> Decide:
+    """Narrow a ``decide`` argument to ``CorrectionDecision | list | None``.
+
+    Accepts the native forms untouched and re-parses a JSON-stringified payload
+    (single object or list) into the equivalent structure, so a stringified
+    ``decide`` is accepted identically to the native form. A malformed JSON
+    string raises a typed ``ValidationError`` rather than being silently dropped.
+    Defense-in-depth mirror of the ``DecideInput`` BeforeValidator for any code
+    path (or future FastMCP binding) that bypasses it.
+    """
+    return _DECIDE_ADAPTER.validate_python(_parse_decide_json(v))
+
+
+DecideInput = Annotated[Decide, BeforeValidator(_parse_decide_json)]
+"""The `recall` ``decide`` parameter type: the ``CorrectionDecision | list | None``
+union fronted by a write-first ``BeforeValidator`` that re-parses a JSON-string.
+
+As with ``content`` / ``event``, the tolerance lives in a coercion, not the
+schema — the advertised ``anyOf: [CorrectionDecision, array, null]`` carries NO
+spurious string alternative, so claude.ai tool surfacing stays intact. A
+stringified single object or list validates identically to the native form; a
+malformed JSON string yields a typed error, never a silent drop.
+
+I1-additive: strict superset — the native object/list/None forms are unchanged;
+string tolerance is added via coercion."""
+
+
 # ── observe ─────────────────────────────────────────────────────────────────
 
 
@@ -981,27 +1050,19 @@ def ensure_observe_event(v: Any) -> ObserveEvent:
         return _OBSERVE_EVENT_ADAPTER.validate_python({"action": "observed", "result": raw})
 
 
-def _coerce_observe_event(v: Any, _handler: Any) -> ObserveEvent:
-    """WrapValidator entry for the ``event`` parameter.
-
-    ``_handler`` is unused for the same reason as the remember coercer: the
-    parameter-context wrapped schema is the widened ``ObserveEvent | str`` union.
-    Validation goes through :func:`ensure_observe_event`.
-    """
-    return ensure_observe_event(v)
-
-
 ObserveEventInput = Annotated[
-    ObserveEvent | str,
-    WrapValidator(_coerce_observe_event),
+    ObserveEvent,
+    BeforeValidator(ensure_observe_event),
 ]
-"""The `observe` tool parameter type: the event model OR a string, wrapped in a
-write-first coercion. The ``| str`` advertises the string alternative in the
-tool's inputSchema (so a client that JSON-stringifies ``event`` is accepted) and,
-as with ``remember``, keeps the wrap validator reliably in the validation path.
+"""The `observe` tool parameter type: the ``ObserveEvent`` model, fronted by a
+write-first ``BeforeValidator`` (:func:`ensure_observe_event`). Same rationale as
+``RememberContentInput`` — the v0.1.9 ``| str`` union leaked a top-level string
+alternative into the advertised inputSchema and broke claude.ai tool surfacing;
+the ``BeforeValidator`` keeps the schema clean (pre-v0.1.9 object form) while
+still coercing a stringified/JSON-string ``event`` and never rejecting a write.
 
-I1-additive: strict schema SUPERSET — the object form is unchanged, a string
-alternative is added; no parameter renamed, removed, or narrowed."""
+I1-additive: the advertised object schema is unchanged from pre-v0.1.9; string
+tolerance is preserved via coercion, not the schema."""
 
 
 class ObserveResult(BaseModel):
