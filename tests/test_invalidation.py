@@ -203,9 +203,10 @@ def test_remember_bad_invalidates_target_writes_nothing(ctx: ServerContext) -> N
         ).fetchone()["n"]
         == 0
     )
-    assert ctx.db.execute("SELECT COUNT(*) AS n FROM events WHERE kind = 'invalidate'").fetchone()[
-        "n"
-    ] == 0
+    assert (
+        ctx.db.execute("SELECT COUNT(*) AS n FROM events WHERE kind = 'invalidate'").fetchone()["n"]
+        == 0
+    )
 
 
 def test_remember_cannot_invalidate_an_invalidation_event(ctx: ServerContext) -> None:
