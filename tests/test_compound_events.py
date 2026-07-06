@@ -270,3 +270,137 @@ def test_compound_payload_summary_truncates_in_search_mode(tmp_path: Path) -> No
         part = matching[0].payload["parts"][0]
         # Search-mode summary truncates per-part text to SUMMARY_TEXT_CHARS.
         assert len(part["text"]) <= 500
+
+
+# ── P2b: per-part spill (oversized inline part) ─────────────────────────────
+
+
+def _settings_small_inline(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        auth_token=SAMPLE_TOKEN,  # type: ignore[arg-type]
+        inline_text_max_bytes=64,
+    )
+
+
+def test_compound_oversized_part_spills_to_blob_row_stays_small(tmp_path: Path) -> None:
+    """A text part over inline_text_max_bytes spills to the object store as a
+    ``text-large`` part; the SQLite row keeps a blob_hash, not the body, and
+    FTS still finds a term from the spilled part."""
+    from afair.mcp import handlers
+    from afair.mcp.context import connect_for_thread
+    from afair.substrate.search import search_fts
+
+    with TestClient(build_app(_settings_small_inline(tmp_path))):
+        big = "spilledneedle " * 40  # ~560 bytes > 64-byte inline cap
+        result = handlers.remember(
+            content=CompoundContent(
+                type="compound",
+                parts=[
+                    CompoundTextPart(type="text", text="small inline", label="tiny"),
+                    CompoundTextPart(type="text", text=big, label="bulk"),
+                ],
+            ),
+            context="mixed",
+        )
+        db = connect_for_thread()
+        row = db.execute("SELECT payload FROM events WHERE id = ?", (result.event_id,)).fetchone()
+        payload = json.loads(row["payload"])
+        parts = payload["parts"]
+        # Inline part unchanged.
+        assert parts[0]["type"] == "text"
+        assert parts[0]["text"] == "small inline"
+        # Oversized part spilled: no inline body, carries a blob_hash.
+        assert parts[1]["type"] == "text-large"
+        assert "text" not in parts[1]
+        assert parts[1]["blob_hash"].startswith("sha256:")
+        assert parts[1]["label"] == "bulk"
+        # The row payload must not contain the spilled body.
+        assert "spilledneedle" not in row["payload"]
+        # FTS still finds the spilled term (routed via searchable_body).
+        hits = search_fts(db, "spilledneedle")
+        assert any(h.content_hash == result.content_hash for h in hits)
+
+
+def test_compound_sum_of_parts_over_cap_rejected(tmp_path: Path) -> None:
+    """Total text-part bytes over MAX_REMEMBER_BYTES → ContentTooLargeError,
+    mirroring the single-text/binary v1 size lock."""
+    from afair.mcp import handlers
+    from afair.mcp.handlers import ContentTooLargeError
+    from afair.mcp.schemas import MAX_COMPOUND_PARTS, MAX_REMEMBER_BYTES
+
+    # Split just-over-cap total across the allowed part count.
+    per_part = (MAX_REMEMBER_BYTES // MAX_COMPOUND_PARTS) + 1
+    parts = [CompoundTextPart(type="text", text="a" * per_part) for _ in range(MAX_COMPOUND_PARTS)]
+    with _client(tmp_path), pytest.raises(ContentTooLargeError, match="compound text parts total"):
+        handlers.remember(content=CompoundContent(type="compound", parts=parts))
+
+
+# ── P2b: build_user_message flattens parts into the truncation budget ───────
+
+
+def test_build_user_message_compound_within_budget(tmp_path: Path) -> None:
+    """A compound event's parts flatten into ``text`` and the whole message
+    respects MAX_USER_MESSAGE_CHARS — previously ``parts`` entered the extras
+    loop unbounded and blew the context window."""
+    from afair.agents.prompts import MAX_USER_MESSAGE_CHARS, build_user_message
+    from afair.mcp import handlers
+    from afair.mcp.context import connect_for_thread
+    from afair.substrate.events import read_event_by_id
+
+    with _client(tmp_path):
+        # Two large inline parts; combined they far exceed the message budget.
+        big = "word " * 20_000
+        result = handlers.remember(
+            content=CompoundContent(
+                type="compound",
+                parts=[
+                    CompoundTextPart(type="text", text=big, label="a"),
+                    CompoundTextPart(type="text", text=big, label="b"),
+                ],
+            ),
+        )
+        db = connect_for_thread()
+        event = read_event_by_id(db, result.event_id)
+        assert event is not None
+        msg = build_user_message(event)
+        # The raw parts list must not leak in verbatim; the flattened text is
+        # governed by the truncation budget (message stays bounded).
+        assert '"parts"' not in msg
+        assert len(msg) < MAX_USER_MESSAGE_CHARS + 5_000
+
+
+# ── P2b: canonicalizer grounding reads compound parts ───────────────────────
+
+
+def test_compound_grounding_text_reads_parts(tmp_path: Path) -> None:
+    """The canonicalizer's grounding + surrounding helpers must see compound
+    part text — otherwise every compound relation is dropped as
+    edges_skipped_no_evidence."""
+    from afair.agents.entity_canonicalizer import (
+        _event_grounding_text,
+        _event_surrounding_text,
+    )
+    from afair.mcp import handlers
+    from afair.mcp.context import connect_for_thread
+    from afair.substrate.events import read_event_by_id
+
+    with _client(tmp_path):
+        result = handlers.remember(
+            content=CompoundContent(
+                type="compound",
+                parts=[
+                    CompoundTextPart(type="text", text="Maya leads the platform team", label="q"),
+                ],
+            ),
+        )
+        db = connect_for_thread()
+        event = read_event_by_id(db, result.event_id)
+        assert event is not None
+        # No extractor summary/extracted_text available → must fall to parts.
+        grounding = _event_grounding_text(event, {})
+        assert "Maya leads the platform team" in grounding
+        surrounding = _event_surrounding_text(event, {})
+        assert "Maya leads the platform team" in surrounding

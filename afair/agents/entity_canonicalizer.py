@@ -1233,6 +1233,33 @@ def _llm_judge_match(
     )
 
 
+def _compound_parts_text(payload: dict[str, Any]) -> str:
+    """Concatenate a compound event's inline text parts (labels + bodies).
+
+    Compound events store their content in ``parts``, not ``text``. Without
+    this, both the surrounding-context and the grounding helpers read a
+    missing ``text`` field, grounding falls to ``""``, and EVERY compound
+    relation is dropped as ``edges_skipped_no_evidence``. Spilled
+    (``text-large``) parts carry no inline body here (rehydration optional);
+    inline parts are the common relation-bearing case.
+    """
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    segments: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            label = part.get("label")
+            if isinstance(label, str) and label:
+                segments.append(f"{label}: {text.strip()}")
+            else:
+                segments.append(text.strip())
+    return "\n".join(segments)
+
+
 def _event_surrounding_text(event: Event, extraction: dict[str, Any]) -> str:
     """Compact view of the event used as LLM context for entity judgment.
 
@@ -1246,6 +1273,10 @@ def _event_surrounding_text(event: Event, extraction: dict[str, Any]) -> str:
     if isinstance(text, str):
         trimmed = text.strip()
         return trimmed[:600] + ("…" if len(trimmed) > 600 else "")
+    # Compound events — concatenate inline part text (no top-level ``text``).
+    compound = _compound_parts_text(event.payload)
+    if compound:
+        return compound[:600] + ("…" if len(compound) > 600 else "")
     # observe-event fields
     parts: list[str] = []
     for key in ("action", "subject", "result", "context"):
@@ -1271,6 +1302,12 @@ def _event_grounding_text(event: Event, extraction: dict[str, Any]) -> str:
     text = event.payload.get("text")
     if isinstance(text, str) and text.strip():
         return text
+    # Compound events — the evidence quote must ground against the inline
+    # part text (no top-level ``text``); without this every compound relation
+    # is dropped as ``edges_skipped_no_evidence``.
+    compound = _compound_parts_text(event.payload)
+    if compound:
+        return compound
     parts: list[str] = []
     for key in ("action", "subject", "result", "context"):
         v = event.payload.get(key)

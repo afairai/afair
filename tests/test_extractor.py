@@ -308,6 +308,44 @@ def test_extract_pdf_routes_through_pypdf(
     )
 
 
+def test_extract_pdf_no_text_layer_marks_interpretation(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scanned/image-only PDF (empty text layer) still succeeds but the
+    interpretation carries a queryable ``pdf_no_text_layer`` marker instead of
+    a silent metadata-only pass."""
+    _patch_llm(monkeypatch, GOOD_EXTRACTION)
+    # pypdf yields an empty (whitespace-only) text layer.
+    monkeypatch.setattr(
+        "afair.agents.extractor.extract_pdf_text",
+        lambda _path: "   \n  ",
+    )
+
+    from afair.substrate import write_event, write_object
+
+    blob_hash = write_object(ctx.vault_dir, b"%PDF-1.4 scanned image only")
+    e = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob_hash,
+            "mime": "application/pdf",
+            "size_bytes": 27,
+            "filename_hint": "scan.pdf",
+            "context": None,
+            "type_hint": None,
+        },
+    )
+    extractor.extract_sync(e.id)
+
+    assert _count_interpretations(ctx) == 1
+    extraction = _load_only_interpretation(ctx)
+    assert extraction["status"] == "success"
+    assert extraction["pdf_no_text_layer"] is True
+
+
 def test_extract_audio_routes_through_whisper(
     ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

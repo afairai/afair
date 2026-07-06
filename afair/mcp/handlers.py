@@ -82,6 +82,7 @@ from ..substrate import (
     search_fts,
     search_vec,
     write_event_with_status,
+    write_object,
 )
 from ..substrate import pipeline_events as pe
 from ..substrate.belief import (
@@ -1060,18 +1061,43 @@ def remember(
             vault_dir=ctx.vault_dir,
         )
     elif isinstance(content, CompoundContent):
-        # Materialize each part into its on-disk representation. Text
-        # parts pass through inline. Blob-ref parts validate against
-        # the object store and inflate with size_bytes — same shape
-        # as the single-payload BlobRefContent path so the extractor
-        # and recall can treat parts uniformly.
+        # Materialize each part into its on-disk representation. Small text
+        # parts pass through inline; a text part over the inline threshold
+        # spills to the object store (a ``text-large`` part carrying only a
+        # blob_hash) so a multi-MB compound doesn't write a multi-MB SQLite
+        # row. Blob-ref parts validate against the object store and inflate
+        # with size_bytes — same shape as the single-payload BlobRefContent
+        # path so the extractor and recall can treat parts uniformly.
+        #
+        # A sum-of-parts byte cap mirrors the single-text/binary paths'
+        # MAX_REMEMBER_BYTES v1 lock (the 12 MB body middleware is the first
+        # gate; this is the second, applied to the decoded text total).
         materialized_parts: list[dict[str, Any]] = []
+        # Text of parts that spilled to blobs — routed into searchable_body so
+        # FTS still covers them (derive_searchable_text only walks INLINE part
+        # text; a text-large part carries no ``text`` key). Inline parts are
+        # covered by the payload walk, so only spilled text needs carrying.
+        compound_searchable: list[str] = []
+        total_text_bytes = 0
         for idx, part in enumerate(content.parts):
             if isinstance(part, CompoundTextPart):
-                part_dict: dict[str, Any] = {
-                    "type": "text",
-                    "text": part.text,
-                }
+                encoded_part = part.text.encode("utf-8")
+                total_text_bytes += len(encoded_part)
+                if total_text_bytes > MAX_REMEMBER_BYTES:
+                    msg = (
+                        f"compound text parts total {total_text_bytes} bytes; "
+                        f"max allowed in v1 is {MAX_REMEMBER_BYTES}"
+                    )
+                    raise ContentTooLargeError(msg)
+                if len(encoded_part) > ctx.inline_text_max_bytes:
+                    part_dict = {
+                        "type": "text-large",
+                        "blob_hash": write_object(ctx.vault_dir, encoded_part),
+                        "size_bytes": len(encoded_part),
+                    }
+                    compound_searchable.append(part.text)
+                else:
+                    part_dict = {"type": "text", "text": part.text}
                 if part.label:
                     part_dict["label"] = part.label
                 materialized_parts.append(part_dict)
@@ -1097,6 +1123,8 @@ def remember(
             context=context,
             type_hint=type_hint,
         )
+        if compound_searchable:
+            searchable_body = "\n".join(compound_searchable)
     else:  # BlobRefContent — bytes already in the object store via
         # /internal/blob/upload. Validate the hash exists; reject otherwise
         # so we don't write a dangling event row.

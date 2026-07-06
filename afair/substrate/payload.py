@@ -175,10 +175,12 @@ def build_compound_payload(
 ) -> dict[str, Any]:
     """Construct a substrate payload for a compound multi-part event.
 
-    Each part dict is already shaped (text or blob-ref) — the handler
-    materializes user-side schema objects into these dicts before
-    calling. Compound payloads don't spill the parts list itself; if
-    any part is a blob the bytes are already in the object store.
+    Each part dict is already shaped (``text``, ``text-large``, or
+    ``blob-ref``) — the handler materializes user-side schema objects into
+    these dicts before calling, spilling any over-threshold text part to the
+    object store as a ``text-large`` part so the inline row stays small. Blob
+    bytes are already in the object store; this builder only wraps the parts
+    list and the shared context/type_hint.
     """
     return {
         "content_type": "compound",

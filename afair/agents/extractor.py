@@ -292,6 +292,10 @@ def _run_extraction(
 
     extracted_text: str | None = None
     extractor_subtag = "text"
+    # Set when a PDF extracts to an empty text layer (scanned/image-only PDF).
+    # Recorded as a queryable marker on the success interpretation so the
+    # near-empty extraction is visible instead of a silent metadata-only pass.
+    pdf_no_text_layer = False
 
     # Pre-LLM binary extraction. PDF + audio produce text that's fed to
     # the standard text-LLM call (so the extraction schema stays the same).
@@ -307,6 +311,17 @@ def _run_extraction(
                     event_id=event_id,
                     chars=len(extracted_text),
                 )
+                if not extracted_text.strip():
+                    # No text layer — the PDF is scanned/image-only. Extraction
+                    # would otherwise proceed on filename/mime metadata and
+                    # record a near-empty "success" with no signal beyond this
+                    # log. Mark it so recall/queries can see the gap. (A per-page
+                    # image-vision fallback is a possible follow-up.)
+                    pdf_no_text_layer = True
+                    log.warning(
+                        "extractor.pdf_no_text_layer",
+                        event_id=event_id,
+                    )
             except PdfExtractionError as e:
                 log.warning("extractor.pdf_failed", event_id=event_id, error=str(e))
                 write_failed_interpretation(
@@ -489,8 +504,13 @@ def _run_extraction(
     # ran a pre-LLM binary extractor. Future cold-path workers (and the
     # embedding step below) can use it; recall surfaces it via
     # ``interpretation.extracted_text`` when full-payload mode is on.
-    if extracted_text:
+    if extracted_text and extracted_text.strip():
         validated_or_error["extracted_text"] = extracted_text
+    # Typed marker for a scanned/image-only PDF: the LLM extracted from
+    # metadata only, so the interpretation is near-empty. Queryable so the
+    # gap isn't silent.
+    if pdf_no_text_layer:
+        validated_or_error["pdf_no_text_layer"] = True
     write_interpretation(
         db,
         event=event,
