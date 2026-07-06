@@ -564,8 +564,10 @@ class RecallResult(BaseModel):
     batch). Empty on calls that didn't decide anything. Additive per I1."""
     next_cursor: str | None = None
     """Opaque paging cursor for search/browse results: pass it back verbatim as
-    ``cursor`` to fetch the next page. Null when there is no next page (or on
-    single-event lookups). Best-effort — rankings are recomputed per call.
+    ``cursor`` to fetch the next page. Null when there is no next page, on
+    single-event lookups, OR when the pageable window is capped (the server
+    bounds paging depth) — so a client paging until ``next_cursor is None``
+    always terminates. Best-effort — rankings are recomputed per call.
     Additive per I1."""
 
 

@@ -712,3 +712,13 @@ def test_recall_pending_pagination(ctx: ServerContext) -> None:
     # Over-cap pending_limit is clamped to MAX_PENDING_LIMIT.
     clamped = handlers.recall(pending_limit=500)
     assert len(clamped.pending_corrections) == 30  # all 30 (< 200 cap), not rejected
+
+
+def test_recall_negative_pending_limit_is_bounded(ctx: ServerContext) -> None:
+    """A negative pending_limit must not reach SQLite as LIMIT -N (unlimited) +
+    a Python slice [:-N] — both would bypass the cap. It clamps to an empty
+    page."""
+    for i in range(5):
+        _seed_retype_proposal(ctx, f"neg{i}.team")
+    r = handlers.recall(pending_limit=-5)
+    assert r.pending_corrections == []  # bounded, not "everything minus 5"

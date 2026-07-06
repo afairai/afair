@@ -326,6 +326,37 @@ def test_cursor_pages_disjoint_and_terminates(ctx: ServerContext) -> None:
     assert page3.next_cursor is None  # final page
 
 
+def test_cursor_paging_terminates_at_offset_cap(ctx: ServerContext) -> None:
+    """Regression: next_cursor must never emit a value the cursor clamp
+    (MAX_RECALL_OFFSET) can't honor, or a client paging 'until next_cursor is
+    None' loops forever re-serving the capped window. Seed > the cap and drain
+    the whole queue, asserting termination + zero repeated pages."""
+    from afair.mcp.handlers import MAX_RECALL_OFFSET
+
+    _seed_events(ctx, MAX_RECALL_OFFSET + 15)  # 215: enough to hit the cap edge
+
+    seen_ids: set[str] = set()
+    cursor: str | None = None
+    capped_note = False
+    for _ in range(100):  # hard safety bound: must terminate well before this
+        r = handlers.recall(query="aurora", limit=10, cursor=cursor)
+        page_ids = [h.event_id for h in r.hits]
+        assert seen_ids.isdisjoint(page_ids), "a page was re-served (pagination loop)"
+        seen_ids.update(page_ids)
+        if r.note and "capped" in r.note:
+            capped_note = True
+        cursor = r.next_cursor
+        if cursor is None:
+            break
+    else:  # pragma: no cover - only hit if pagination never terminates
+        pytest.fail("cursor pagination did not terminate")
+
+    assert cursor is None
+    assert capped_note  # the final capped page announced the window cap
+    # Drained exactly the reachable window (offset cap + one page), no repeats.
+    assert len(seen_ids) == MAX_RECALL_OFFSET + 10
+
+
 def test_malformed_cursor_served_page_one_with_note(ctx: ServerContext) -> None:
     _seed_events(ctx, 15)
     r = handlers.recall(query="aurora", limit=10, cursor="garbage")

@@ -248,8 +248,10 @@ RETURN:
 
 ``decisions`` is populated only when this call carried ``decide=`` — one
 outcome per decision sent, in order (empty otherwise). ``next_cursor`` is
-non-null when more results exist; pass it back as ``cursor`` for the next
-page.
+non-null when a next page is reachable; pass it back verbatim as ``cursor``.
+It is null once the pageable window is exhausted OR capped (the server bounds
+how deep paging can go — at that edge a note says the window was capped, so
+a client paging "until next_cursor is None" always terminates).
 
 Each hit's payload is either the truncated summary or the full content,
 depending on the full_payload flag (and lookup mode). ``truncated`` tells

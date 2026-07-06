@@ -148,11 +148,13 @@ COMPACT_SUMMARY_CHARS = 280  # interpretation.summary
 COMPACT_MAX_ENTITIES = 5  # interpretation.canonical_entities
 COMPACT_MAX_EDGES = 5  # interpretation.entity_edges
 COMPACT_MAX_LINKED_IDS = 3  # hit.linked_event_ids
+COMPACT_MAX_CONFLICTS = 5  # hit.conflicts — bound the otherwise-unbounded pairing vector
 COMPACT_CONFLICT_REASON_CHARS = 160
 COMPACT_DEFAULT_LIMIT = 10
 DEFAULT_RECALL_LIMIT = 20
 MAX_RECALL_LIMIT = 100
 MAX_RECALL_OFFSET = 200
+DEFAULT_PENDING_LIMIT = 20  # served pending-queue page when pending_limit is omitted
 
 # Background pool used to overlap the embedding call with the (cheap)
 # local FTS query during recall. Pool is process-level so it survives
@@ -1509,7 +1511,15 @@ def recall(
     # then re-fetches at pending_offset=0 (deciding removes rows from the open
     # set, so advancing the offset would skip the new head — see the helper).
     include_pending = stats or decide is not None or pending_limit is not None
-    eff_pending_limit = min(pending_limit if pending_limit is not None else 20, MAX_PENDING_LIMIT)
+    # Clamp on BOTH ends: an unbounded lower edge let pending_limit=-5 reach
+    # SQLite as LIMIT -5 (unlimited) + a Python slice [:-5], bypassing the cap
+    # for a >200-row queue. max(0, ...) makes a negative page an empty page.
+    eff_pending_limit = max(
+        0,
+        min(
+            pending_limit if pending_limit is not None else DEFAULT_PENDING_LIMIT, MAX_PENDING_LIMIT
+        ),
+    )
     eff_pending_offset = max(0, pending_offset)
     pending: list[ProposedCorrectionView] = (
         _pending_correction_views(db, limit=eff_pending_limit, offset=eff_pending_offset)
@@ -1673,7 +1683,17 @@ def recall(
     # The +1 overfetch makes has_more exact.
     has_more = len(events) > offset + eff_limit
     events = events[offset : offset + eff_limit]
-    next_cursor = str(offset + eff_limit) if has_more else None
+    # Terminate paging at the offset cap: the cursor parser clamps any incoming
+    # value to MAX_RECALL_OFFSET, so emitting a next_cursor beyond it would make
+    # a client that pages "until next_cursor is None" loop forever (the clamp
+    # keeps re-serving the last honorable window). Stop with a note instead.
+    next_offset = offset + eff_limit
+    if has_more and next_offset <= MAX_RECALL_OFFSET:
+        next_cursor = str(next_offset)
+    else:
+        next_cursor = None
+        if has_more:
+            note = _combine_notes(note, "result window capped; refine the query to see more")
 
     # invalidations is computed per-branch above (browse + query) and reused
     # here so the per-hit annotation does not re-query.
