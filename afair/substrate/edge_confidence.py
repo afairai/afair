@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 from ulid import ULID
 
+from .sqlutil import iter_param_chunks
+
 if TYPE_CHECKING:
     import sqlite3
 
@@ -101,14 +103,21 @@ def latest_edge_confidence_batch(conn: sqlite3.Connection, edge_ids: list[str]) 
     """
     if not edge_ids:
         return {}
-    placeholders = ",".join("?" * len(edge_ids))
-    rows = conn.execute(
-        f"SELECT edge_id, confidence FROM edge_confidence_scores "
-        f"WHERE edge_id IN ({placeholders}) "
-        "ORDER BY computed_at ASC, id ASC",
-        edge_ids,
-    ).fetchall()
-    return {row["edge_id"]: float(row["confidence"]) for row in rows}
+    out: dict[str, float] = {}
+    for chunk in iter_param_chunks(edge_ids):
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT edge_id, confidence FROM edge_confidence_scores "
+            f"WHERE edge_id IN ({placeholders}) "
+            "ORDER BY computed_at ASC, id ASC",
+            chunk,
+        ).fetchall()
+        # Ascending order → later row overwrites earlier, so the latest score
+        # per edge wins. Each id is in exactly one chunk, so the cross-chunk
+        # merge can't conflict.
+        for row in rows:
+            out[row["edge_id"]] = float(row["confidence"])
+    return out
 
 
 def latest_edge_scores_batch(
@@ -119,25 +128,26 @@ def latest_edge_scores_batch(
     :func:`latest_edge_confidence_batch`."""
     if not edge_ids:
         return {}
-    placeholders = ",".join("?" * len(edge_ids))
-    rows = conn.execute(
-        f"SELECT * FROM edge_confidence_scores "
-        f"WHERE edge_id IN ({placeholders}) "
-        "ORDER BY computed_at ASC, id ASC",
-        edge_ids,
-    ).fetchall()
     out: dict[str, EdgeConfidenceScore] = {}
-    for row in rows:
-        try:
-            components = json.loads(row["components"])
-        except (ValueError, TypeError):
-            components = {}
-        out[row["edge_id"]] = EdgeConfidenceScore(
-            id=row["id"],
-            edge_id=row["edge_id"],
-            confidence=float(row["confidence"]),
-            components=components,
-            computed_by=row["computed_by"],
-            computed_at=row["computed_at"],
-        )
+    for chunk in iter_param_chunks(edge_ids):
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT * FROM edge_confidence_scores "
+            f"WHERE edge_id IN ({placeholders}) "
+            "ORDER BY computed_at ASC, id ASC",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            try:
+                components = json.loads(row["components"])
+            except (ValueError, TypeError):
+                components = {}
+            out[row["edge_id"]] = EdgeConfidenceScore(
+                id=row["id"],
+                edge_id=row["edge_id"],
+                confidence=float(row["confidence"]),
+                components=components,
+                computed_by=row["computed_by"],
+                computed_at=row["computed_at"],
+            )
     return out

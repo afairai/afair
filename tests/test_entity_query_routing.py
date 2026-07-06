@@ -350,3 +350,52 @@ def test_entity_routing_boosts_relevant_events_above_unrelated(
         assert ids_in_order.index(entity_event) < ids_in_order.index(irrelevant_a)
     if irrelevant_b in ids_in_order:
         assert ids_in_order.index(entity_event) < ids_in_order.index(irrelevant_b)
+
+
+# ── P0-5b: recall entity-match uses a subquery, not a bound-id IN-list ───────
+
+
+def test_entity_match_many_mentions_capped_and_ordered(ctx: ServerContext) -> None:
+    """The entity-match lookup folds the matching event ids into a subquery
+    instead of materializing them into a Python-built IN(...) list, so it has
+    no host-parameter ceiling. With many mentions for one entity it must return
+    the most-recent `limit` events, newest-first — the correctness contract the
+    subquery rewrite must preserve."""
+    from afair.substrate import write_entity, write_entity_mention
+
+    anchor = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": "anchor"}
+    )
+    entity = write_entity(
+        ctx.db,
+        canonical_name="Gowry",
+        kind="person",
+        created_by="test",
+        source_event_id=anchor.id,
+        confidence=0.9,
+    )
+
+    created_ids: list[str] = []
+    for i in range(60):
+        ev = write_event(
+            ctx.db,
+            origin="user",
+            kind="remember",
+            payload={"content_type": "text", "text": f"activity {i}"},
+        )
+        write_entity_mention(
+            ctx.db,
+            entity_id=entity.id,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            surface_form="Gowry",
+            canonicalized_by="test",
+            match_method="exact",
+            confidence=1.0,
+        )
+        created_ids.append(ev.id)
+
+    found = handlers._events_via_entity_match(ctx.db, "Gowry", limit=10)
+    assert len(found) == 10
+    # Most-recent-first: the last 10 created events, newest first.
+    assert [e.id for e in found] == list(reversed(created_ids[-10:]))

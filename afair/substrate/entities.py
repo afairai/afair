@@ -44,6 +44,7 @@ from pydantic import BaseModel
 from ulid import ULID
 
 from .kinds import resolve_kind_batch, resolve_kind_slug
+from .sqlutil import iter_param_chunks
 
 if TYPE_CHECKING:
     import sqlite3
@@ -795,15 +796,20 @@ def latest_edge_reviews_batch(conn: sqlite3.Connection, edge_ids: list[str]) -> 
     """
     if not edge_ids:
         return {}
-    placeholders = ",".join("?" * len(edge_ids))
-    rows = conn.execute(
-        f"SELECT edge_id, verdict FROM edge_reviews WHERE edge_id IN ({placeholders}) "
-        "ORDER BY reviewed_at ASC, id ASC",
-        edge_ids,
-    ).fetchall()
-    # Ascending order means a later row overwrites an earlier one, so the dict
-    # ends up holding each edge's most recent verdict.
-    return {row["edge_id"]: row["verdict"] for row in rows}
+    out: dict[str, str] = {}
+    for chunk in iter_param_chunks(edge_ids):
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT edge_id, verdict FROM edge_reviews WHERE edge_id IN ({placeholders}) "
+            "ORDER BY reviewed_at ASC, id ASC",
+            chunk,
+        ).fetchall()
+        # Ascending order means a later row overwrites an earlier one, so the
+        # dict ends up holding each edge's most recent verdict. Each id is in
+        # exactly one chunk, so the cross-chunk merge can't conflict.
+        for row in rows:
+            out[row["edge_id"]] = row["verdict"]
+    return out
 
 
 def read_entity_by_id(conn: sqlite3.Connection, eid: str) -> Entity | None:
@@ -1111,12 +1117,16 @@ def read_entities_batch(conn: sqlite3.Connection, entity_ids: Iterable[str]) -> 
     unique_ids = list({e for e in entity_ids if e})
     if not unique_ids:
         return {}
-    placeholders = ",".join("?" for _ in unique_ids)
-    rows = conn.execute(
-        f"SELECT * FROM entities WHERE id IN ({placeholders})",
-        unique_ids,
-    ).fetchall()
-    return {row["id"]: _row_to_entity(row) for row in rows}
+    out: dict[str, Entity] = {}
+    for chunk in iter_param_chunks(unique_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"SELECT * FROM entities WHERE id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            out[row["id"]] = _row_to_entity(row)
+    return out
 
 
 def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, str]:
@@ -1139,59 +1149,65 @@ def resolve_canonical_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> 
     if not unique:
         return {}
 
-    # Build the VALUES clause for the seed; each id becomes one row.
-    seed_values = ",".join("(?)" for _ in unique)
-    rows = conn.execute(
-        f"""
-        WITH RECURSIVE
-        latest_merges(from_entity_id, into_entity_id) AS (
-            -- For each from_entity_id keep only the most recent LIVE merge
-            -- row. Invalidated merges (operator undid the merge) are
-            -- excluded BEFORE ranking so an invalidated newer merge falls
-            -- back to an older still-valid one — matching the per-id
-            -- helper's NOT EXISTS + ORDER BY merged_at DESC LIMIT 1.
-            SELECT from_entity_id, into_entity_id FROM (
-                SELECT
-                    from_entity_id,
-                    into_entity_id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY from_entity_id
-                        ORDER BY merged_at DESC
-                    ) AS rn
-                FROM entity_merges
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM merge_invalidations mi
-                    WHERE mi.merge_id = entity_merges.id
-                )
-            ) ranked
-            WHERE rn = 1
-        ),
-        seed(id) AS (VALUES {seed_values}),
-        chain(start_id, current_id, depth) AS (
-            -- seed: every requested id starts as its own chain head
-            SELECT id, id, 0 FROM seed
-            UNION ALL
-            -- step: follow from_entity_id → into_entity_id until exhausted
-            SELECT chain.start_id, lm.into_entity_id, chain.depth + 1
-            FROM chain
-            JOIN latest_merges lm ON lm.from_entity_id = chain.current_id
-            WHERE chain.depth < 16
-        )
-        SELECT start_id, current_id
-        FROM chain AS c1
-        WHERE NOT EXISTS (
-            SELECT 1 FROM chain AS c2
-            WHERE c2.start_id = c1.start_id
-              AND c2.depth > c1.depth
-        )
-        """,
-        unique,
-    ).fetchall()
-
-    # rows contains one entry per start_id whose current_id is the
-    # canonical (deepest-reached) ID. IDs with no merges resolve to
-    # themselves via the seed row at depth 0.
-    return {row["start_id"]: row["current_id"] for row in rows}
+    # Chunk the seed so a huge id set can't exceed SQLite's host-parameter
+    # limit (the VALUES seed binds one variable per id). Each id lands in
+    # exactly one chunk, so merging the per-chunk result dicts is conflict-free.
+    out: dict[str, str] = {}
+    for chunk in iter_param_chunks(unique):
+        # Build the VALUES clause for the seed; each id becomes one row.
+        seed_values = ",".join("(?)" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            WITH RECURSIVE
+            latest_merges(from_entity_id, into_entity_id) AS (
+                -- For each from_entity_id keep only the most recent LIVE merge
+                -- row. Invalidated merges (operator undid the merge) are
+                -- excluded BEFORE ranking so an invalidated newer merge falls
+                -- back to an older still-valid one — matching the per-id
+                -- helper's NOT EXISTS + ORDER BY merged_at DESC LIMIT 1.
+                SELECT from_entity_id, into_entity_id FROM (
+                    SELECT
+                        from_entity_id,
+                        into_entity_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY from_entity_id
+                            ORDER BY merged_at DESC
+                        ) AS rn
+                    FROM entity_merges
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM merge_invalidations mi
+                        WHERE mi.merge_id = entity_merges.id
+                    )
+                ) ranked
+                WHERE rn = 1
+            ),
+            seed(id) AS (VALUES {seed_values}),
+            chain(start_id, current_id, depth) AS (
+                -- seed: every requested id starts as its own chain head
+                SELECT id, id, 0 FROM seed
+                UNION ALL
+                -- step: follow from_entity_id → into_entity_id until exhausted
+                SELECT chain.start_id, lm.into_entity_id, chain.depth + 1
+                FROM chain
+                JOIN latest_merges lm ON lm.from_entity_id = chain.current_id
+                WHERE chain.depth < 16
+            )
+            SELECT start_id, current_id
+            FROM chain AS c1
+            WHERE NOT EXISTS (
+                SELECT 1 FROM chain AS c2
+                WHERE c2.start_id = c1.start_id
+                  AND c2.depth > c1.depth
+            )
+            """,
+            chunk,
+        ).fetchall()
+        # rows contains one entry per start_id whose current_id is the
+        # canonical (deepest-reached) ID. IDs with no merges resolve to
+        # themselves via the seed row at depth 0.
+        for row in rows:
+            out[row["start_id"]] = row["current_id"]
+    return out
 
 
 def resolve_entity_kind_batch(conn: sqlite3.Connection, entity_ids: list[str]) -> dict[str, str]:

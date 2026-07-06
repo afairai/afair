@@ -743,32 +743,27 @@ def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
         return []
     if any(len(t) > _ENTITY_MATCH_MAX_TOKEN_LEN for t in tokens):
         return []
-    # Two-step lookup avoids ``SELECT DISTINCT events.*`` which forces
-    # SQLite to sort the wide payload column to deduplicate. Step 1
-    # picks just the matching event ids (cheap); step 2 fetches the
-    # full rows by id (already unique). Perf audit minor.
-    id_rows = db.execute(
-        """
-        SELECT DISTINCT em.event_id
-        FROM entity_mentions em
-        LEFT JOIN entities ent ON ent.id = em.entity_id
-        WHERE LOWER(ent.canonical_name) = LOWER(?)
-           OR LOWER(em.surface_form) = LOWER(?)
-        """,
-        (stripped, stripped),
-    ).fetchall()
-    if not id_rows:
-        return []
-    ids = [r["event_id"] for r in id_rows]
-    placeholders = ",".join("?" for _ in ids)
+    # Single query with the matching event ids as a correlated subquery
+    # (still SELECT of the full rows, but the DISTINCT is on the narrow id
+    # column inside the subquery, not the wide payload). Folding the id set
+    # into a subquery instead of materializing it into a Python-built
+    # ``IN (?, ?, ...)`` list removes the host-parameter ceiling: an entity
+    # mentioned in >32,766 events (the operator's own name) used to crash
+    # recall with ``too many SQL variables``.
     rows = db.execute(
-        f"""
+        """
         SELECT * FROM events
-        WHERE id IN ({placeholders})
+        WHERE id IN (
+            SELECT DISTINCT em.event_id
+            FROM entity_mentions em
+            LEFT JOIN entities ent ON ent.id = em.entity_id
+            WHERE LOWER(ent.canonical_name) = LOWER(?)
+               OR LOWER(em.surface_form) = LOWER(?)
+        )
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        (*ids, limit),
+        (stripped, stripped, limit),
     ).fetchall()
     return [row_to_event(r) for r in rows]
 
