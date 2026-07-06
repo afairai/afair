@@ -13,10 +13,12 @@ additions are new tools, never signature changes to these three.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import anyio
 import structlog
 import uvicorn
 from fastmcp import FastMCP
@@ -590,15 +592,41 @@ def build_app(settings: Settings) -> Starlette:
     ]
 
     # CRITICAL: pass FastMCP's lifespan to the parent app so its
-    # StreamableHTTPSessionManager initializes correctly.
+    # StreamableHTTPSessionManager initializes correctly. We wrap it so the
+    # anyio thread-limiter cap is applied INSIDE the event loop at startup
+    # (P2a — memory ceiling; see _apply_thread_limiter_cap) before delegating.
+    @contextlib.asynccontextmanager
+    async def lifespan(app_: Starlette) -> Any:
+        _apply_thread_limiter_cap(settings)
+        async with mcp_app.lifespan(app_):
+            yield
+
     app = Starlette(
         routes=routes,
         middleware=middleware,
-        lifespan=mcp_app.lifespan,
+        lifespan=lifespan,
     )
     # Make settings accessible to OAuth route handlers via request.app.state.
     app.state.settings = settings
     return app
+
+
+def _apply_thread_limiter_cap(settings: Settings) -> None:
+    """Cap anyio's default thread limiter at ``settings.max_tool_threads``.
+
+    MUST run inside the running event loop (the limiter is a per-loop RunVar);
+    the app lifespan is exactly that context. MCP tools are sync, so each runs
+    in a worker thread governed by this limiter — and each thread caches its
+    own SQLite connection + page cache. anyio's stock 40 tokens can push the
+    aggregate page cache past a 512MB-1GB Fly VM; capping it bounds the ceiling
+    (12 x 16MB ~= 192MB) while keeping ample single-tenant concurrency.
+    """
+    try:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = settings.max_tool_threads
+        log.info("thread_limiter.capped", total_tokens=settings.max_tool_threads)
+    except Exception as e:  # never let a limiter hiccup block startup
+        log.warning("thread_limiter.cap_failed", error=str(e))
 
 
 def _spawn_warmup(settings: Settings) -> None:

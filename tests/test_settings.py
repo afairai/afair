@@ -69,6 +69,15 @@ def test_mcp_port_validates_range(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_max_tool_threads_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2a: the thread-limiter cap must be > 0 (a zero would deadlock every
+    tool call)."""
+    monkeypatch.setenv("MAX_TOOL_THREADS", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
 # ── blank-secret normalization ───────────────────────────────────────────────
 # A present-but-empty secret env var (the shape .env.example ships,
 # e.g. `AFAIR_VAULT_KEY=`) parses as "" not None. Two footguns followed before

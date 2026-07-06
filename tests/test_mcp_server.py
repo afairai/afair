@@ -45,6 +45,28 @@ def _settings_for(tmp_path: Path) -> Settings:
     )
 
 
+def test_thread_limiter_cap_applies_in_event_loop(tmp_path: Path) -> None:
+    """P2a: _apply_thread_limiter_cap sets anyio's default thread limiter to
+    settings.max_tool_threads. Must run inside a running loop (the limiter is a
+    per-loop RunVar) — the app lifespan is exactly that context."""
+    import anyio
+
+    from afair.mcp.server import _apply_thread_limiter_cap
+
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        max_tool_threads=7,
+    )
+
+    async def _run() -> int:
+        _apply_thread_limiter_cap(settings)
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    assert anyio.run(_run) == 7
+
+
 @pytest.mark.asyncio
 async def test_server_builds_and_registers_all_v1_tools(tmp_path: Path) -> None:
     """Server boots and exposes the v1 tool surface per Invariant I1.

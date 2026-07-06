@@ -65,6 +65,22 @@ class Settings(BaseSettings):
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8765, ge=1, le=65535)
 
+    # ── Concurrency / memory ceiling
+    max_tool_threads: int = Field(
+        default=12,
+        ge=1,
+        description=(
+            "Cap on anyio's default thread limiter — the number of MCP tool "
+            "calls that run concurrently in worker threads. Each worker thread "
+            "opens (and caches) its own SQLite connection with a per-connection "
+            "page cache, so the real cost is memory: at anyio's stock 40 tokens "
+            "the worst-case page cache alone (40 x 16MB) approaches the 512MB-1GB "
+            "Fly VM ceiling before the extractor pool + cold-path + checkpoint "
+            "threads. 12 keeps that ceiling ~192MB with ample single-tenant "
+            "concurrency; raise it if a busy vault needs more."
+        ),
+    )
+
     # ── LLM provider (Invariant I5 — vendor-neutral)
     # Format: "<provider>/<model>" — any litellm-supported model.
     extractor_model: str = "anthropic/claude-haiku-4-5"
