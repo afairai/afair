@@ -276,3 +276,33 @@ def test_call_tool_maps_rate_limit_exception(monkeypatch: pytest.MonkeyPatch) ->
             tool_description="d",
             tool_schema=SCHEMA,
         )
+
+
+def test_classify_keyerror_is_not_auth_error() -> None:
+    """§3g: a plain KeyError ('keyerror') must NOT map to LLMAuthError via a bare
+    'key' substring — that marked a real programming bug non-retryable. It falls
+    through to the generic (retryable) LLMError."""
+    result = llm._classify(KeyError("some_dict_key"))
+    assert not isinstance(result, llm.LLMAuthError)
+    assert type(result) is llm.LLMError
+
+
+def test_classify_real_litellm_auth_error_is_auth() -> None:
+    """A genuine provider auth error still maps to LLMAuthError (isinstance on
+    litellm's typed hierarchy — provider-neutral)."""
+    import litellm
+
+    exc = litellm.AuthenticationError(
+        message="bad key", llm_provider="anthropic", model="claude-haiku-4-5"
+    )
+    assert isinstance(llm._classify(exc), llm.LLMAuthError)
+
+
+def test_classify_name_marker_auth_still_works() -> None:
+    """A non-litellm exception whose class name signals auth still maps to
+    LLMAuthError via the name-marker fallback ('auth' marker)."""
+
+    class AuthError(Exception):
+        pass
+
+    assert isinstance(llm._classify(AuthError("nope")), llm.LLMAuthError)

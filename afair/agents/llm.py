@@ -180,16 +180,44 @@ def call_tool(
     return LLMResult(data=data, model=model, raw=raw_args)
 
 
+_AUTH_NAME_MARKERS = ("auth", "apikey", "permissiondenied")
+"""Class-name markers that indicate a provider auth/credentials error. Note the
+absence of a bare ``"key"``: it matched ``KeyError`` (a plain programming bug)
+and misrouted it to LLMAuthError, marking a real bug non-retryable and corrupting
+the retry policy. ``apikey`` still catches ``InvalidAPIKeyError`` et al."""
+
+
 def _classify(exc: Exception) -> LLMError:
-    """Map a raw provider/litellm exception to one of our LLMError subclasses."""
-    kind = type(exc).__name__.lower()
+    """Map a raw provider/litellm exception to one of our LLMError subclasses.
+
+    Prefers litellm's typed exception hierarchy (provider-neutral, honouring I5)
+    and falls back to class-name markers for exceptions outside that hierarchy.
+    """
+    # Imported from litellm.exceptions (their defining module) rather than the
+    # top-level package so mypy sees them as exported.
+    from litellm.exceptions import (
+        AuthenticationError,
+        PermissionDeniedError,
+        RateLimitError,
+        Timeout,
+    )
+
     msg = str(exc)
-    if "timeout" in kind:
+    # 1. litellm typed exceptions — the reliable, provider-neutral signal.
+    if isinstance(exc, Timeout):
         return LLMTimeout(msg)
-    if "auth" in kind or "key" in kind:
-        return LLMAuthError(msg)
-    if "rate" in kind or "ratelimit" in kind:
+    if isinstance(exc, RateLimitError):
         return LLMRateLimit(msg)
+    if isinstance(exc, AuthenticationError | PermissionDeniedError):
+        return LLMAuthError(msg)
+    # 2. Name-marker fallback for exceptions outside litellm's hierarchy.
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return LLMTimeout(msg)
+    if "ratelimit" in name or "rate_limit" in name:
+        return LLMRateLimit(msg)
+    if any(marker in name for marker in _AUTH_NAME_MARKERS):
+        return LLMAuthError(msg)
     return LLMError(msg)
 
 
