@@ -10,6 +10,21 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.14](https://github.com/afairai/afair/compare/v0.1.13...v0.1.14) (2026-07-06)
+
+
+### Bug Fixes
+
+* **agents:** keep distinct mode transitions from deduping to one event ([a1e02d7](https://github.com/afairai/afair/commit/a1e02d72dda208ac0671f6f1a5ced0077f664e37))
+* **agents:** point symmetric conflict flag at the counterpart event id ([b4e27f1](https://github.com/afairai/afair/commit/b4e27f1df54ed793f04c2da72bc40024d33903ba))
+* **agents:** stop a failed interpretation shadowing an earlier success ([9477d12](https://github.com/afairai/afair/commit/9477d126bded70c814c7ec07aa296b80a1c4e89f))
+* **agents:** stop KeyError misclassifying as an LLM auth error ([aa17451](https://github.com/afairai/afair/commit/aa174510a212ffd7b5ca5b0441d4ddd7433a2a29))
+* **agents:** store source event hashes in entity_article parent_hashes ([60cdb52](https://github.com/afairai/afair/commit/60cdb5245da705c8f4556fea71ce96f5bbdeefbc))
+* **mcp:** normalize naive timestamps in recall recency rerank ([3284906](https://github.com/afairai/afair/commit/3284906016c86068a1e8ef6ce9aa676385bd4035))
+* **mcp:** restore clean tool inputSchema; keep stringified-param tolerance ([b0b0543](https://github.com/afairai/afair/commit/b0b05436261f13e019fab1166031ba6184ed40a7))
+* **mcp:** truncate-preserve over-long remember context and type_hint ([74860fd](https://github.com/afairai/afair/commit/74860fd5f452ec06e238f62ba2e64228f4f559e0))
+* **mcp:** validate remember invalidation targets before content write ([a950616](https://github.com/afairai/afair/commit/a950616d295f08682c78de6c5b9580a41dc3feaa))
+
 ## [0.1.13](https://github.com/afairai/afair/compare/v0.1.12...v0.1.13) (2026-07-06)
 
 
