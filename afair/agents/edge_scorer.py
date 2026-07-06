@@ -30,6 +30,7 @@ import structlog
 from ulid import ULID
 
 from ..substrate import pipeline_events as pe
+from ..substrate import watermarks
 from ..substrate.belief import predicate_is_crisp, predicate_is_durable
 from ..substrate.confidence import (
     EDGE_CONFIDENCE_VERSION,
@@ -117,6 +118,19 @@ MAX_EDGE_EXPIRIES_PER_CYCLE = 25
 ``edges_expired_unserved`` stat), and keeps the write batch small."""
 
 EDGE_AUTO_EXPIRE_PRODUCER = "edge_scorer:auto_expire:v1"
+
+EDGE_SERVES_EPOCH_KEY = "edge_serves_epoch"
+"""Marker key (in ``worker_watermarks``) recording WHEN serve-tracking began on
+this vault. Rollout safety: ``edge_serves`` starts EMPTY at deploy, so every
+pre-existing edge is vacuously "never served" — anchoring the auto-expiry grace
+to ``discovered_at`` alone would mass-retire the whole legacy sub-0.5 tail
+within hours of deploy, before recall ever had a serve-tracking window. The
+never-served sweep anchors its grace to ``max(discovered_at, epoch)`` instead,
+so every edge — however old its discovery — gets a full
+``EDGE_EXPIRY_MIN_AGE_DAYS`` window of serve-tracking before it can be retired.
+The epoch is set once, on the first scorer cycle that finds it absent, and never
+moves (mutable derived state, not substrate — same footing as the P2a
+watermarks)."""
 
 MAX_NOISE_EXPIRIES_PER_CYCLE = 25
 """Hard cap on retro-sweep (B4) noise expiries per cycle — same blast-radius
@@ -522,16 +536,44 @@ def _edge_age_days(discovered_at: str) -> int:
     return max(0, int((datetime.now(UTC) - dt).total_seconds() // 86400))
 
 
+def _serve_tracking_epoch(conn: sqlite3.Connection) -> str:
+    """The ISO timestamp when serve-tracking began on this vault, set once and
+    never moved. Read-or-create against ``worker_watermarks`` (mutable derived
+    state). ``INSERT OR IGNORE`` + re-read makes concurrent first-cycles safe."""
+    existing = watermarks.read_watermark(conn, EDGE_SERVES_EPOCH_KEY)
+    if existing is not None:
+        return existing[0]  # through_created_at carries the epoch
+    now = datetime.now(UTC).isoformat()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO worker_watermarks "
+            "(worker, through_created_at, through_id, updated_at) VALUES (?, ?, ?, ?)",
+            (EDGE_SERVES_EPOCH_KEY, now, str(ULID()), now),
+        )
+    row = watermarks.read_watermark(conn, EDGE_SERVES_EPOCH_KEY)
+    return row[0] if row is not None else now
+
+
 def _expire_unserved_low_confidence_edges(conn: sqlite3.Connection) -> int:
     """Auto-expire edges that recall never served and that sit below the expiry
-    confidence floor, once they are past the grace period.
+    confidence floor, once they are past the serve-tracking grace.
 
     An edge earns retirement only when ALL hold: live (not already
     invalidated), unreviewed (the operator never touched it — reviewed edges
     are entrenched, ADR-0002), NEVER served (no ``edge_serves`` row), served
-    confidence < ``EDGE_EXPIRY_CONFIDENCE_THRESHOLD`` (0.5), and older than
-    ``EDGE_EXPIRY_MIN_AGE_DAYS`` (14d). Capped at ``MAX_EDGE_EXPIRIES_PER_CYCLE``
-    (25) per run.
+    confidence < ``EDGE_EXPIRY_CONFIDENCE_THRESHOLD`` (0.5), and past the grace.
+    Capped at ``MAX_EDGE_EXPIRIES_PER_CYCLE`` (25) per run.
+
+    ROLLOUT SAFETY — the grace is anchored to ``max(discovered_at, epoch)``,
+    NOT to ``discovered_at`` alone. ``edge_serves`` starts empty at deploy, so
+    every legacy edge is vacuously never-served; a discovered_at-only grace
+    would mass-retire the entire pre-deploy sub-0.5 tail in the first cycles
+    (it is all old), overriding ADR-0004's deliberate "serve-with-caveat, not
+    suppress" decision — and an invalidation has no un-reject path. Anchoring to
+    the serve-tracking epoch gives every edge a full ``EDGE_EXPIRY_MIN_AGE_DAYS``
+    window of actual serve-tracking before it can be retired, however old its
+    discovery. On a fresh deploy the epoch is ~now, so this sweep expires nothing
+    until serve-tracking has run for the grace period.
 
     Retirement is an append-only ``edge_invalidations`` row (I2 — never an
     UPDATE/DELETE of the edge; the edge and its interpretation stay as history,
@@ -540,6 +582,7 @@ def _expire_unserved_low_confidence_edges(conn: sqlite3.Connection) -> int:
     Idempotent across cycles: an invalidated edge fails the ``i.id IS NULL``
     filter next time, so it is chosen at most once (the append-only invalidation
     with ``source_event_id=None`` is itself producer-tagged + reasoned, I7)."""
+    epoch = _serve_tracking_epoch(conn)
     cutoff = (datetime.now(UTC) - timedelta(days=EDGE_EXPIRY_MIN_AGE_DAYS)).isoformat()
     rows = conn.execute(
         """
@@ -560,11 +603,11 @@ def _expire_unserved_low_confidence_edges(conn: sqlite3.Connection) -> int:
           AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
           AND NOT EXISTS (SELECT 1 FROM edge_serves sv WHERE sv.edge_id = e.id)
           AND COALESCE(ls.confidence, e.confidence) < ?
-          AND e.discovered_at < ?
+          AND max(e.discovered_at, ?) < ?
         ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC
         LIMIT ?
         """,
-        (EDGE_EXPIRY_CONFIDENCE_THRESHOLD, cutoff, MAX_EDGE_EXPIRIES_PER_CYCLE),
+        (EDGE_EXPIRY_CONFIDENCE_THRESHOLD, epoch, cutoff, MAX_EDGE_EXPIRIES_PER_CYCLE),
     ).fetchall()
     expired = 0
     for r in rows:

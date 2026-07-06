@@ -9,6 +9,7 @@ The scorer uses no LLM, so these run against real SQLite with no mocking.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -661,6 +662,98 @@ def test_auto_expiry_leaves_calibration_report_pure(
         _seed_weak_edge(db, i, serve=False)
     EdgeConfidenceScorer().run(db, settings)
     assert calibration_report(db)["reviewed"] == 0
+
+
+# ── rollout safety: the serve-tracking epoch guards mass-expiry (BLOCKER) ─────
+
+
+def _insert_backdated_weak_edge(conn: sqlite3.Connection, i: int, *, days_old: float) -> Any:
+    """A never-served edge whose ``discovered_at`` is backdated ``days_old``
+    days, with the same weak signal profile as ``_seed_weak_edge`` (0.5 mentions
+    + a loose-but-DURABLE predicate) so the scorer computes ~0.365 (< the 0.5
+    expiry floor) and the noise sweep leaves it alone. Inserted directly
+    (entity_edges accepts a chosen discovered_at on INSERT; only UPDATE/DELETE
+    are trigger-blocked) so we model a pre-deploy legacy edge that the
+    discovered_at grace alone would have wiped."""
+    from ulid import ULID
+
+    ev = write_event(
+        conn, origin="user", kind="remember", payload={"content_type": "text", "text": f"old {i}"}
+    )
+    subj = _entity(conn, f"OldS{i}", "person", ev)
+    obj = _entity(conn, f"OldO{i}", "organization", ev)
+    for endpoint in (subj, obj):
+        write_entity_mention(
+            conn,
+            entity_id=endpoint.id,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            surface_form=endpoint.canonical_name,
+            canonicalized_by="test",
+            match_method="exact",
+            confidence=0.5,
+        )
+    discovered = (datetime.now(UTC) - timedelta(days=days_old)).isoformat()
+    edge_id = str(ULID())
+    with conn:
+        conn.execute(
+            "INSERT INTO entity_edges (id, subject_id, predicate, object_id, valid_from, "
+            "valid_to, discovered_at, discovered_by, source_event_id, confidence) "
+            "VALUES (?, ?, 'is loosely connected to the', ?, NULL, NULL, ?, 'test', ?, 0.3)",
+            (edge_id, subj.id, obj.id, discovered, ev.id),
+        )
+    return edge_id
+
+
+def _set_epoch(conn: sqlite3.Connection, *, days_ago: float) -> None:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    with conn:
+        conn.execute(
+            "INSERT INTO worker_watermarks (worker, through_created_at, through_id, updated_at) "
+            "VALUES (?, ?, '0', ?) "
+            "ON CONFLICT(worker) DO UPDATE SET through_created_at = excluded.through_created_at",
+            (es.EDGE_SERVES_EPOCH_KEY, when, when),
+        )
+
+
+def test_fresh_deploy_does_not_mass_expire_legacy_graph(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """BLOCKER repro: 40 old (60d), low-conf (0.3), never-served edges on a FRESH
+    vault (serve-tracking epoch = now). None may be expired — the epoch gives
+    every legacy edge a full grace window of actual serve-tracking first."""
+    for i in range(40):
+        _insert_backdated_weak_edge(db, i, days_old=60)
+
+    first = EdgeConfidenceScorer().run(db, settings)
+    assert first["edges_expired_unserved"] == 0
+    second = EdgeConfidenceScorer().run(db, settings)
+    assert second["edges_expired_unserved"] == 0
+    assert db.execute("SELECT COUNT(*) FROM edge_invalidations").fetchone()[0] == 0
+
+
+def test_matured_epoch_lets_old_unserved_edges_expire(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Once serve-tracking has run longer than the grace (epoch 30d old), a 60d
+    never-served low-conf edge is finally eligible — the epoch delays, not
+    disables, the sweep."""
+    edge_id = _insert_backdated_weak_edge(db, 1, days_old=60)
+    _set_epoch(db, days_ago=30)  # tracking began well past the 14d grace
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_unserved"] == 1
+    assert _is_invalidated(db, edge_id)
+
+
+def test_serve_tracking_epoch_is_set_once_and_stable(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The epoch is created on the first cycle and never moves on later cycles."""
+    EdgeConfidenceScorer().run(db, settings)
+    first = es._serve_tracking_epoch(db)
+    EdgeConfidenceScorer().run(db, settings)
+    assert es._serve_tracking_epoch(db) == first
 
 
 # ── retro-sweep: noise edges (observe / transient / vague predicate) — B4 ────
