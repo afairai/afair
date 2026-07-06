@@ -10,6 +10,25 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.11](https://github.com/afairai/afair/compare/v0.1.10...v0.1.11) (2026-07-06)
+
+
+### Bug Fixes
+
+* **canonicalizer:** stop failed extractions starving event selection ([98412e6](https://github.com/afairai/afair/commit/98412e6bd526b4b05537420160c559b2969fbd98))
+* **edge-scorer:** page the review-candidate pool so no subject starves ([2c78d60](https://github.com/afairai/afair/commit/2c78d60fd127c9e8fe87089ecdd8bff1f1c9c89c))
+* **extractor:** record extraction.failed in every failure branch ([66dc6a6](https://github.com/afairai/afair/commit/66dc6a6f40ec5f5004b081af5851dcf33615f451))
+* **mcp:** exact-key allowlist + cap for observe preserved fields ([5893583](https://github.com/afairai/afair/commit/589358397c6b542eb9ebaf02927631fbfe68720b))
+* **mcp:** observe intake truncates oversized/brace-heavy extras ([9f73ba1](https://github.com/afairai/afair/commit/9f73ba1a6bdc4db790e8783eec2958785db56e33))
+* **observability:** guard misleading extraction.failed trace + stable open_threads order ([b68b665](https://github.com/afairai/afair/commit/b68b665946d8c55a90ad6759ce84bc64329465a4))
+* **session-start:** read open_threads from consolidation events ([a6c081a](https://github.com/afairai/afair/commit/a6c081ad3613dad43bdc6dbfec4a7cf71cbee782))
+* **substrate:** chunk IN-list batch helpers, subquery recall entity-match ([db04833](https://github.com/afairai/afair/commit/db048330fbd17d5ebf145b4ff0841121a5baaeed))
+
+
+### Performance Improvements
+
+* **substrate:** index LOWER(predicate), batch corroboration, SQL edge-review pool ([e42eb55](https://github.com/afairai/afair/commit/e42eb55d7fe65aa44c2e2b9a0f3960f9dac0da97))
+
 ## [0.1.10](https://github.com/afairai/afair/compare/v0.1.9...v0.1.10) (2026-07-02)
 
 
