@@ -860,12 +860,17 @@ def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
     when nothing matches — caller treats this as "no entity boost" and
     falls back to plain FTS+vec.
 
-    Perf audit C5: this query does ``LOWER(name) = LOWER(?)`` which the
-    indexes on canonical_name / surface_form cannot use (function on
-    LHS). For multi-token / very-long queries — typical of prose
-    questions, never entity references — we bail out immediately. That
-    skips a full scan + Python materialization for the 95% of recalls
-    where this never returns anything anyway.
+    Perf audit C5 / P2a: the expression indexes DO exist now
+    (``entity_mentions_surface_lower_idx``, ``entities_canonical_lower_idx``),
+    but a single ``OR`` across the two tables through a LEFT JOIN cannot use
+    either — SQLite's OR-optimization only fires within one table, so it
+    scanned ``entity_mentions`` and probed ``entities`` per row. The query is
+    rewritten as a UNION of two independently-indexed lookups: the first arm
+    drives from ``entity_mentions_surface_lower_idx``, the second from
+    ``entities_canonical_lower_idx`` → ``entity_mentions_entity_idx``. UNION
+    also dedupes, so the old ``DISTINCT`` is gone. For multi-token / very-long
+    queries — typical of prose questions, never entity references — we still
+    bail out immediately.
     """
     stripped = query.strip()
     if not stripped:
@@ -875,27 +880,25 @@ def _events_via_entity_match(db: Any, query: str, *, limit: int) -> list[Event]:
         return []
     if any(len(t) > _ENTITY_MATCH_MAX_TOKEN_LEN for t in tokens):
         return []
-    # Single query with the matching event ids as a correlated subquery
-    # (still SELECT of the full rows, but the DISTINCT is on the narrow id
-    # column inside the subquery, not the wide payload). Folding the id set
-    # into a subquery instead of materializing it into a Python-built
-    # ``IN (?, ?, ...)`` list removes the host-parameter ceiling: an entity
-    # mentioned in >32,766 events (the operator's own name) used to crash
-    # recall with ``too many SQL variables``.
+    # UNION of two indexed arms, folded into a subquery so the id set never
+    # materializes into a Python-built ``IN (?, ?, ...)`` list — that removes
+    # the host-parameter ceiling (an entity mentioned in >32,766 events, the
+    # operator's own name, used to crash recall with ``too many SQL variables``).
     rows = db.execute(
         """
         SELECT * FROM events
         WHERE id IN (
-            SELECT DISTINCT em.event_id
-            FROM entity_mentions em
-            LEFT JOIN entities ent ON ent.id = em.entity_id
-            WHERE LOWER(ent.canonical_name) = LOWER(?)
-               OR LOWER(em.surface_form) = LOWER(?)
+            SELECT em.event_id FROM entity_mentions em
+            WHERE LOWER(em.surface_form) = LOWER(:name)
+            UNION
+            SELECT em.event_id FROM entity_mentions em
+            JOIN entities ent ON ent.id = em.entity_id
+            WHERE LOWER(ent.canonical_name) = LOWER(:name)
         )
         ORDER BY created_at DESC
-        LIMIT ?
+        LIMIT :limit
         """,
-        (stripped, stripped, limit),
+        {"name": stripped, "limit": limit},
     ).fetchall()
     return [row_to_event(r) for r in rows]
 

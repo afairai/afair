@@ -90,6 +90,30 @@ def test_pending_corrections_surface_with_prompt(
     assert "afair.recall(decide=" in payload["instructions"]
 
 
+def test_top_salient_query_uses_producer_index(db: sqlite3.Connection) -> None:
+    """P2a: _read_top_salient runs on every connect; its
+    `WHERE produced_by = ? ORDER BY produced_at DESC` must ride the new
+    interpretations_producer_produced_idx and skip the temp-sort."""
+    from afair.agents.salience import SALIENCE_PRODUCED_BY
+
+    plan = db.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT e.id, e.content_hash, e.created_at, e.kind, e.payload,
+               i.extraction AS salience_extraction
+        FROM interpretations i
+        JOIN events e ON e.content_hash = i.event_hash
+        WHERE i.produced_by = ?
+        ORDER BY i.produced_at DESC
+        LIMIT ?
+        """,
+        (SALIENCE_PRODUCED_BY, 30),
+    ).fetchall()
+    detail = " ".join(str(row["detail"]) for row in plan)
+    assert "interpretations_producer_produced_idx" in detail
+    assert "USE TEMP B-TREE" not in detail
+
+
 def test_salient_events_surface_top_n_by_score(db: sqlite3.Connection, settings: Settings) -> None:
     """Top-salience events appear, ordered most-salient first."""
     # Mix: 3 high-signal (decision + compound), 2 plain texts.

@@ -665,6 +665,12 @@ SCHEMA_DDL: tuple[str, ...] = (
     #    expression index turns that into an index probe (appended 2026-07,
     #    additive per I3).
     "CREATE INDEX IF NOT EXISTS entity_edges_predicate_lower_idx ON entity_edges(LOWER(predicate))",
+    # 7. Session-start top-salient lookup by producer. _read_top_salient
+    #    (mcp/resources.py) runs `WHERE produced_by = ? ORDER BY produced_at
+    #    DESC` on EVERY connect — without this composite it full-scans
+    #    interpretations + temp-sorts. (appended 2026-07, additive per I3.)
+    "CREATE INDEX IF NOT EXISTS interpretations_producer_produced_idx "
+    "ON interpretations(produced_by, produced_at DESC)",
     # ── export_jobs: async full-vault export (appended 2026-06-14) ──────────
     # MUTABLE operational table (status transitions pending→ready, downloaded
     # gets stamped, purge expires). NOT append-only substrate — it tracks an

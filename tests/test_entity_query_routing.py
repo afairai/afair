@@ -399,3 +399,67 @@ def test_entity_match_many_mentions_capped_and_ordered(ctx: ServerContext) -> No
     assert len(found) == 10
     # Most-recent-first: the last 10 created events, newest first.
     assert [e.id for e in found] == list(reversed(created_ids[-10:]))
+
+
+def test_entity_match_union_arms_use_indexes(ctx: ServerContext) -> None:
+    """P2a: each UNION arm must drive from its expression index, never a full
+    SCAN of entity_mentions (the OR-across-two-tables shape scanned it)."""
+    inner = """
+        SELECT em.event_id FROM entity_mentions em
+        WHERE LOWER(em.surface_form) = LOWER(:name)
+        UNION
+        SELECT em.event_id FROM entity_mentions em
+        JOIN entities ent ON ent.id = em.entity_id
+        WHERE LOWER(ent.canonical_name) = LOWER(:name)
+    """
+    plan = ctx.db.execute("EXPLAIN QUERY PLAN " + inner, {"name": "Gowry"}).fetchall()
+    detail = " ".join(str(row["detail"]) for row in plan)
+    # Surface arm uses the surface-lower index; canonical arm drives from the
+    # canonical-lower index. Neither arm full-scans entity_mentions.
+    assert "entity_mentions_surface_lower_idx" in detail
+    assert "entities_canonical_lower_idx" in detail
+    assert "SCAN em" not in detail
+
+
+def test_entity_match_unions_surface_and_canonical(ctx: ServerContext) -> None:
+    """An entity reachable by BOTH its canonical name and a distinct surface
+    form returns the union of events, deduped (no double rows)."""
+    from afair.substrate import write_entity, write_entity_mention
+
+    anchor = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": "anchor"}
+    )
+    entity = write_entity(
+        ctx.db,
+        canonical_name="Sajinth",
+        kind="person",
+        created_by="test",
+        source_event_id=anchor.id,
+        confidence=0.9,
+    )
+    # One event mentions the canonical name, another a surface alias "Saji".
+    by_canonical = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": "e-canon"}
+    )
+    by_surface = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": "e-surf"}
+    )
+    for ev, surface in ((by_canonical, "Sajinth"), (by_surface, "Saji")):
+        write_entity_mention(
+            ctx.db,
+            entity_id=entity.id,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            surface_form=surface,
+            canonicalized_by="test",
+            match_method="exact",
+            confidence=1.0,
+        )
+
+    # Query by canonical name finds both the canonical mention and (via the
+    # entity's canonical name) the surface-aliased event — union, no dupes.
+    ids = {e.id for e in handlers._events_via_entity_match(ctx.db, "Sajinth", limit=10)}
+    assert ids == {by_canonical.id, by_surface.id}
+    # Query by the surface alias finds only the surface-mentioned event.
+    surf = {e.id for e in handlers._events_via_entity_match(ctx.db, "Saji", limit=10)}
+    assert surf == {by_surface.id}
