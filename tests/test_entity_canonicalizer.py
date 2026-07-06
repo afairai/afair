@@ -40,9 +40,11 @@ from afair.substrate import (
     latest_edge_scores_batch,
     open_db,
     read_edge_invalidations,
+    read_event_by_hash,
     write_event,
 )
 from afair.substrate.entities import find_edges_for_source_event
+from afair.substrate.temporal import write_event_temporal
 
 if TYPE_CHECKING:
     import sqlite3
@@ -78,12 +80,13 @@ def _write_event_with_extraction(
     relations: list[dict[str, str]] | None = None,
     summary: str | None = None,
     confidence: float | None = None,
+    kind: str = "remember",
 ) -> str:
     """Write an event + its extractor interpretation. Returns content_hash."""
     event = write_event(
         conn,
         origin="user",
-        kind="remember",
+        kind=kind,
         payload={"content_type": "text", "text": text},
     )
     # Default each relation's evidence to the event text (which states the
@@ -500,6 +503,167 @@ def test_relation_creates_edge_between_entities(
     assert len(edges) == 1
     edge = edges[0]
     assert edge["predicate"] == "runs"
+
+
+# ── sub-batch B: source-kind / transient / vague-predicate edge gates ────────
+
+
+def test_observe_event_yields_mentions_but_no_edges(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: an observe event's entities/mentions are still canonicalized, but its
+    relations are dropped wholesale — observe relations are agent-activity noise,
+    not durable facts."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    # Pre-seed BOTH endpoints so the edge would otherwise be created (not caught
+    # by the both-new prompt-injection guard).
+    _write_event_with_extraction(
+        db, text="Sajinth said hi", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _write_event_with_extraction(
+        db, text="Athara launched", entities=[{"name": "Athara", "type": "organization"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    observe_hash = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+        kind="observe",
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+
+    assert stats["edges_skipped_observe"] == 1
+    assert db.execute("SELECT COUNT(*) FROM entity_edges").fetchone()[0] == 0
+    # Mentions from the observe event still landed (entities feed recall).
+    mentions = list(iter_mentions_for_event(db, observe_hash))
+    assert {m.surface_form for m in mentions} == {"Sajinth", "Athara"}
+
+
+def test_confident_transient_source_yields_no_edges(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: when the temporal worker already flagged the source event as
+    confidently transient, its relations are skipped at write time."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    _write_event_with_extraction(
+        db, text="Sajinth said hi", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _write_event_with_extraction(
+        db, text="Athara launched", entities=[{"name": "Athara", "type": "organization"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    rel_hash = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    ev = read_event_by_hash(db, rel_hash)
+    assert ev is not None
+    write_event_temporal(
+        db,
+        event_id=ev.id,
+        event_hash=rel_hash,
+        temporal_class="transient",
+        confidence=0.9,
+        computed_by="temporal:v0",
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["edges_skipped_transient"] == 1
+    assert db.execute("SELECT COUNT(*) FROM entity_edges").fetchone()[0] == 0
+
+
+def test_low_confidence_transient_does_not_gate_edges(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2 floor: a shaky (<0.6) transient classification must NOT suppress a real
+    edge — the transient default of 0.5 on a parse failure can't retire edges."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    _write_event_with_extraction(
+        db, text="Sajinth said hi", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _write_event_with_extraction(
+        db, text="Athara launched", entities=[{"name": "Athara", "type": "organization"}]
+    )
+    EntityCanonicalizer().run(db, settings)
+
+    rel_hash = _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    ev = read_event_by_hash(db, rel_hash)
+    assert ev is not None
+    write_event_temporal(
+        db,
+        event_id=ev.id,
+        event_hash=rel_hash,
+        temporal_class="transient",
+        confidence=0.4,  # below the 0.6 floor
+        computed_by="temporal:v0",
+    )
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["edges_skipped_transient"] == 0
+    assert db.execute("SELECT COUNT(*) FROM entity_edges").fetchone()[0] == 1
+
+
+def test_vague_predicate_skipped_crisp_kept_same_event(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3: within one event, a durable relation is kept while a stative/textual
+    one ("mentions") is dropped — the vague-predicate gate is per-relation."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(
+        ec, "call_tool", lambda **_: (_ for _ in ()).throw(AssertionError("no LLM expected"))
+    )
+    for name, kind in [("Sajinth", "person"), ("Athara", "organization"), ("Roadmap", "concept")]:
+        _write_event_with_extraction(
+            db, text=f"{name} exists", entities=[{"name": name, "type": kind}]
+        )
+    EntityCanonicalizer().run(db, settings)
+
+    _write_event_with_extraction(
+        db,
+        text="Sajinth runs Athara and Sajinth mentions Roadmap",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+            {"name": "Roadmap", "type": "concept"},
+        ],
+        relations=[
+            {"subject": "Sajinth", "predicate": "runs", "object": "Athara"},
+            {"subject": "Sajinth", "predicate": "mentions", "object": "Roadmap"},
+        ],
+    )
+    stats = EntityCanonicalizer().run(db, settings)
+
+    assert stats["edges_skipped_vague_predicate"] == 1
+    preds = [r["predicate"] for r in db.execute("SELECT predicate FROM entity_edges").fetchall()]
+    assert preds == ["runs"]  # only the durable relation survived
 
 
 def test_edge_with_two_new_entities_in_same_event_is_rejected(

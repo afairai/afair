@@ -26,6 +26,7 @@ from afair.substrate.belief import (
     TrustState,
     auto_confirm,
     predicate_is_crisp,
+    predicate_is_durable,
     resolve_trust,
 )
 
@@ -57,6 +58,67 @@ def test_predicate_crispness_catches_verbose_profile_language() -> None:
     # caught by the evidence gate (Track 1, the primary defense), not by
     # word count.
     assert predicate_is_crisp("shares role with")  # 3 words: passes here
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        # ADR-0002 positive examples — durable relations, must survive the gate.
+        "runs",
+        "is design partner for",
+        "works at",
+        "owns",
+        "married to",
+        # plausible durable relations with auxiliaries / longer forms
+        "founded",
+        "is the CEO of",
+        "reports to",
+        "lives in",
+    ],
+)
+def test_predicate_is_durable_keeps_real_relations(predicate: str) -> None:
+    assert predicate_is_durable(predicate)
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "mentions",
+        "is similar to",
+        "similar to",
+        "awaits",
+        "is awaiting",
+        "contrasts with",
+        "retains value",  # the operator's own "retains value" example
+        "is related to",
+        "related to",
+        "is associated with",
+        "linked to",
+        "is connected to",
+        "references",
+        "refers to",
+        "discusses",
+        "criticizes",
+        "involves",
+        "is involved in",
+        "regarding",
+        "about",
+        "seems",
+        "appears",
+        "may be",
+        "might be",
+    ],
+)
+def test_predicate_is_durable_rejects_stative_and_textual(predicate: str) -> None:
+    assert not predicate_is_durable(predicate)
+
+
+def test_predicate_is_durable_fails_open_on_unclassifiable() -> None:
+    """A noise filter, not a truth oracle: when in doubt, keep the edge."""
+    assert predicate_is_durable("")
+    assert predicate_is_durable("   ")
+    assert predicate_is_durable("is")  # bare auxiliary → nothing to gate
+    assert predicate_is_durable("collaborated with on the redesign")
 
 
 def test_auto_confirm_trusts_only_grounded_crisp_nonforeign() -> None:

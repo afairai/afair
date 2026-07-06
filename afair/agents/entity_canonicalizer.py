@@ -74,6 +74,7 @@ from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
 from ..substrate import watermarks
+from ..substrate.belief import predicate_is_durable
 from ..substrate.confidence import (
     DEFAULT_BASE_RATE,
     W_CORROBORATION,
@@ -101,6 +102,7 @@ from ..substrate.kinds import (
     resolve_kind_slug,
     write_kind_observation,
 )
+from ..substrate.temporal import read_event_temporal
 from .cold_path import ColdPathWorker
 from .entity_articles import ENTITY_ARTICLE_KIND
 from .interpretation import write_interpretation
@@ -174,6 +176,21 @@ PROVISIONAL_NEW_ENTITY_CONFIDENCE = 0.5
 provisional, may be raised when the canonicalizer next sees the same
 surface form (no — entities are immutable, so 'raising' means the LLM
 later issues a merge into a higher-confidence canonical)."""
+
+EDGE_EXEMPT_EVENT_KINDS = frozenset({"observe"})
+"""Event kinds we never derive relation edges from. An ``observe`` event is the
+AI's own auto-journal ("edited events.py", "ran a query") — its relations are
+ephemeral agent-activity noise, not durable facts about the user's world.
+Entities and mentions from an observe event are STILL canonicalized (they feed
+recall); only the relations[] are dropped (sub-batch B1)."""
+
+TRANSIENT_EDGE_GATE_MIN_CONFIDENCE = 0.6
+"""Only skip edge derivation for a source event the temporal worker classified
+``transient`` with at least this confidence. The floor guards against a shaky
+classification (the temporal worker defaults to 0.5 when it can't parse) from
+suppressing a real edge. Mostly a no-op at write time — edge derivation usually
+runs BEFORE temporal classification — so the retro-sweep in edge_scorer
+(sub-batch B4) is the real backstop (B2)."""
 
 
 # ── LLM tool schema for the match-judgment call ───────────────────────────
@@ -258,6 +275,9 @@ class EntityCanonicalizer(ColdPathWorker):
             "entities_matched_llm": 0,
             "edges_created": 0,
             "edges_skipped_unresolved": 0,
+            "edges_skipped_observe": 0,
+            "edges_skipped_transient": 0,
+            "edges_skipped_vague_predicate": 0,
             "invalidations_cascaded": 0,
             "edges_invalidated": 0,
             "edges_rejected_both_new": 0,
@@ -326,6 +346,9 @@ class EntityCanonicalizer(ColdPathWorker):
             stats["entities_matched_llm"] += result["matched_llm"]
             stats["edges_created"] += result["edges_created"]
             stats["edges_skipped_unresolved"] += result["edges_skipped"]
+            stats["edges_skipped_observe"] += result.get("edges_skipped_observe", 0)
+            stats["edges_skipped_transient"] += result.get("edges_skipped_transient", 0)
+            stats["edges_skipped_vague_predicate"] += result.get("edges_skipped_vague_predicate", 0)
             stats["edges_rejected_both_new"] += result.get("edges_rejected_both_new", 0)
             stats["homonym_splits"] += result.get("homonym_splits", 0)
             stats["kind_observations"] += result.get("kind_observations", 0)
@@ -572,6 +595,9 @@ def _canonicalize_one_event(
         "matched_llm": 0,
         "edges_created": 0,
         "edges_skipped": 0,
+        "edges_skipped_observe": 0,
+        "edges_skipped_transient": 0,
+        "edges_skipped_vague_predicate": 0,
         "kind_observations": 0,
         "llm_calls": 0,
         "llm_errors": 0,
@@ -865,6 +891,27 @@ def _canonicalize_one_event(
     raw_relations = extraction.get("relations") or []
     if not isinstance(raw_relations, list):
         raw_relations = []
+    # B1 — source-kind gate. An observe event's relations are ephemeral
+    # agent-activity noise; drop them wholesale (entities/mentions already
+    # processed above still stand). Backfill runs through this same path, so
+    # the gate covers historical re-derivation too.
+    if raw_relations and event.kind in EDGE_EXEMPT_EVENT_KINDS:
+        stats["edges_skipped_observe"] = len(raw_relations)
+        raw_relations = []
+    # B2 — transient-source gate (best-effort). If the temporal worker already
+    # classified this event as confidently transient, its relations are
+    # low-durable-value; skip them. Usually a no-op (edge derivation runs before
+    # temporal classification) — the edge_scorer retro-sweep (B4) is the
+    # backstop that catches transient-classified-later edges.
+    if raw_relations:
+        tr = read_event_temporal(conn, event.content_hash)
+        if (
+            tr is not None
+            and tr.temporal_class == "transient"
+            and tr.confidence >= TRANSIENT_EDGE_GATE_MIN_CONFIDENCE
+        ):
+            stats["edges_skipped_transient"] = len(raw_relations)
+            raw_relations = []
     grounding_text = _event_grounding_text(event, extraction) if raw_relations else ""
     # Event-level extraction self-assessment feeds the edge-confidence prior
     # (ADR-0004). Absent / non-numeric → None (contributes a neutral 0).
@@ -877,6 +924,13 @@ def _canonicalize_one_event(
         pred = str(relation_dict.get("predicate") or "").strip()
         obj = str(relation_dict.get("object") or "").strip()
         if not (subj and pred and obj):
+            continue
+        # B3 — vague/stative predicate gate. "X mentions Y", "X is similar to
+        # Y", "X awaits Y" describe a passage, not a durable fact — persisting
+        # them fills the review queue with noise. Fail-open (an unclassifiable
+        # predicate stays), so a real relation is never lost to this filter.
+        if not predicate_is_durable(pred):
+            stats["edges_skipped_vague_predicate"] += 1
             continue
         # Confabulation guard. The extractor must ground each relation in a
         # verbatim quote from the event; if that quote isn't actually in the

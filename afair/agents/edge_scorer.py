@@ -30,7 +30,7 @@ import structlog
 from ulid import ULID
 
 from ..substrate import pipeline_events as pe
-from ..substrate.belief import predicate_is_crisp
+from ..substrate.belief import predicate_is_crisp, predicate_is_durable
 from ..substrate.confidence import (
     EDGE_CONFIDENCE_VERSION,
     EdgeConfidenceSignals,
@@ -51,6 +51,7 @@ from ..substrate.entities import (
 )
 from .cold_path import ColdPathWorker
 from .conflict_resolver import read_conflicts_batch
+from .entity_canonicalizer import EDGE_EXEMPT_EVENT_KINDS
 from .verdicts import is_unresolved_conflict
 
 if TYPE_CHECKING:
@@ -117,6 +118,17 @@ MAX_EDGE_EXPIRIES_PER_CYCLE = 25
 
 EDGE_AUTO_EXPIRE_PRODUCER = "edge_scorer:auto_expire:v1"
 
+MAX_NOISE_EXPIRIES_PER_CYCLE = 25
+"""Hard cap on retro-sweep (B4) noise expiries per cycle — same blast-radius
+discipline as the never-served sweep."""
+
+TRANSIENT_NOISE_MIN_CONFIDENCE = 0.6
+"""A source event must be classified ``transient`` with at least this confidence
+before its edges are swept as noise — the same floor the write-time transient
+gate (B2) uses, so a shaky 0.5-default classification can't retire a real edge."""
+
+EDGE_NOISE_SWEEP_PRODUCER = "edge_scorer:noise_sweep:v1"
+
 
 class EdgeConfidenceScorer(ColdPathWorker):
     """Cold-path worker that backfills + re-scores edge confidence (ADR-0004)."""
@@ -171,6 +183,14 @@ class EdgeConfidenceScorer(ColdPathWorker):
         # calibration set stays a pure record of operator verdicts.
         stats["edges_expired_unserved"] = _expire_unserved_low_confidence_edges(conn)
 
+        # Retro-sweep noise edges (sub-batch B4): live, unreviewed edges whose
+        # source is an observe event, or was classified confidently transient,
+        # or whose predicate is non-durable. This drains the operator's existing
+        # backlog created before the write-time gates (B1-B3) existed, and
+        # catches transient-classified-later edges the write-time gate misses.
+        # Same append-only invalidation, no edge_reviews row.
+        stats["edges_expired_noise"] = _expire_noise_edges(conn)
+
         # Propose the lowest-confidence uncertain edges for operator review
         # (ADR-0004 C4). This gives record_edge_review its first production
         # caller and makes the calibration set grow.
@@ -194,7 +214,8 @@ class EdgeConfidenceScorer(ColdPathWorker):
                 f"skipped_unchanged={stats['edges_skipped_unchanged']} "
                 f"legacy_backfilled={stats['legacy_backfilled']} "
                 f"reviews_proposed={stats['edge_reviews_proposed']} "
-                f"expired_unserved={stats['edges_expired_unserved']}"
+                f"expired_unserved={stats['edges_expired_unserved']} "
+                f"expired_noise={stats['edges_expired_noise']}"
             ),
         )
         return stats
@@ -558,6 +579,107 @@ def _expire_unserved_low_confidence_edges(conn: sqlite3.Connection) -> int:
         )
         if result is not None:
             expired += 1
+    return expired
+
+
+def _noise_reason(row: Any) -> str | None:
+    """The reason an edge is noise (B4), or None if it is a keeper.
+
+    Priority: observe-sourced → transient-sourced (confident) → non-durable
+    predicate. Producer-neutral phrasing so the invalidation reason reads well
+    in an audit."""
+    if row["source_kind"] in EDGE_EXEMPT_EVENT_KINDS:
+        return "noise sweep: relation derived from an observe event"
+    tconf = row["tconf"]
+    if (
+        row["tclass"] == "transient"
+        and tconf is not None
+        and float(tconf) >= TRANSIENT_NOISE_MIN_CONFIDENCE
+    ):
+        return f"noise sweep: transient source (confidence {float(tconf):.2f})"
+    if not predicate_is_durable(row["predicate"]):
+        return f"noise sweep: non-durable predicate {row['predicate']!r}"
+    return None
+
+
+def _fetch_noise_candidate_page(
+    conn: sqlite3.Connection,
+    cursor: tuple[str, str] | None,
+    page_size: int,
+) -> list[Any]:
+    """One keyset page of live, unreviewed edges with the signals the noise
+    classifier needs (source-event kind + latest temporal class/confidence),
+    ordered ``(discovered_at, id)`` ascending.
+
+    Reviewed edges are excluded (``NOT EXISTS edge_reviews``) — an edge the
+    operator touched is entrenched (ADR-0002) and never swept. Paged so the
+    scan stays bounded per statement; the caller walks pages until the cap or
+    exhaustion, and expired edges leave the set (``i.id IS NULL``)."""
+    sql = """
+        WITH latest_temporal AS (
+            SELECT event_hash, temporal_class, confidence,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY event_hash
+                       ORDER BY created_at DESC, id DESC
+                   ) AS rn
+            FROM event_temporal
+        )
+        SELECT e.id, e.predicate, e.discovered_at,
+               ev.kind AS source_kind,
+               lt.temporal_class AS tclass, lt.confidence AS tconf
+        FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        LEFT JOIN events ev ON ev.id = e.source_event_id
+        LEFT JOIN latest_temporal lt ON lt.event_hash = ev.content_hash AND lt.rn = 1
+        WHERE i.id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
+    """
+    params: list[Any] = []
+    if cursor is not None:
+        sql += " AND (e.discovered_at, e.id) > (?, ?)"
+        params.extend(cursor)
+    sql += " ORDER BY e.discovered_at ASC, e.id ASC LIMIT ?"
+    params.append(page_size)
+    return conn.execute(sql, params).fetchall()
+
+
+def _expire_noise_edges(conn: sqlite3.Connection) -> int:
+    """Retro-sweep noise edges: live, unreviewed edges that are observe-sourced,
+    confidently-transient-sourced, or non-durable-predicated (sub-batch B4).
+
+    Each is retired with an append-only ``edge_invalidations`` row (I2 — the
+    edge + its interpretation stay as history, I3, re-derivable under a version
+    bump). No ``edge_reviews`` row is written. Capped at
+    ``MAX_NOISE_EXPIRIES_PER_CYCLE`` per run; keyset-paged so a large graph is
+    scanned in bounded statements and forward progress is guaranteed (an
+    expired edge drops out via ``i.id IS NULL`` and the cursor never revisits
+    a keeper). Never touches an edge with an ``edge_reviews`` row — an
+    operator-decided edge is entrenched (ADR-0002)."""
+    expired = 0
+    cursor: tuple[str, str] | None = None
+    while expired < MAX_NOISE_EXPIRIES_PER_CYCLE:
+        page = _fetch_noise_candidate_page(conn, cursor, EDGE_REVIEW_CANDIDATE_POOL)
+        if not page:
+            break
+        for row in page:
+            reason = _noise_reason(row)
+            if reason is None:
+                continue
+            result = write_edge_invalidation(
+                conn,
+                edge_id=row["id"],
+                invalidated_by=EDGE_NOISE_SWEEP_PRODUCER,
+                reason=reason,
+                source_event_id=None,
+            )
+            if result is not None:
+                expired += 1
+                if expired >= MAX_NOISE_EXPIRIES_PER_CYCLE:
+                    break
+        last = page[-1]
+        cursor = (last["discovered_at"], last["id"])
+        if len(page) < EDGE_REVIEW_CANDIDATE_POOL:
+            break  # last page — candidates exhausted
     return expired
 
 

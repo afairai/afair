@@ -73,6 +73,113 @@ def predicate_is_crisp(predicate: str) -> bool:
     return 1 <= len(words) <= _MAX_PREDICATE_WORDS
 
 
+# Predicate stems that describe a TEXTUAL / stative / comparative relationship
+# rather than a durable fact about the world. "X mentions Y", "X is similar to
+# Y", "X awaits Y" are true of a passage, not a lasting property of the entities
+# — persisting them as graph edges fills the review queue with noise. Matched as
+# whole-normalized-predicate or a stem-prefixed phrase after stripping leading
+# auxiliaries; see :func:`predicate_is_durable`.
+_NON_DURABLE_PREDICATE_STEMS: frozenset[str] = frozenset(
+    {
+        "await",
+        "awaits",
+        "awaiting",
+        "contrast",
+        "contrasts",
+        "differ",
+        "differs",
+        "compare",
+        "compares",
+        "compared",
+        "resemble",
+        "resembles",
+        "similar to",
+        "relate",
+        "relates",
+        "related to",
+        "associated with",
+        "linked to",
+        "connected to",
+        "mention",
+        "mentions",
+        "mentioned",
+        "reference",
+        "references",
+        "referenced",
+        "refers to",
+        "discuss",
+        "discusses",
+        "discussed",
+        "criticize",
+        "criticizes",
+        "criticized",
+        "retain",
+        "retains",
+        "involve",
+        "involves",
+        "involved in",
+        "regarding",
+        "about",
+        "seems",
+        "appears",
+        "may be",
+        "might be",
+    }
+)
+
+# Leading auxiliary/copular verbs stripped before stem-matching so "is similar
+# to", "was awaiting", "has referenced" all reduce to their stem. Order-free:
+# stripped repeatedly from the front.
+_AUX_PREFIXES: tuple[str, ...] = (
+    "is ",
+    "was ",
+    "are ",
+    "were ",
+    "has ",
+    "have ",
+    "had ",
+    "been ",
+    "being ",
+    "will ",
+    "would ",
+)
+
+
+def predicate_is_durable(predicate: str) -> bool:
+    """False for a stative / textual / comparative predicate that shouldn't be
+    persisted as a graph edge; True otherwise.
+
+    A relation-QUALITY gate, NOT an entity ontology (I6): it decides whether a
+    triple is worth keeping as a durable belief, never what KIND an entity is.
+    Fail-OPEN by design — an unclassifiable predicate is treated as durable
+    (this is a noise filter, not a truth oracle, so when in doubt keep the
+    edge). Pure; no I/O.
+
+    The predicate is lowercased and whitespace-collapsed, leading auxiliaries
+    stripped, then judged non-durable iff the result IS a known non-durable stem
+    or starts with ``stem + " "``. ADR-0002's positive examples ("runs", "is
+    design partner for", "works at", "owns", "married to") all stay durable.
+    """
+    norm = " ".join(predicate.lower().split())
+    if not norm:
+        return True  # fail-open: nothing to judge
+    # Strip leading auxiliaries repeatedly ("is being" → "").
+    changed = True
+    while changed:
+        changed = False
+        for aux in _AUX_PREFIXES:
+            if norm.startswith(aux):
+                norm = norm[len(aux) :]
+                changed = True
+                break
+    if not norm:
+        return True  # a bare auxiliary is not a claim we can gate — keep it
+    for stem in _NON_DURABLE_PREDICATE_STEMS:
+        if norm == stem or norm.startswith(stem + " "):
+            return False
+    return True
+
+
 def auto_confirm(
     *,
     confidence: float,

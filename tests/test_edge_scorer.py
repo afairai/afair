@@ -33,6 +33,7 @@ from afair.substrate.confidence import (
     calibration_report,
     compute_edge_confidence,
 )
+from afair.substrate.temporal import write_event_temporal
 
 if TYPE_CHECKING:
     import sqlite3
@@ -660,6 +661,139 @@ def test_auto_expiry_leaves_calibration_report_pure(
         _seed_weak_edge(db, i, serve=False)
     EdgeConfidenceScorer().run(db, settings)
     assert calibration_report(db)["reviewed"] == 0
+
+
+# ── retro-sweep: noise edges (observe / transient / vague predicate) — B4 ────
+
+
+def _seed_noise_edge(
+    conn: sqlite3.Connection,
+    i: int,
+    *,
+    kind: str = "remember",
+    predicate: str = "runs",
+    temporal_class: str | None = None,
+    temporal_conf: float = 0.9,
+) -> Any:
+    """An edge with a controllable source-event kind, predicate, and optional
+    temporal classification — the three noise signals the retro-sweep keys on.
+    Not served (the sweep is independent of serving)."""
+    ev = write_event(
+        conn, origin="user", kind=kind, payload={"content_type": "text", "text": f"noise {i}"}
+    )
+    subj = _entity(conn, f"NoiseS{i}", "person", ev)
+    obj = _entity(conn, f"NoiseO{i}", "organization", ev)
+    edge = write_entity_edge(
+        conn,
+        subject_id=subj.id,
+        predicate=predicate,
+        object_id=obj.id,
+        source_event_id=ev.id,
+        discovered_by="test",
+        confidence=0.8,
+    )
+    assert edge is not None
+    if temporal_class is not None:
+        write_event_temporal(
+            conn,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            temporal_class=temporal_class,
+            confidence=temporal_conf,
+            computed_by="temporal:v0",
+        )
+    return edge
+
+
+def _is_invalidated(conn: sqlite3.Connection, edge_id: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT COUNT(*) FROM edge_invalidations WHERE edge_id = ?", (edge_id,)
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def test_noise_sweep_invalidates_observe_sourced_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """REGRESSION: an edge whose source is an observe event is legacy noise —
+    the retro-sweep invalidates it (append-only) and writes no edge_review."""
+    edge = _seed_noise_edge(db, 1, kind="observe")
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 1
+    assert _is_invalidated(db, edge.id)
+    assert db.execute("SELECT COUNT(*) FROM edge_reviews").fetchone()[0] == 0
+    reason = db.execute(
+        "SELECT invalidated_by, reason FROM edge_invalidations WHERE edge_id = ?", (edge.id,)
+    ).fetchone()
+    assert reason["invalidated_by"] == es.EDGE_NOISE_SWEEP_PRODUCER
+    assert "observe" in reason["reason"]
+
+
+def test_noise_sweep_invalidates_transient_later_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The write-time transient gate usually misses (ordering); the retro-sweep
+    catches an edge whose source was classified transient AFTER derivation."""
+    edge = _seed_noise_edge(db, 1, predicate="runs", temporal_class="transient", temporal_conf=0.9)
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 1
+    assert _is_invalidated(db, edge.id)
+
+
+def test_noise_sweep_ignores_low_confidence_transient(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A shaky (<0.6) transient classification does not license a sweep."""
+    edge = _seed_noise_edge(db, 1, predicate="runs", temporal_class="transient", temporal_conf=0.4)
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 0
+    assert not _is_invalidated(db, edge.id)
+
+
+def test_noise_sweep_invalidates_vague_predicate_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    edge = _seed_noise_edge(db, 1, predicate="mentions")
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 1
+    assert _is_invalidated(db, edge.id)
+
+
+def test_noise_sweep_leaves_durable_remember_edge_alone(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    edge = _seed_noise_edge(db, 1, kind="remember", predicate="runs")
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 0
+    assert not _is_invalidated(db, edge.id)
+
+
+def test_noise_sweep_never_touches_reviewed_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """An operator-decided edge is entrenched (ADR-0002): even observe-sourced,
+    a confirm review row keeps the sweep off it."""
+    edge = _seed_noise_edge(db, 1, kind="observe")
+    record_edge_review(db, edge_id=edge.id, verdict="confirm", reviewed_by="op")
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_noise"] == 0
+    assert not _is_invalidated(db, edge.id)
+
+
+def test_noise_sweep_is_capped_and_drains(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(es, "MAX_NOISE_EXPIRIES_PER_CYCLE", 5)
+    for i in range(7):
+        _seed_noise_edge(db, i, kind="observe")
+    first = EdgeConfidenceScorer().run(db, settings)
+    assert first["edges_expired_noise"] == 5
+    second = EdgeConfidenceScorer().run(db, settings)
+    assert second["edges_expired_noise"] == 2
+    third = EdgeConfidenceScorer().run(db, settings)
+    assert third["edges_expired_noise"] == 0
 
 
 # ── proposed_corrections CHECK migration (ADR-0004 S6a) ─────────────────────
