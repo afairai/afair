@@ -94,7 +94,7 @@ from ..substrate import (
 from ..substrate import pipeline_events as pe
 from ..substrate.belief import (
     _MIN_AUTO_CONFIRM_CONFIDENCE,
-    Entrenchment,
+    assertion_entrenchment,
     auto_confirm,
     resolve_trust,
 )
@@ -311,8 +311,10 @@ def _payload_summary(
             parts_summary.append(part_view)
         summary["parts"] = parts_summary
 
-    # Common metadata across content types
-    for k in ("context", "type_hint", "language", "target_hash", "reason"):
+    # Common metadata across content types. ``asserted_by`` (W3) rides here so
+    # the caller-supplied assertion label survives the truncated summary view,
+    # not just full_payload/by_id — same passthrough treatment as type_hint.
+    for k in ("context", "type_hint", "asserted_by", "language", "target_hash", "reason"):
         if payload.get(k) is not None:
             value = payload[k]
             if k == "context" and context_cap is not None and isinstance(value, str):
@@ -891,6 +893,13 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
     served_confidence = latest_edge_confidence_batch(db, all_edge_ids)
     auto_confirm_floor = _resolve_auto_confirm_floor(db)
     event_id_to_hash = {e.id: e.content_hash for e in events}
+    # W3: the source event's caller-supplied ``asserted_by`` maps to the edge's
+    # source_entrenchment. ADVISORY-ONLY — a self-reported "user" maps to
+    # USER_STATED, which is served but buys NOTHING at the auto_confirm gate (it
+    # only hard-fails <= FOREIGN_IMPORT, so USER_STATED == AGENT_DERIVED there).
+    # This discharges the earlier "foreign-import downgrading is a later slice"
+    # TODO with a per-edge lookup that can only ever LOWER trust, never raise it.
+    asserted_map = {e.id: (e.payload or {}).get("asserted_by") for e in events}
     # Edges that actually reach a recall response (ADR — serve-gated review):
     # only these earn a review-queue slot, and the auto-expiry sweep keys on
     # the ABSENCE of a serve stamp. Collected across all hits, stamped once
@@ -911,8 +920,9 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
             if subj_canonical is None or obj_canonical is None:
                 continue
             # has_evidence=True: post-evidence-gate, every edge that exists was
-            # grounded in a verbatim quote. source_entrenchment defaults to
-            # AGENT_DERIVED; foreign-import downgrading is a later slice.
+            # grounded in a verbatim quote. source_entrenchment is the source
+            # event's asserted_by tier (W3) — advisory, never above USER_STATED,
+            # which is a no-op at this gate (see assertion_entrenchment).
             conf = served_confidence.get(edge.id, edge.confidence)
             trust = resolve_trust(
                 latest_verdict=review_verdicts.get(edge.id),
@@ -920,7 +930,7 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                 auto_confirmed=auto_confirm(
                     confidence=conf,
                     predicate=edge.predicate,
-                    source_entrenchment=Entrenchment.AGENT_DERIVED,
+                    source_entrenchment=assertion_entrenchment(asserted_map.get(source_event_id)),
                     floor=auto_confirm_floor,
                 ),
             )
@@ -1092,6 +1102,7 @@ def remember(
     type_hint: str | None = None,
     parent_hashes: list[str] | None = None,
     invalidates: list[str] | None = None,
+    asserted_by: schemas.AssertedBy | None = None,
 ) -> RememberResult:
     """Write a fact to the substrate, optionally invalidating prior facts.
 
@@ -1277,6 +1288,13 @@ def remember(
         payload["context_full"] = context_full
     if type_hint_full is not None:
         payload["type_hint_full"] = type_hint_full
+    # asserted_by (W3) is caller-supplied assertion metadata = CONTENT, so it
+    # goes IN the payload and therefore IN the content hash (deliberate, unlike
+    # the W1 server-derived provenance sidecar): the same sentence asserted as
+    # `user` vs `model` is a different assertion. Consequence: adding asserted_by
+    # to a plain re-write is a new event; supersession handles the rest.
+    if asserted_by is not None:
+        payload["asserted_by"] = asserted_by
 
     # Single-pass write: ``write_event_with_status`` returns the row plus a
     # was_inserted bool, so we don't have to compute the content hash twice

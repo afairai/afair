@@ -219,6 +219,7 @@ def build_server(settings: Settings) -> FastMCP:
         type_hint: str | None = None,
         parent_hashes: list[str] | None = None,
         invalidates: list[str] | None = None,
+        asserted_by: schemas.AssertedBy | None = None,
     ) -> schemas.RememberResult:
         enforce_write_scope()
         # Narrow the widened ``RememberContent | str`` alias back to the concrete
@@ -231,6 +232,7 @@ def build_server(settings: Settings) -> FastMCP:
             type_hint=type_hint,
             parent_hashes=parent_hashes,
             invalidates=invalidates,
+            asserted_by=asserted_by,
         )
 
     @mcp.tool(description=descriptions.RECALL, version="1", output_schema=_RECALL_OUTPUT_SCHEMA)

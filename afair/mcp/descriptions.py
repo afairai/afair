@@ -115,6 +115,12 @@ ARGUMENTS:
     supersedes. Each target gets its own append-only invalidation event
     referencing it. Use when the user corrects a prior fact or a meeting
     outcome supersedes an earlier plan.
+  - asserted_by: Optional. Who asserted this, one of "user" (the human
+    stated it directly) or "model" (you inferred or synthesized it).
+    Advisory provenance only: it is stored and served, but a self-reported
+    "user" can NEVER raise the trust of a derived fact above the normal
+    agent-derived level — operator-grade trust is earned only through the
+    recall(decide=...) review loop. Omit if you're unsure.
 
 RETURN:
   {"ok": true, "event_id": "...", "content_hash": "sha256:...",

@@ -181,6 +181,29 @@ def predicate_is_durable(predicate: str) -> bool:
     return True
 
 
+def assertion_entrenchment(asserted_by: str | None) -> Entrenchment:
+    """Map a ``remember`` ``asserted_by`` label to an entrenchment tier (W3).
+
+    ADVISORY-ONLY INVARIANT — the permitted movement is DOWN, never up:
+
+    - ``None`` / ``"model"`` → ``AGENT_DERIVED`` (the default for a derived edge).
+    - ``"user"``             → ``USER_STATED``.
+
+    A self-reported ``"user"`` maps to ``USER_STATED``, which is RECORDED and
+    SERVED but by construction buys NOTHING at the auto-confirm gate: that gate
+    only hard-fails ``<= FOREIGN_IMPORT``, so ``USER_STATED`` and
+    ``AGENT_DERIVED`` produce identical auto-confirm outcomes. A caller can never
+    manufacture operator-grade trust by labelling their own write ``user`` —
+    ``USER_CONFIRMED`` is reachable ONLY through the recall(decide=...) review
+    loop. This helper is deliberately unable to return anything above
+    ``USER_STATED``; the only trust movement it can express is a future
+    downgrade (e.g. a foreign import), never a privilege escalation.
+    """
+    if asserted_by == "user":
+        return Entrenchment.USER_STATED
+    return Entrenchment.AGENT_DERIVED
+
+
 def auto_confirm(
     *,
     confidence: float,

@@ -302,6 +302,19 @@ class RememberResult(BaseModel):
     invalidated: list[str] = []
 
 
+AssertedBy = Literal["user", "model"]
+"""Who asserted a ``remember`` fact (W3), if the caller chose to say.
+
+- ``user``  — the human operator stated this directly.
+- ``model`` — the AI asserted it (a synthesis, an inference).
+
+ADVISORY provenance only: it is recorded, served, and (for ``user``) fed to the
+entrenchment model as a NON-privileging signal — a self-reported ``user`` can
+never buy trust ABOVE agent-derived at the auto-confirm gate. Operator-grade
+trust is earned only through the recall(decide=...) review loop. Pydantic
+rejects any other value at the boundary."""
+
+
 # ── recall ──────────────────────────────────────────────────────────────────
 
 
