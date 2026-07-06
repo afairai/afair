@@ -61,6 +61,57 @@ _DOMAIN_RE = re.compile(
 # A 4-digit 19xx/20xx year in a name reads as a citation/reference.
 _CITATION_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
+# ── structural-junk detector (I6-safe review suppression) ────────────────────
+# Names that are ticket ids, file paths, or config filenames are STRUCTURAL
+# tokens the extractor lifted from text — not entities whose KIND anyone needs
+# to review. These regexes only SUPPRESS a kind-review proposal; they assign no
+# kind, introduce no enum, and never touch the entity or its kind_observations.
+_TICKET_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
+"""A JIRA/ADR-style ticket id: DEV-69, ADR-0004, PROJ-123."""
+
+_PATH_RE = re.compile(r"^(?:/|\./|\.\./)[^\s]+$|^[\w.-]+(?:/[\w.-]+)+$")
+"""A filesystem/route path: /admin/signups, ./scripts, docs/self-hosting.md."""
+
+_FILENAME_RE = re.compile(r"^[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]{1,6}$")
+"""A dotted filename: operations.md, fly.dev.toml, smoke_mcp.py."""
+
+# End-anchored form of ``_DOMAIN_RE`` (the TLD must be the FINAL segment) for the
+# filename carve-out. This is what keeps the ``maxime.team`` (bare domain →
+# person→product retype) case a NON-structural name while still treating a config
+# file like ``fly.dev.toml`` (whose ``.dev`` is mid-name, not the suffix) as
+# structural. Anchoring to the end resolves the ambiguity a plain ``.search``
+# would create — ``fly.dev.toml`` contains a TLD-shaped segment but is a file.
+_DOMAIN_SUFFIX_RE = re.compile(
+    r"\.(team|me|com|ai|io|app|dev|net|org|co|xyz|de|ch|eu)$",
+    re.IGNORECASE,
+)
+
+
+def is_structural_name(name: str) -> bool:
+    """True when ``name`` is a structural token (ticket id, path, or config
+    filename) rather than a real entity whose kind is worth reviewing.
+
+    I6-safe: this is purely a REVIEW-PROPOSAL suppressor. It assigns/forces NO
+    kind, introduces NO enum, and leaves ``kind_observations`` and the entity
+    itself untouched — the Schema-Evolver and manual retype/retract stay fully
+    available. It only decides "the operator doesn't need to be nagged to pick a
+    kind for a file path". Same category as the extractor's evidence gate: a
+    lexical-shape judgment about what deserves human attention, not an ontology.
+
+    The ``_DOMAIN_SUFFIX_RE`` carve-out is load-bearing: a bare domain used as a
+    name (``maxime.team``) stays NON-structural so its person→product retype
+    still surfaces; a config filename that merely contains a TLD-shaped segment
+    (``fly.dev.toml``) is still structural.
+    """
+    name = name.strip()
+    if not name:
+        return False
+    if _TICKET_ID_RE.match(name) or _PATH_RE.match(name):
+        return True
+    # A dotted filename is structural UNLESS its final segment is a real TLD (a
+    # bare domain used as a name — the load-bearing maxime.team carve-out).
+    return bool(_FILENAME_RE.match(name)) and not _DOMAIN_SUFFIX_RE.search(name)
+
 
 def detect_type_mismatch(canonical_name: str, kind: str) -> tuple[str, str, float] | None:
     """If the name pattern contradicts the entity kind, return
@@ -228,9 +279,17 @@ class EntityAuditWorker(ColdPathWorker):
             "scanned": len(entities),
             "retype_proposals": 0,
             "merge_review_proposals": 0,
+            "suppressed_structural": 0,
         }
         with conn:
             for eid, name, kind in entities:
+                # C — structural-junk suppression (I6-safe). A file path / ticket
+                # id / config filename doesn't need a human to pick its kind; skip
+                # the proposal only. The entity + its kind_observations stand, and
+                # manual retype/retract stay available.
+                if is_structural_name(name):
+                    stats["suppressed_structural"] += 1
+                    continue
                 tm = detect_type_mismatch(name, kind)
                 if tm is not None:
                     to_kind, evidence, conf = tm
@@ -245,6 +304,13 @@ class EntityAuditWorker(ColdPathWorker):
                     ):
                         stats["retype_proposals"] += 1
             for from_id, detail, evidence, conf in find_cross_kind_auto_merges(conn):
+                # Same suppression on the merge-review side: a cross-kind merge of
+                # two structural names is not a kind the operator should arbitrate.
+                if is_structural_name(detail["from_name"]) or is_structural_name(
+                    detail["into_name"]
+                ):
+                    stats["suppressed_structural"] += 1
+                    continue
                 if _insert_proposal(
                     conn,
                     kind="merge_review",

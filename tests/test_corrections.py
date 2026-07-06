@@ -358,6 +358,9 @@ def test_merge_review_retract_withdraws_the_entity(
 ) -> None:
     """For a noise merge ("scripts/smoke_mcp.py"), retract withdraws the merged
     canonical from the live graph instead of asking which kind."""
+    from datetime import UTC, datetime
+
+    from afair.agents.entity_audit import _insert_proposal, find_cross_kind_auto_merges
     from afair.substrate import retracted_entity_ids
 
     from_id = _entity(db, "scripts/smoke_mcp.py", "project")
@@ -370,7 +373,23 @@ def test_merge_review_retract_withdraws_the_entity(
         reason="t",
         confidence=0.9,
     )
-    EntityAuditWorker().run(db, settings)
+    # The audit worker now SUPPRESSES a merge_review for a structural name (a
+    # file path) — see test_worker_suppresses_structural_merge_review. Insert
+    # the proposal directly here so we still exercise the retract decide path on
+    # a path-named noise entity (the operator's manual retract stays available).
+    _from_id, detail, evidence, conf = next(
+        row for row in find_cross_kind_auto_merges(db) if row[0] == from_id
+    )
+    with db:
+        _insert_proposal(
+            db,
+            kind="merge_review",
+            entity_id=from_id,
+            detail=detail,
+            evidence=evidence,
+            confidence=conf,
+            now=datetime.now(UTC),
+        )
     mr = next(
         p
         for p in read_pending_corrections(db)

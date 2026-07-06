@@ -131,8 +131,10 @@ def test_unified_kind_applied_at_floor(conn, monkeypatch) -> None:
 
 
 def test_unified_kind_not_applied_below_threshold(conn, monkeypatch) -> None:
-    _seed_entity(conn, name="smoke.py", kind="product", n_mentions=3)
-    project = _seed_entity(conn, name="smoke.py", kind="project", n_mentions=1)
+    # "foo" (a natural name, not a structural filename): the merge_review below
+    # is filed on its own merits, not suppressed by the structural-junk filter.
+    _seed_entity(conn, name="foo", kind="product", n_mentions=3)
+    project = _seed_entity(conn, name="foo", kind="project", n_mentions=1)
     # 0.80: above the merge floor (0.75), below the unify floor (0.85).
     _stub_judge(monkeypatch, same=True, confidence=0.80, unified_kind="product")
 
@@ -150,8 +152,10 @@ def test_unified_kind_not_applied_below_threshold(conn, monkeypatch) -> None:
 def test_out_of_menu_unified_kind_discarded(conn, monkeypatch) -> None:
     """A unified_kind not shown in the records is discarded (I6, Security L1):
     the merge still happens, no kind is invented, and review still fires."""
-    product = _seed_entity(conn, name="smoke.py", kind="product", n_mentions=3)
-    project = _seed_entity(conn, name="smoke.py", kind="project", n_mentions=1)
+    # "foo" (a natural name) so the review below is filed, not suppressed by the
+    # structural-junk filter.
+    product = _seed_entity(conn, name="foo", kind="product", n_mentions=3)
+    project = _seed_entity(conn, name="foo", kind="project", n_mentions=1)
     _stub_judge(monkeypatch, same=True, confidence=0.95, unified_kind="banana")
 
     stats = ed.EntityDeduplicator().run(conn, Settings())

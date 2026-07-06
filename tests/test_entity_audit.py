@@ -19,6 +19,7 @@ from afair.agents.entity_audit import (
     EntityAuditWorker,
     detect_type_mismatch,
     find_cross_kind_auto_merges,
+    is_structural_name,
 )
 from afair.settings import Settings
 from afair.substrate import open_db, write_entity, write_entity_merge, write_event
@@ -50,6 +51,39 @@ def test_detect_leaves_real_person_and_nonperson_alone() -> None:
     assert detect_type_mismatch("Dr. Gregor Bräuer", "person") is None
     # Only audits person — a product named like a domain is fine as a product.
     assert detect_type_mismatch("maxime.team", "product") is None
+
+
+# ── structural-junk detector (C) ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DEV-69",
+        "ADR-0004",
+        "/admin/signups",
+        "docs/self-hosting.md",
+        "operations.md",
+        "fly.dev.toml",
+        "scripts/smoke_mcp.py",
+    ],
+)
+def test_is_structural_name_true_for_paths_tickets_files(name: str) -> None:
+    assert is_structural_name(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Gowry",
+        "maxime.team",  # bare domain → keeps its person→product retype (carve-out)
+        "Menon 2011",
+        "Claude Code",
+        "afair",
+    ],
+)
+def test_is_structural_name_false_for_real_entities(name: str) -> None:
+    assert not is_structural_name(name)
 
 
 # ── fixtures + helpers ───────────────────────────────────────────────────────
@@ -154,6 +188,51 @@ def test_worker_queues_retypes_and_merge_reviews(
     mr = next(r for r in rows if r["kind"] == "merge_review")
     assert json.loads(mr["detail"])["into_name"] == "Clario"
     assert all(r["status"] == "proposed" for r in rows)
+
+
+def test_worker_suppresses_structural_merge_review(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """C: a cross-kind merge of a structural name (a route path) files NO
+    merge_review proposal — the operator shouldn't be nagged to pick a kind for
+    '/admin/signups'. Natural names still propose."""
+    _auto_merge_across_kinds(
+        db, "/admin/signups", "project", "product", by="entity_deduplicator:v0"
+    )
+    _auto_merge_across_kinds(db, "Clario", "project", "product", by="entity_deduplicator:v0")
+
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 1  # only the natural name
+    assert stats["suppressed_structural"] >= 1
+    rows = db.execute(
+        "SELECT detail FROM proposed_corrections WHERE kind = 'merge_review'"
+    ).fetchall()
+    names = {json.loads(r["detail"])["into_name"] for r in rows}
+    assert names == {"Clario"}  # /admin/signups was suppressed
+
+
+def test_worker_still_retypes_domain_person(db: sqlite3.Connection, settings: Settings) -> None:
+    """C carve-out regression: 'maxime.team' is a bare domain, NOT a structural
+    filename, so its person→product retype is STILL proposed (the domain
+    carve-out is load-bearing)."""
+    _entity(db, "maxime.team", "person")
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["retype_proposals"] == 1
+    row = db.execute("SELECT detail FROM proposed_corrections WHERE kind = 'retype'").fetchone()
+    detail = json.loads(row["detail"])
+    assert detail["name"] == "maxime.team"
+    assert detail["to_kind"] == "product"
+
+
+def test_worker_suppresses_structural_person_retype(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A person whose name is a file path is structural — no retype proposal,
+    counted as suppressed."""
+    _entity(db, "docs/self-hosting.md", "person")
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["retype_proposals"] == 0
+    assert stats["suppressed_structural"] == 1
 
 
 def test_worker_is_idempotent(db: sqlite3.Connection, settings: Settings) -> None:
