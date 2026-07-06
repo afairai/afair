@@ -26,6 +26,7 @@ import structlog
 from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
+from ..substrate import watermarks
 from ..substrate.events import read_event_by_hash
 from ..substrate.temporal import TEMPORAL_CLASSES, write_event_temporal
 from .cold_path import ColdPathWorker
@@ -160,8 +161,16 @@ class TemporalWorker(ColdPathWorker):
         budget = MAX_LLM_CALLS_PER_CYCLE
         last_llm_call: float | None = None
 
-        for event, extraction in _find_events_needing_temporal(conn, MAX_EVENTS_PER_CYCLE):
+        # Watermark (P2a): frontier captured BEFORE selection; cursor keys on
+        # interpretation id (skip-safe against late-arriving interps).
+        frontier = watermarks.frontier_interpretations(conn)
+        wm_id = watermarks.read_watermark_id(conn, watermarks.WORKER_TEMPORAL)
+        candidates = _find_events_needing_temporal(conn, MAX_EVENTS_PER_CYCLE, wm_id=wm_id)
+        budget_exhausted = False
+
+        for event, extraction in candidates:
             if budget <= 0:
+                budget_exhausted = True
                 break
             last_llm_call = _maybe_sleep(last_llm_call)
             try:
@@ -196,6 +205,24 @@ class TemporalWorker(ColdPathWorker):
                 by_class = stats["by_class"]
                 by_class[verdict.temporal_class] = by_class.get(verdict.temporal_class, 0) + 1
 
+        # Drain-advance (P2a): only when the cycle fully drained (no budget
+        # break, fewer than the cap selected) AND classified every candidate
+        # (no LLM errors left a candidate without a temporal row). Then every
+        # interpretation with id <= frontier is a non-candidate → skip-safe.
+        if (
+            frontier is not None
+            and not budget_exhausted
+            and len(candidates) < MAX_EVENTS_PER_CYCLE
+            and stats["llm_errors"] == 0
+            and stats["events_classified"] == len(candidates)
+        ):
+            watermarks.write_watermark(
+                conn,
+                watermarks.WORKER_TEMPORAL,
+                through_created_at=frontier[0],
+                through_id=frontier[1],
+            )
+
         pe.record(
             conn,
             event_id="-",  # cycle-level marker, not per-row
@@ -213,14 +240,22 @@ class TemporalWorker(ColdPathWorker):
 
 
 def _find_events_needing_temporal(
-    conn: sqlite3.Connection, max_events: int
+    conn: sqlite3.Connection, max_events: int, *, wm_id: str | None = None
 ) -> list[tuple[Event, dict[str, Any]]]:
     """Extractor-processed events with no temporal row at the current version.
 
     The ``event_temporal`` row IS the idempotency marker (UNIQUE on
     event_hash+computed_by), so a plain NOT EXISTS keyed on the current
     ``computed_by`` both prevents reprocessing and lets a bumped version
-    re-derive. Oldest first, so the layer catches up in temporal order.
+    re-derive. Oldest first (by interpretation id) so the layer catches up in
+    insertion order and the P2a watermark can advance monotonically.
+
+    ``wm_id`` (P2a): when set, only interpretations whose id is above the
+    worker's watermark are scanned. The watermark keys on the *interpretation*
+    id, not the event's created_at — a late-arriving extractor interpretation
+    for an old event still gets a fresh id above the cursor, so it is never
+    skipped (a created_at cursor could skip it). The NOT EXISTS stays as the
+    correctness backstop.
     """
     rows = conn.execute(
         """
@@ -228,15 +263,16 @@ def _find_events_needing_temporal(
         FROM interpretations i
         JOIN events e ON e.id = i.event_id
         WHERE i.produced_by LIKE 'extractor:%'
+          AND (:wm_id IS NULL OR i.id > :wm_id)
           AND NOT EXISTS (
               SELECT 1 FROM event_temporal t
               WHERE t.event_hash = i.event_hash
-                AND t.computed_by = ?
+                AND t.computed_by = :version
           )
-        ORDER BY e.created_at ASC
-        LIMIT ?
+        ORDER BY i.id ASC
+        LIMIT :limit
         """,
-        (TEMPORAL_VERSION, max_events),
+        {"version": TEMPORAL_VERSION, "limit": max_events, "wm_id": wm_id},
     ).fetchall()
 
     out: list[tuple[Event, dict[str, Any]]] = []

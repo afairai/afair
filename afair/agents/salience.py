@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ..substrate import pipeline_events as pe
+from ..substrate import watermarks
 from ..substrate.events import read_event_by_id
 from .cold_path import ColdPathWorker
 from .guards import check_salience_outputs
@@ -142,6 +143,14 @@ class SalienceWorker(ColdPathWorker):
             "weights_snapshot": weights,
         }
 
+        # Watermark (P2a): skip re-scanning already-scored history. The cursor
+        # is the event ULID id; the NOT EXISTS below stays as the correctness
+        # guard so a re-scanned row is idempotent. Advance is drain-based
+        # (see below) — never skips. Frontier captured BEFORE selection so a
+        # concurrently-written event lands above it and is picked up next cycle.
+        frontier = watermarks.frontier_events(conn)
+        wm_id = watermarks.read_watermark_id(conn, watermarks.WORKER_SALIENCE)
+
         # Find events without a salience interpretation. Bounded by
         # SALIENCE_BATCH_LIMIT so a backlog never wedges one cycle.
         rows = conn.execute(
@@ -149,15 +158,20 @@ class SalienceWorker(ColdPathWorker):
             SELECT e.id
             FROM events e
             WHERE e.kind IN ('remember', 'observe')
+              AND (:wm_id IS NULL OR e.id > :wm_id)
               AND NOT EXISTS (
                   SELECT 1 FROM interpretations i
                   WHERE i.event_hash = e.content_hash
-                    AND i.produced_by = ?
+                    AND i.produced_by = :produced_by
               )
             ORDER BY e.created_at DESC
-            LIMIT ?
+            LIMIT :limit
             """,
-            (SALIENCE_PRODUCED_BY, SALIENCE_BATCH_LIMIT),
+            {
+                "produced_by": SALIENCE_PRODUCED_BY,
+                "limit": SALIENCE_BATCH_LIMIT,
+                "wm_id": wm_id,
+            },
         ).fetchall()
         stats["candidates"] = len(rows)
 
@@ -231,6 +245,25 @@ class SalienceWorker(ColdPathWorker):
                 stage="salience.scored",
                 producer=SALIENCE_PRODUCED_BY,
                 detail=f"score={score:.3f}",
+            )
+
+        # Drain-advance the watermark (P2a). Advance ONLY when this cycle both
+        # (a) fully drained its candidate set — fewer than the batch limit were
+        # selected, so no unscanned backlog remains — and (b) scored every one
+        # it selected (no invariant-violation / write skips left an event still
+        # a candidate). Then every event with id <= frontier is a non-candidate,
+        # so advancing there is skip-safe; a partial/failed cycle just leaves the
+        # cursor put and re-scans next time. Idempotent via the write guard.
+        if (
+            frontier is not None
+            and len(rows) < SALIENCE_BATCH_LIMIT
+            and stats["scored"] == len(rows)
+        ):
+            watermarks.write_watermark(
+                conn,
+                watermarks.WORKER_SALIENCE,
+                through_created_at=frontier[0],
+                through_id=frontier[1],
             )
 
         log.info("salience.cycle", **stats)

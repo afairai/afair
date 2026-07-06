@@ -987,6 +987,24 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS proposed_ontology_revisions_status_idx "
     "ON proposed_ontology_revisions(status, detected_at DESC)",
+    # ── worker_watermarks: cold-path re-scan cursors (P2a, added 2026-07) ────
+    # MUTABLE derived state, not substrate (Invariant I2 exception, same
+    # framing as proposed_corrections above and export_jobs below). A cold-path
+    # worker records how far it has processed (a ULID high-water cursor) so it
+    # stops re-scanning already-handled history each cycle. Deleting a row =
+    # that worker re-scans from zero once, NO data loss. No append-only
+    # triggers on purpose. The cursor is the ULID ``through_id`` (monotonic
+    # with insertion order, so a past-dated backfill still sorts above it and
+    # is never skipped); ``through_created_at`` is stored for inspection only.
+    # See substrate/watermarks.py for the never-skip contract. Additive per I3.
+    """
+    CREATE TABLE IF NOT EXISTS worker_watermarks (
+        worker             TEXT NOT NULL PRIMARY KEY,
+        through_created_at TEXT NOT NULL,
+        through_id         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+    ) STRICT
+    """,
 )
 
 

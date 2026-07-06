@@ -73,6 +73,7 @@ import structlog
 from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
+from ..substrate import watermarks
 from ..substrate.confidence import (
     DEFAULT_BASE_RATE,
     W_CORROBORATION,
@@ -282,8 +283,13 @@ class EntityCanonicalizer(ColdPathWorker):
         # per cycle and threaded into the write-time scoring below.
         base_rate, corroboration_weight = _resolve_edge_confidence_weights(conn)
 
-        # Phase A — canonicalize new events.
-        events_with_extractions = _find_uncanonicalized_events(conn, MAX_EVENTS_PER_CYCLE)
+        # Phase A — canonicalize new events. Watermark (P2a): frontier captured
+        # BEFORE selection; cursor keys on the success-interpretation id.
+        frontier = watermarks.frontier_interpretations(conn)
+        wm_id = watermarks.read_watermark_id(conn, watermarks.WORKER_CANONICALIZER)
+        events_with_extractions = _find_uncanonicalized_events(
+            conn, MAX_EVENTS_PER_CYCLE, wm_id=wm_id
+        )
         for index, (event, extraction) in enumerate(events_with_extractions):
             # G1 fix (ADR-0003 Phase 2 completion): once the per-cycle LLM
             # budget is gone, DEFER the remaining events instead of draining
@@ -348,6 +354,25 @@ class EntityCanonicalizer(ColdPathWorker):
                     },
                 )
 
+        # Drain-advance the Phase-A watermark (P2a). Advance ONLY when the
+        # cycle deferred nothing (LLM budget held) and selected fewer than the
+        # cap — i.e. it fully drained. Every processed event becomes a
+        # non-candidate (entity_mentions or a no-mentions marker), so every
+        # success interpretation with id <= frontier is terminal → skip-safe.
+        # A deferral or a full batch leaves the cursor put; the deferred events
+        # re-surface next cycle unchanged.
+        if (
+            frontier is not None
+            and stats["events_deferred_no_budget"] == 0
+            and len(events_with_extractions) < MAX_EVENTS_PER_CYCLE
+        ):
+            watermarks.write_watermark(
+                conn,
+                watermarks.WORKER_CANONICALIZER,
+                through_created_at=frontier[0],
+                through_id=frontier[1],
+            )
+
         # Phase B — cascade pending invalidations.
         for invalidate_event in _find_uncascaded_invalidations(conn, MAX_CASCADES_PER_CYCLE):
             edges_invalidated = _cascade_invalidation(conn, invalidate_event)
@@ -392,10 +417,17 @@ class EntityCanonicalizer(ColdPathWorker):
 
 
 def _find_uncanonicalized_events(
-    conn: sqlite3.Connection, max_events: int
+    conn: sqlite3.Connection, max_events: int, *, wm_id: str | None = None
 ) -> list[tuple[Event, dict[str, Any]]]:
     """Events whose latest SUCCESSFUL extractor interpretation has no
     entity_mentions row yet for this event_hash.
+
+    ``wm_id`` (P2a): when set, the latest-success window only scans extractor
+    interpretations above the worker's watermark id. A hash whose latest
+    success is at/below the cursor was drained last time (has mentions or a
+    no-mentions marker), so excluding it is skip-safe; a re-extraction that
+    appends a NEW success gets a fresh id above the cursor and re-enters. The
+    double NOT EXISTS stays as the correctness backstop.
 
     Selection is done in SQL via the same latest-success-per-hash idiom the
     extraction-retry worker uses (``select_retry_candidates``): a ROW_NUMBER
@@ -416,13 +448,14 @@ def _find_uncanonicalized_events(
     rows = conn.execute(
         """
         WITH latest_success AS (
-            SELECT i.event_id, i.event_hash, i.extraction,
+            SELECT i.id, i.event_id, i.event_hash, i.extraction,
                    ROW_NUMBER() OVER (
                        PARTITION BY i.event_hash
                        ORDER BY i.produced_at DESC, i.version DESC, i.id DESC
                    ) AS rn
             FROM interpretations i
             WHERE i.produced_by LIKE 'extractor:%'
+              AND (:wm_id IS NULL OR i.id > :wm_id)
               AND json_extract(i.extraction, '$.status') = 'success'
         )
         SELECT l.event_id, l.event_hash, l.extraction, e.created_at
@@ -436,12 +469,12 @@ def _find_uncanonicalized_events(
           AND NOT EXISTS (
               SELECT 1 FROM interpretations m
               WHERE m.event_hash = l.event_hash
-                AND m.produced_by = ?
+                AND m.produced_by = :no_mentions
           )
-        ORDER BY e.created_at ASC
-        LIMIT ?
+        ORDER BY l.id ASC
+        LIMIT :limit
         """,
-        (NO_MENTIONS_PRODUCED_BY, max_events),
+        {"no_mentions": NO_MENTIONS_PRODUCED_BY, "limit": max_events, "wm_id": wm_id},
     ).fetchall()
 
     out: list[tuple[Event, dict[str, Any]]] = []

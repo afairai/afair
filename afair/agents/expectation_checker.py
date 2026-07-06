@@ -148,6 +148,7 @@ def _failed_aggregate_sql(transient_placeholders: str) -> str:
                ) AS rn
         FROM interpretations
         WHERE produced_by LIKE 'extractor:%'
+          AND produced_at >= :lookback_cutoff
     ),
     failed AS (
         SELECT json_extract(l.extraction, '$.error_type') AS error_type,
@@ -212,6 +213,11 @@ class ExpectationChecker(ColdPathWorker):
         transient_named = ",".join(f":t{i}" for i in range(len(transient)))
         failed_params: dict[str, Any] = {f"t{i}": v for i, v in enumerate(transient)}
         failed_params["max_retries"] = MAX_EXTRACTION_RETRIES
+        # P2a: bound query 2's window scan to the same LOOKBACK_DAYS as query 1
+        # (b68b665 added it only to query 1). Older interpretations are a
+        # one-time backfill concern, not live monitoring, and leaving the window
+        # unbounded grows the ROW_NUMBER scan without operational value.
+        failed_params["lookback_cutoff"] = lookback_cutoff
         failed_row = conn.execute(_failed_aggregate_sql(transient_named), failed_params).fetchone()
         retry_exhausted = int(failed_row["retry_exhausted"])
         permanent_failures = int(failed_row["permanent_failures"])
