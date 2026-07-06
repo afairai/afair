@@ -2,9 +2,11 @@
 
 A confidently same-entity cluster's kind disagreement becomes ONE
 kind-assignment row per divergent member (fully attributed, one-row
-reversible), gated at KIND_UNIFY_CONFIDENCE=0.9. Below the threshold, or
-for an out-of-menu kind, today's behavior is preserved exactly: the merge
-lands, the kind disagreement stands, and entity_audit files a merge_review.
+reversible), gated at the KIND_UNIFY_AUTO_CONFIRM_FLOOR (default 0.85,
+tuner-resolved as entity_dedup.kind_unify_floor). Below the floor, for an
+out-of-menu kind, or for an LLM-null unified_kind at ANY confidence,
+today's behavior is preserved exactly: the merge lands, the kind
+disagreement stands, and entity_audit files a merge_review.
 """
 
 from __future__ import annotations
@@ -113,17 +115,36 @@ def test_unified_kind_applied_at_high_confidence(conn, monkeypatch) -> None:
     assert resolve_entity_kind(conn, product) == "product"
 
 
+def test_unified_kind_applied_at_floor(conn, monkeypatch) -> None:
+    """Exactly at the lowered floor (0.85), a valid unified kind auto-applies —
+    pins the floor drop from the former 0.9."""
+    product = _seed_entity(conn, name="smoke.py", kind="product", n_mentions=3)
+    project = _seed_entity(conn, name="smoke.py", kind="project", n_mentions=1)
+    _stub_judge(monkeypatch, same=True, confidence=0.85, unified_kind="product")
+
+    stats = ed.EntityDeduplicator().run(conn, Settings())
+
+    assert stats["clusters_merged"] == 1
+    assert stats["kinds_unified"] == 1
+    assert resolve_entity_kind(conn, project) == "product"
+    assert resolve_entity_kind(conn, product) == "product"
+
+
 def test_unified_kind_not_applied_below_threshold(conn, monkeypatch) -> None:
     _seed_entity(conn, name="smoke.py", kind="product", n_mentions=3)
     project = _seed_entity(conn, name="smoke.py", kind="project", n_mentions=1)
-    # 0.85: above the merge floor (0.75), below KIND_UNIFY_CONFIDENCE (0.9).
-    _stub_judge(monkeypatch, same=True, confidence=0.85, unified_kind="product")
+    # 0.80: above the merge floor (0.75), below the unify floor (0.85).
+    _stub_judge(monkeypatch, same=True, confidence=0.80, unified_kind="product")
 
     stats = ed.EntityDeduplicator().run(conn, Settings())
 
     assert stats["clusters_merged"] == 1  # merge still lands
     assert stats["kinds_unified"] == 0  # but no kind assignment
     assert resolve_entity_kind(conn, project) == "project"  # unchanged
+
+    # A cross-kind merge with no unification → merge_review is filed.
+    EntityAuditWorker().run(conn, Settings())
+    assert _merge_review_count(conn) == 1
 
 
 def test_out_of_menu_unified_kind_discarded(conn, monkeypatch) -> None:
@@ -167,6 +188,65 @@ def test_merge_review_filed_for_non_unified_cluster(conn, monkeypatch) -> None:
     EntityAuditWorker().run(conn, Settings())
 
     assert _merge_review_count(conn) == 1
+
+
+def test_null_unified_kind_queues_review_at_any_confidence(conn, monkeypatch) -> None:
+    """The explicit non-goal, pinned: an LLM null unified_kind is the ambiguity
+    signal — even at 0.95 the merge lands but the kind is NOT auto-picked, and a
+    merge_review is filed for a human to answer."""
+    _seed_entity(conn, name="foo", kind="product", n_mentions=3)
+    project = _seed_entity(conn, name="foo", kind="project", n_mentions=1)
+    _stub_judge(monkeypatch, same=True, confidence=0.95, unified_kind=None)
+
+    stats = ed.EntityDeduplicator().run(conn, Settings())
+
+    assert stats["clusters_merged"] == 1
+    assert stats["kinds_unified"] == 0
+    assert resolve_entity_kind(conn, project) == "project"
+
+    EntityAuditWorker().run(conn, Settings())
+    assert _merge_review_count(conn) == 1
+
+
+def test_registry_override_raises_floor(conn, monkeypatch) -> None:
+    """A promoted entity_dedup.kind_unify_floor=0.9 is honored: a 0.87 merge
+    lands but no longer auto-unifies (below the raised floor)."""
+    from afair.substrate import tuner_state
+
+    tuner_state.write(
+        conn,
+        kind="promote",
+        worker="entity_dedup",
+        tunable="kind_unify_floor",
+        new_value=0.9,
+    )
+    assert ed._resolve_kind_unify_floor(conn) == 0.9
+
+    _seed_entity(conn, name="smoke.py", kind="product", n_mentions=3)
+    project = _seed_entity(conn, name="smoke.py", kind="project", n_mentions=1)
+    _stub_judge(monkeypatch, same=True, confidence=0.87, unified_kind="product")
+
+    stats = ed.EntityDeduplicator().run(conn, Settings())
+
+    assert stats["clusters_merged"] == 1
+    assert stats["kinds_unified"] == 0  # 0.87 < promoted floor 0.9
+    assert resolve_entity_kind(conn, project) == "project"
+
+
+def test_registry_error_falls_back_to_static_floor(conn, monkeypatch) -> None:
+    """A misbehaving registry never breaks the cycle — the static constant is
+    served (recall/dedup must never fail on a tunable lookup)."""
+    import afair.agents.tunable_registry as tr
+
+    class _Boom:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def get(self, *_a, **_k):
+            raise RuntimeError("registry down")
+
+    monkeypatch.setattr(tr, "TunableRegistry", _Boom)
+    assert ed._resolve_kind_unify_floor(conn) == ed.KIND_UNIFY_AUTO_CONFIRM_FLOOR
 
 
 def test_operator_kind_revert_not_overridden_next_cycle(conn, monkeypatch) -> None:

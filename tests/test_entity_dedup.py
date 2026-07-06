@@ -289,3 +289,45 @@ def test_idempotent_skips_already_merged_cluster(conn, monkeypatch) -> None:
     assert stats2["skipped_already_merged"] >= 1
     assert stats2["clusters_merged"] == 0
     assert counter["n"] == 1  # judge not called again on the merged cluster
+
+
+def test_unified_kind_guidance_present_in_prompt_and_schema() -> None:
+    """The referent-over-frequency guidance is in both the tool schema and the
+    system prompt (steers wrong-kind picks like an email → person at the
+    source). Candidate binding stays byte-identical — a non-shown kind is still
+    discarded."""
+    desc = ed._TOOL_SCHEMA["properties"]["unified_kind"]["description"]
+    for marker in ("email address", "changelog", "null", "referent"):
+        assert marker in desc
+    for marker in ("email address", "referent", "Null is the correct answer"):
+        assert marker in ed._SYSTEM_PROMPT
+
+
+def test_valid_unified_kind_still_discards_non_shown_kind() -> None:
+    """Candidate-set binding (I6 / Security L1) unchanged by the prompt fix."""
+    members = [
+        ed._Member(entity=_stub_member_entity("product"), mention_count=3, snippets=[]),
+        ed._Member(entity=_stub_member_entity("project"), mention_count=1, snippets=[]),
+    ]
+    assert (
+        ed._valid_unified_kind(ed._Verdict(same_entity=True, unified_kind="banana"), members)
+        is None
+    )
+    assert (
+        ed._valid_unified_kind(ed._Verdict(same_entity=True, unified_kind="product"), members)
+        == "product"
+    )
+
+
+def _stub_member_entity(kind: str):
+    from afair.substrate.entities import Entity
+
+    return Entity(
+        id=entity_id("thing", kind),
+        canonical_name="thing",
+        kind=kind,
+        created_at="2026-01-01T00:00:00+00:00",
+        created_by="test",
+        confidence=0.9,
+        source_event_id="ev",
+    )

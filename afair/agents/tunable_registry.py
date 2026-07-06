@@ -250,6 +250,20 @@ REGISTRY: tuple[TunableSpec, ...] = (
             "Served-confidence floor below which a derived edge is quarantined as proposed."
         ),
     ),
+    TunableSpec(
+        worker="entity_dedup",
+        tunable="kind_unify_floor",
+        kind="float",
+        default=0.85,
+        min_value=0.75,
+        max_value=0.95,
+        bounded_delta=0.05,
+        rationale=(
+            "Same-entity confidence at/above which a cross-kind dedup merge "
+            "auto-applies the LLM's unified kind instead of queueing a "
+            "merge_review. Evidence: merge_review confirm/reject outcomes."
+        ),
+    ),
     # NOTE: extractor prompt-variant pools (per kind: text / pdf / audio
     # / vision) are intentionally NOT in the initial whitelist. They
     # need a separate "prompt variant pool" plumbing (Phase C) before

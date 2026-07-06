@@ -76,13 +76,33 @@ MERGE_CONFIDENCE_THRESHOLD = 0.75
 """Merge only on an explicit same_entity=True at or above this confidence.
 Conservative on purpose — a false merge is harder to undo than a missed one."""
 
-KIND_UNIFY_CONFIDENCE = 0.9
-"""ADR-0003 Phase 2 (Slice 3): only at or above this confidence does a
-merge ALSO write kind-assignment rows unifying the cluster's kind. Set
-higher than the merge floor (0.75) on purpose — assigning a kind widens
-agent authority (it skips ``merge_review``), so it takes a stronger yes.
-Below this, the merge still lands, the kind disagreement stands, and
-``entity_audit`` files a ``merge_review`` exactly as before."""
+KIND_UNIFY_AUTO_CONFIRM_FLOOR = 0.85
+"""ADR-0002-style auto-confirm floor for the deduplicator's cross-kind
+unification. At or above it, a same-entity verdict WITH a valid
+unified_kind applies the kind assignment directly (no merge_review is
+filed — entity_audit compares CURRENT kinds, so an equalized cluster
+never surfaces). Below it, or when the LLM declined to pick a kind
+(unified_kind null ⇒ genuine ambiguity), the merge still lands and the
+review is filed exactly as before. Lowered from the former 0.9
+(KIND_UNIFY_CONFIDENCE): the operator's supervised drain showed the
+auto-picked kind confirmed in the clear majority of ≥0.85 cases, every
+assignment is one reversible row (ADR-0003 Phase 2), and the queue is
+reserved for the genuinely ambiguous. Resolved through the tuner
+registry at run time (entity_dedup.kind_unify_floor); this constant is
+the fallback."""
+
+
+def _resolve_kind_unify_floor(conn: sqlite3.Connection) -> float:
+    """Resolve the kind-unify auto-confirm floor through the tuner registry,
+    falling back to the static default (same pattern as
+    ``handlers._resolve_auto_confirm_floor``). The dedup cycle must never fail
+    on a tunable lookup, so any error serves the constant."""
+    from .tunable_registry import TunableRegistry
+
+    try:
+        return float(TunableRegistry(conn).get("entity_dedup", "kind_unify_floor"))
+    except Exception:
+        return KIND_UNIFY_AUTO_CONFIRM_FLOOR
 
 
 _TOOL_NAME = "judge_same_entity"
@@ -112,10 +132,16 @@ _TOOL_SCHEMA: dict[str, Any] = {
         "unified_kind": {
             "type": ["string", "null"],
             "description": (
-                "When same_entity is true, the single kind that best "
-                "describes the real-world thing. MUST be copied EXACTLY "
-                "from one of the 'kind' values shown in the records; use "
-                "null if unsure. The system discards any value not shown."
+                "When same_entity is true, the single kind that best describes "
+                "what the real-world thing IS — not the kind of the record with "
+                "the most mentions. Judge the referent, not the label frequency: "
+                "an email address or a social handle names a PERSON; a repository "
+                "file, doc, or changelog is a concept/documentation, not a "
+                "product; a bare domain usually names the organization, site, or "
+                "place it belongs to, not a 'product'. MUST be copied EXACTLY "
+                "from one of the 'kind' values shown in the records; if the "
+                "truly-right kind is NOT among the shown values, or you are "
+                "unsure, use null. The system discards any value not shown."
             ),
         },
     },
@@ -139,6 +165,14 @@ When same_entity is true, also set unified_kind to the single kind that
 best describes the real-world thing — copied EXACTLY from one of the
 'kind' values shown in the records (not a new word). Leave it null if
 you're unsure which shown kind is right.
+
+Judge the referent, not the label frequency: pick the kind of what the
+thing actually IS, not the kind of the record that happens to have the
+most mentions. An email address or a social handle names a person; a
+repository file, doc, or changelog is a concept/documentation, not a
+product; a bare domain usually names the organization, site, or place it
+belongs to, not a product. Null is the correct answer when none of the
+shown kinds fits — a human reviews those.
 
 Use the judge_same_entity tool exactly once.
 """
@@ -189,6 +223,7 @@ class EntityDeduplicator(ColdPathWorker):
         }
         model = settings.entity_dedup_model
         api_key = _api_key_for_model(model, settings)
+        kind_unify_floor = _resolve_kind_unify_floor(conn)
 
         for key in _candidate_keys(conn):
             if stats["clusters_examined"] >= self.max_clusters_per_cycle:
@@ -255,7 +290,9 @@ class EntityDeduplicator(ColdPathWorker):
                 )
                 continue
 
-            unified = _unify_cluster_kind(conn, members=members, verdict=verdict)
+            unified = _unify_cluster_kind(
+                conn, members=members, verdict=verdict, floor=kind_unify_floor
+            )
             merged = _merge_into_densest(conn, members=members, verdict=verdict)
             stats["clusters_merged"] += 1
             stats["entities_merged"] += merged
@@ -549,6 +586,12 @@ def _valid_unified_kind(verdict: _Verdict, members: list[_Member]) -> str | None
     injected kind that is not in ``{m.entity.kind}`` is discarded — the
     slug can only be one of the members' current registry-resolved kinds,
     so nothing invents a kind (I6).
+
+    Boundary (kept byte-identical on purpose): when the truly-correct kind
+    is not among the members' shown kinds, the intended outcome is None →
+    the merge still lands but the kind is left un-unified, so the review is
+    filed and the operator supplies the right ``to_kind`` on a reject
+    (``corrections._decide_merge_review`` handles that path).
     """
     if verdict.unified_kind is None:
         return None
@@ -557,22 +600,26 @@ def _valid_unified_kind(verdict: _Verdict, members: list[_Member]) -> str | None
 
 
 def _unify_cluster_kind(
-    conn: sqlite3.Connection, *, members: list[_Member], verdict: _Verdict
+    conn: sqlite3.Connection, *, members: list[_Member], verdict: _Verdict, floor: float
 ) -> int:
     """Write one ``assign_entity_kind`` row per member whose current kind
     differs from the confidently-agreed unified kind. Returns the count.
 
     ADR-0003 Phase 2 (Slice 3): a kind disagreement inside a same-entity
     cluster becomes a kind-assignment revision, not merge_review debt —
-    the property the decoupling was built for. Gated on
-    ``KIND_UNIFY_CONFIDENCE`` (higher than the merge floor): assigning a
-    kind widens agent authority, so it takes a stronger yes. Each row is
-    fully attributed (author, reason, confidence) and reversed by one
-    newer assignment (an operator retype always lands later → latest-row-
-    wins, I7).
+    the property the decoupling was built for. Gated on the auto-confirm
+    ``floor`` (higher than the merge floor): assigning a kind widens agent
+    authority, so it takes a stronger yes. Each row is fully attributed
+    (author, reason, confidence) and reversed by one newer assignment (an
+    operator retype always lands later → latest-row-wins, I7).
+
+    Explicit non-goal: when ``unified_kind`` is null/invalid at ANY
+    confidence, do NOT fall back to the densest member's kind — an LLM null
+    IS the ambiguity signal, and the review queue is the correct surface
+    for it. Only a valid, above-floor pick auto-applies.
     """
     unified = _valid_unified_kind(verdict, members)
-    if unified is None or verdict.confidence < KIND_UNIFY_CONFIDENCE:
+    if unified is None or verdict.confidence < floor:
         return 0
     assigned = 0
     for m in members:
