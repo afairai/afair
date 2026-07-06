@@ -154,18 +154,28 @@ def write_failed_interpretation(
     # the other six with a pipeline timeline that ends at
     # ``extraction.started``. That gap made the Phase 0.5 ExpectationChecker
     # miscount every one of them as a silent ``stuck_extraction`` for a week.
-    # Centralizing the record removes the miscount and the duplicate. Emit is
-    # best-effort (``pe.record`` swallows its own failures): the failed
-    # interpretation row above is the durable record; tracing is advisory.
-    pe.record(
-        conn,
-        event_id=event.id,
-        event_hash=event.content_hash,
-        stage=pe.STAGE_EXTRACTION_FAILED,
-        status=pe.STATUS_FAILED,
-        producer=produced_by,
-        detail=f"{error_type}: {error_message}",
-    )
+    # Centralizing the record removes the miscount and the duplicate.
+    #
+    # Only record when THIS attempt actually stored a failed row.
+    # ``write_interpretation`` is idempotent: a failed re-attempt over an event
+    # that already has a SUCCESS interpretation at this (event, version,
+    # producer) dedups to the existing success and returns it unchanged. In that
+    # case recording ``extraction.failed`` would append a misleading terminal
+    # row AFTER ``extraction.completed``. The returned interpretation's status
+    # discriminates the two: ``failed`` means a real failed row was written
+    # (fresh or a #retryN), ``success`` means the dedup-to-existing-success
+    # no-op. Emit is best-effort (``pe.record`` swallows its own failures): the
+    # failed interpretation row is the durable record; tracing is advisory.
+    if interpretation.extraction.get("status") == "failed":
+        pe.record(
+            conn,
+            event_id=event.id,
+            event_hash=event.content_hash,
+            stage=pe.STAGE_EXTRACTION_FAILED,
+            status=pe.STATUS_FAILED,
+            producer=produced_by,
+            detail=f"{error_type}: {error_message}",
+        )
     return interpretation
 
 

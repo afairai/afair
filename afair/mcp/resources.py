@@ -334,7 +334,7 @@ def _read_open_threads(conn: sqlite3.Connection, *, limit: int) -> list[str]:
         """
         SELECT payload FROM events
         WHERE kind = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (CONSOLIDATION_KIND,),

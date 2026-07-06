@@ -302,6 +302,46 @@ def _insert_backdated_written(ctx: ServerContext, event: Event, *, hours: float)
         )
 
 
+def test_failed_reattempt_over_existing_success_records_no_terminal_stage(
+    ctx: ServerContext,
+) -> None:
+    """A failed extraction attempt over an event that ALREADY has a success
+    interpretation (same version + producer) dedups to that success — it writes
+    no new failed row. The centralized terminal-stage record must be guarded on
+    the write actually being a failure, or it would append a misleading
+    extraction.failed AFTER extraction.completed."""
+    from afair.agents.interpretation import write_failed_interpretation, write_interpretation
+    from afair.agents.prompts import EXTRACTOR_SCHEMA_VERSION
+
+    event = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": "already extracted once"},
+    )
+    producer = "extractor:anthropic/claude-haiku-4-5"
+    write_interpretation(
+        ctx.db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by=producer,
+        extraction={"status": "success", "best_guess_kind": "note", "summary": "ok"},
+    )
+
+    result = write_failed_interpretation(
+        ctx.db,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by=producer,
+        error_type="llm_timeout",
+        error_message="a late, stray failure",
+    )
+    # Deduped to the existing success → no failed row was written...
+    assert result.extraction["status"] == "success"
+    # ...and no misleading terminal failed stage was recorded.
+    assert _failed_stage_rows(ctx, event.id) == []
+
+
 def test_traced_failure_not_counted_stuck_by_checker(
     ctx: ServerContext, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
