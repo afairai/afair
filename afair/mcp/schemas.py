@@ -649,14 +649,26 @@ def _stringify(value: Any) -> str:
             return "<unrenderable value>"
 
 
+_OBSERVE_PRESERVED_KEYS: frozenset[str] = frozenset(
+    {f"{field}_full" for field in _OBSERVE_FIELD_CAPS}
+    | {f"{field}_full_client" for field in _OBSERVE_FIELD_CAPS}
+)
+"""EXACT preservation keys ``_truncate_long_fields`` writes to losslessly keep
+an over-long ``action``/``subject``/``result``: exactly ``action_full``,
+``subject_full``, ``result_full`` and their ``_full_client`` variants. An exact
+allowlist (not a ``_full`` suffix wildcard) — a suffix match let ANY
+client-supplied extra ending in ``_full`` (e.g. ``diff_full``) skip both the
+container count and the byte cap, so a 10MB ``diff_full`` persisted verbatim."""
+
+
 def _is_preserved_key(key: str) -> bool:
-    """True for the ``<field>_full`` / ``<field>_full_client`` keys that
-    ``_truncate_long_fields`` writes to losslessly preserve an over-long
-    ``action``/``subject``/``result``. These live in ``__pydantic_extra__`` but
-    are NOT free-form extras — they mirror already-accepted primary-field
-    content (bounded by the same request), so the extras size/nesting bounding
-    must leave them intact, or truncating them would defeat the preservation."""
-    return key.endswith(("_full", "_full_client"))
+    """True only for the exact ``_OBSERVE_PRESERVED_KEYS``. These live in
+    ``__pydantic_extra__`` but are NOT free-form extras — they mirror an
+    already-accepted primary field, so the extras size/nesting bounding leaves
+    them intact (or truncating them would defeat the preservation). They are
+    still capped at ``MAX_REMEMBER_BYTES`` in ``_cap_preserved_extras`` so an
+    observe can't exceed remember's ceiling via a ``_full`` field."""
+    return key in _OBSERVE_PRESERVED_KEYS
 
 
 def _count_containers(obj: Any, threshold: int) -> int:
@@ -802,8 +814,13 @@ class ObserveEvent(BaseModel):
         if not extras:
             return self
 
-        # Bound only the genuinely free-form extras; the ``_full`` preservation
-        # keys are exempt (see _is_preserved_key).
+        # Preservation keys are exempt from the free-extras bounding, but still
+        # capped at MAX_REMEMBER_BYTES so an observe can't exceed remember's
+        # ceiling via a *_full field.
+        self._cap_preserved_extras()
+
+        # Bound only the genuinely free-form extras; the exact ``_full``
+        # preservation keys are exempt (see _is_preserved_key).
         free = {k: v for k, v in extras.items() if not _is_preserved_key(k)}
         if not free:
             return self
@@ -821,11 +838,28 @@ class ObserveEvent(BaseModel):
             self._flatten_extras()
         return self
 
+    def _cap_preserved_extras(self) -> None:
+        """Cap each exact ``_full`` preservation value at ``MAX_REMEMBER_BYTES``.
+
+        The preservation keys are exempt from the free-extras size/nesting
+        bounding (they mirror a primary field losslessly), but they must not let
+        an ``observe`` smuggle content past remember's 10MB ceiling. An 80KB
+        ``result_full`` passes untouched; a 10MB+ one is truncated to the cap and
+        ``extras_truncated`` is marked."""
+        extras = self.__pydantic_extra__
+        if extras is None:
+            return
+        for key in _OBSERVE_PRESERVED_KEYS:
+            value = extras.get(key)
+            if isinstance(value, str) and len(value) > MAX_REMEMBER_BYTES:
+                extras[key] = value[:MAX_REMEMBER_BYTES]
+                extras["extras_truncated"] = True
+
     def _flatten_extras(self) -> None:
         """Replace the free-form extras with a bounded text rendering — the
         never-reject fallback for a structure too nested/large to store
-        verbatim. Preservation (``_full``) keys are kept; best-effort render so
-        nothing is dropped silently."""
+        verbatim. Exact ``_full`` preservation keys are kept; best-effort render
+        so nothing is dropped silently."""
         extras = self.__pydantic_extra__
         if extras is None:
             return
@@ -886,7 +920,12 @@ def ensure_observe_event(v: Any) -> ObserveEvent:
         # write-first coercions + extras bounding, persist it under a default
         # action with the raw payload serialized into result rather than
         # dropping the observation at the signature layer.
-        raw = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+        try:
+            raw = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+        except (ValueError, TypeError, RecursionError):
+            # Even the fallback serialization can fail (a self-referential or
+            # ultra-deep object); never let that turn into a dropped write.
+            raw = "<unserializable observe payload>"
         return _OBSERVE_EVENT_ADAPTER.validate_python({"action": "observed", "result": raw})
 
 

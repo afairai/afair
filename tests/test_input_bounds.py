@@ -198,6 +198,34 @@ def test_observe_nonstring_subject_coerced_not_rejected() -> None:
     assert e.result == '{"code":200}'
 
 
+def test_observe_arbitrary_full_suffixed_extra_is_still_bounded() -> None:
+    """REGRESSION (Fable review): the preservation exemption is an EXACT-key
+    allowlist, not a ``_full`` suffix wildcard. A client-supplied extra that
+    merely ENDS in ``_full`` (e.g. ``diff_full``) must go through the normal
+    free-extras bounding — it is not a real preservation key."""
+    e = ObserveEvent.model_validate({"action": "test", "diff_full": "x" * 10_485_760})
+    extra = e.__pydantic_extra__
+    assert extra is not None
+    assert extra["extras_truncated"] is True
+    # 10MB was truncated to the free-extra per-value ceiling, not stored verbatim.
+    assert len(extra["diff_full"]) == schemas.MAX_OBSERVE_EXTRA_VALUE_CHARS
+
+
+def test_observe_legit_preserved_value_capped_at_remember_ceiling() -> None:
+    """A legitimate ``result_full`` under MAX_REMEMBER_BYTES passes fully; one
+    over it is capped so an observe can't exceed remember's 10MB ceiling via a
+    ``_full`` field."""
+    # Under the ceiling → untouched.
+    small = "r" * (schemas.MAX_OBSERVE_RESULT_CHARS + 5)
+    e = ObserveEvent(action="ok", result=small)
+    assert e.result_full == small  # type: ignore[attr-defined]
+
+    # A directly-supplied result_full over MAX_REMEMBER_BYTES is capped.
+    huge = "r" * (schemas.MAX_REMEMBER_BYTES + 1000)
+    e2 = ObserveEvent.model_validate({"action": "ok", "result_full": huge})
+    assert len(e2.result_full) == schemas.MAX_REMEMBER_BYTES  # type: ignore[attr-defined]
+
+
 def test_ensure_observe_event_never_raises_on_hostile_inputs() -> None:
     """The write-first contract: ensure_observe_event NEVER raises on shape.
     Every hostile input returns a persistable ObserveEvent."""
