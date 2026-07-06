@@ -10,6 +10,25 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.13](https://github.com/afairai/afair/compare/v0.1.12...v0.1.13) (2026-07-06)
+
+
+### Features
+
+* **agents:** worker watermarks to stop cursorless re-scans (P2a) ([19da60d](https://github.com/afairai/afair/commit/19da60da4015a1175b0f6b360c2630fc6257d2dd))
+* **substrate:** ADR-0005 — prune telemetry, not memory ([2d64a96](https://github.com/afairai/afair/commit/2d64a963d9a15a1cb617b7eb517e2aa350a11715))
+
+
+### Bug Fixes
+
+* **watermarks:** lag the frontier so concurrent pre-minted ids can't be skipped ([9a3c5c2](https://github.com/afairai/afair/commit/9a3c5c26aa00deee0300476a2ad2bd375a3950dc))
+
+
+### Performance Improvements
+
+* **mcp:** cap anyio thread limiter to bound page-cache memory (P2a) ([ea6e09b](https://github.com/afairai/afair/commit/ea6e09b5bfcc16a9f687668ccde4cd1f8ece4e63))
+* **mcp:** UNION entity-match rewrite + session-start salient index (P2a) ([d9cd5d9](https://github.com/afairai/afair/commit/d9cd5d91e9ec11babf922d32920eabc2933ae311))
+
 ## [0.1.12](https://github.com/afairai/afair/compare/v0.1.11...v0.1.12) (2026-07-06)
 
 
