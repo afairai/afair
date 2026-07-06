@@ -11,6 +11,7 @@ import pytest
 from afair.agents.binder import BINDER_PRODUCED_BY
 from afair.agents.conflict_resolver import (
     ConflictResolver,
+    read_conflicts_batch,
 )
 from afair.agents.consolidator import (
     CONSOLIDATION_KIND,
@@ -279,6 +280,36 @@ def test_conflict_resolver_judges_bound_pair_and_writes_verdict(
     assert data["verdict"] == "conflicts"
     assert data["event_b_hash"] == b.content_hash
     assert "verdict_taxonomy_version" in data
+
+
+def test_conflict_flag_points_at_the_counterpart_event_id(
+    db, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3c: the symmetric flag's with_event_id must point at the OTHER side of
+    the pair. Recall on A flags B's id; recall on B flags A's id. Before the fix
+    with_event_id was hard-wired to event_b_id, so a flag surfaced on anchor B
+    pointed back at B itself."""
+    a, b = _make_bound_pair(db)
+
+    def fake_call(**_: Any) -> LLMResult:
+        return LLMResult(
+            data={"verdict": "conflicts", "reason": "clash", "confidence": 0.9},
+            model="mock",
+            raw="",
+        )
+
+    monkeypatch.setattr("afair.agents.conflict_resolver.call_tool", fake_call)
+    ConflictResolver().run(db, settings_local)
+
+    flags = read_conflicts_batch(db, [a.content_hash, b.content_hash])
+
+    a_flag = flags[a.content_hash][0]
+    assert a_flag["with_event_id"] == b.id
+    assert a_flag["with_content_hash"] == b.content_hash
+
+    b_flag = flags[b.content_hash][0]
+    assert b_flag["with_event_id"] == a.id  # was b.id before the fix
+    assert b_flag["with_content_hash"] == a.content_hash
 
 
 def test_conflict_resolver_normalizes_legacy_verdict_and_enforces_floor(

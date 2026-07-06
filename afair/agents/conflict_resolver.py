@@ -115,13 +115,16 @@ def read_conflicts_batch(
     result: dict[str, list[dict[str, Any]]] = {}
 
     def _flag_for_anchor(data: dict[str, Any], anchor_hash: str) -> dict[str, Any]:
-        other_hash = (
-            data.get("event_b_hash")
-            if data.get("event_a_hash") == anchor_hash
-            else data.get("event_a_hash")
-        )
+        # ``with_*`` must point at the OTHER side of the pair from the anchor's
+        # perspective. Both the hash AND the id have to flip together — the id
+        # was previously hard-wired to event_b_id, so a flag surfaced on anchor
+        # B pointed with_event_id back at B itself. Legacy rows lack event_a_id;
+        # they fall back to "" (the counterpart is still fetchable via the hash).
+        anchor_is_a = data.get("event_a_hash") == anchor_hash
+        other_hash = data.get("event_b_hash") if anchor_is_a else data.get("event_a_hash")
+        other_id = data.get("event_b_id", "") if anchor_is_a else data.get("event_a_id", "")
         return {
-            "with_event_id": data.get("event_b_id", ""),
+            "with_event_id": other_id or "",
             "with_content_hash": other_hash or "",
             "verdict": data.get("verdict", "unclear"),
             "reason": data.get("reason", ""),
@@ -228,6 +231,10 @@ class ConflictPair(BaseModel):
     verdict: str  # one of verdicts.VERDICT_ENUM (see afair/agents/verdicts.py)
     reason: str
     confidence: float
+    event_a_id: str = ""
+    """Id of the anchor (A) side. Defaults to '' so legacy verdict rows written
+    before this field existed still deserialize; when the recall anchor is B,
+    the flag needs A's id and falls back to '' for those legacy rows."""
 
 
 class ConflictResolver(ColdPathWorker):
@@ -392,6 +399,7 @@ def _judge_pair(*, event_a: Event, event_b: Event, model: str, api_key: str | No
     return ConflictPair(
         event_a_hash=event_a.content_hash,
         event_b_hash=event_b.content_hash,
+        event_a_id=event_a.id,
         event_b_id=event_b.id,
         verdict=verdict,
         reason=str(data.get("reason", "")),
