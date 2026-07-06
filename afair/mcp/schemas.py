@@ -596,6 +596,24 @@ MAX_OBSERVE_SUBJECT_CHARS = 1_000
 MAX_OBSERVE_RESULT_CHARS = 2_000
 MAX_OBSERVE_EXTRAS_BYTES = 64 * 1024
 
+MAX_OBSERVE_EXTRAS_CONTAINERS = 200
+"""Maximum dict/list containers an ``observe`` extras structure may hold
+before it is flattened to a text rendering. A structure with more nesting
+than this is either adversarial or an accidental serialization; instead of
+REJECTING it (which silently drops the whole observation) we render it to
+``extras_text`` and mark ``extras_truncated``. Counted on the PARSED
+structure with an iterative walk, so a pathologically deep bomb can never
+RecursionError the validator before we react."""
+
+MAX_OBSERVE_EXTRA_VALUE_CHARS = 48 * 1024
+"""Per-value truncation ceiling when shrinking oversized ``observe`` extras.
+An over-64KB extras dict has its largest string values cut to this length
+(largest-first) rather than being rejected. The trade is deliberate: a
+client that stuffs an 80KB blob into an extra persists a ~48KB prefix +
+``extras_truncated: True`` instead of losing the entire write. Kept below
+``MAX_OBSERVE_EXTRAS_BYTES`` so one truncated value leaves headroom for the
+remaining keys."""
+
 _OBSERVE_FIELD_CAPS = {
     "action": MAX_OBSERVE_ACTION_CHARS,
     "subject": MAX_OBSERVE_SUBJECT_CHARS,
@@ -604,9 +622,79 @@ _OBSERVE_FIELD_CAPS = {
 """Per-field character caps for the write-first truncation in
 ``ObserveEvent._accept_first``. Over-long values are truncated to the cap
 and the full original preserved under ``<field>_full`` rather than rejected."""
-"""Caps for observe() inputs. ``extras`` is the free-form open dict; the
-size cap and nesting check below stop deeply-nested JSON bombs and
-extras floods that would inflate FTS index / SQLite payload row."""
+"""Caps for observe() inputs. ``extras`` is the free-form open dict; it is
+truncated/flattened rather than rejected (see ``_bound_extras``) so an
+oversized or deeply-nested extras never drops the observation, while still
+bounding what reaches the FTS index / SQLite payload row."""
+
+
+def _stringify(value: Any) -> str:
+    """Coerce a non-string value to a stable string for storage, never raising.
+
+    Used to coerce a non-string ``subject``/``result`` (e.g. an int or a
+    nested object a client packed into the field) before the length check, so
+    pydantic's ``str | None`` constraint can't reject the whole write. Falls
+    back through ``str()`` and finally a literal marker so even a
+    self-referential or ultra-deep value can't RecursionError the validator."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        )
+    except (ValueError, TypeError, RecursionError):
+        try:
+            return str(value)
+        except Exception:
+            return "<unrenderable value>"
+
+
+def _is_preserved_key(key: str) -> bool:
+    """True for the ``<field>_full`` / ``<field>_full_client`` keys that
+    ``_truncate_long_fields`` writes to losslessly preserve an over-long
+    ``action``/``subject``/``result``. These live in ``__pydantic_extra__`` but
+    are NOT free-form extras — they mirror already-accepted primary-field
+    content (bounded by the same request), so the extras size/nesting bounding
+    must leave them intact, or truncating them would defeat the preservation."""
+    return key.endswith(("_full", "_full_client"))
+
+
+def _count_containers(obj: Any, threshold: int) -> int:
+    """Count dict/list containers in a parsed structure, iteratively.
+
+    Explicit stack (no recursion) so a deeply-nested bomb cannot RecursionError
+    before the caller can react, and early-exits once the count passes
+    ``threshold`` (returning ``threshold + 1``) so a huge-but-shallow structure
+    is cheap and a deep one is bounded."""
+    count = 0
+    stack: list[Any] = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            count += 1
+            if count > threshold:
+                return count
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            count += 1
+            if count > threshold:
+                return count
+            stack.extend(current)
+    return count
+
+
+def _safe_render_extras(extras: dict[str, Any]) -> str:
+    """Best-effort, recursion-safe text rendering of an extras dict, bounded to
+    ``MAX_OBSERVE_EXTRA_VALUE_CHARS``. Never raises — a structure too deep to
+    serialize falls back to a marker rather than dropping the write."""
+    try:
+        rendered = _canon_json(extras)
+    except (ValueError, TypeError, RecursionError):
+        try:
+            rendered = str(extras)
+        except Exception:
+            rendered = "<unrenderable extras>"
+    return rendered[:MAX_OBSERVE_EXTRA_VALUE_CHARS]
 
 
 class ObserveEvent(BaseModel):
@@ -667,9 +755,17 @@ class ObserveEvent(BaseModel):
     def _truncate_long_fields(data: dict[str, Any]) -> dict[str, Any]:
         """Truncate over-long ``action`` / ``subject`` / ``result`` to their
         caps, preserving the full original under ``<field>_full`` so the
-        Field constraints never fire on real input and no data is lost."""
+        Field constraints never fire on real input and no data is lost.
+
+        A non-string, non-None ``subject``/``result`` (an int, or a nested
+        object a client packed into the field) is coerced to a string first,
+        so pydantic's ``str | None`` constraint can't reject the whole write.
+        (``action`` is already coerced to a string in ``_accept_first``.)"""
         for field, cap in _OBSERVE_FIELD_CAPS.items():
             value = data.get(field)
+            if value is not None and not isinstance(value, str):
+                value = _stringify(value)
+                data[field] = value
             if isinstance(value, str) and len(value) > cap:
                 full_key = f"{field}_full"
                 # Don't clobber a caller-supplied ``<field>_full``: keep theirs
@@ -682,27 +778,88 @@ class ObserveEvent(BaseModel):
 
     @model_validator(mode="after")
     def _bound_extras(self) -> ObserveEvent:
-        """Cap the size + nesting of the free-form extras dict.
+        """Bound the size + nesting of the free-form extras dict WITHOUT ever
+        rejecting the write (write-first intake, same principle as remember's
+        content coercion — I1-additive: a strict superset of what used to be
+        accepted).
 
-        Pydantic stores extras (the keys beyond action/subject/result)
-        in ``__pydantic_extra__``. Without a cap an adversarial client
-        could send a 12MB nested-bomb payload that DOSes the FTS index
-        and inflates every recall hit's row deserialization cost.
+        Pydantic stores extras (the keys beyond action/subject/result) in
+        ``__pydantic_extra__``. An unbounded extras dict would inflate the FTS
+        index and every recall hit's row deserialization cost, so:
+
+        - too many containers (nesting/serialization bomb) → flatten the whole
+          extras to ``{extras_text, extras_truncated: True}``;
+        - otherwise over the byte cap → truncate the largest string values to
+          ``MAX_OBSERVE_EXTRA_VALUE_CHARS`` (largest-first) and mark
+          ``extras_truncated``; if still over (non-string bulk), flatten.
+
+        Container-counting runs on the parsed structure BEFORE any serialize,
+        so a >1000-deep bomb can't ``RecursionError`` ``_canon_json`` first.
+        The previous version RAISED on either condition, which silently dropped
+        the observation at the signature layer — the exact failure this fixes.
         """
         extras = self.__pydantic_extra__
         if not extras:
             return self
-        serialized = _canon_json(extras)
-        if len(serialized) > MAX_OBSERVE_EXTRAS_BYTES:
-            msg = f"observe extras must be <= {MAX_OBSERVE_EXTRAS_BYTES} bytes serialized"
-            raise ValueError(msg)
-        # Cheap nesting check — too many braces/brackets means the dict
-        # is either huge or arbitrarily nested. Block before the recursion
-        # hits Python's RecursionError on deserialize.
-        if serialized.count("{") + serialized.count("[") > 200:
-            msg = "observe extras exceed nesting threshold (200 containers)"
-            raise ValueError(msg)
+
+        # Bound only the genuinely free-form extras; the ``_full`` preservation
+        # keys are exempt (see _is_preserved_key).
+        free = {k: v for k, v in extras.items() if not _is_preserved_key(k)}
+        if not free:
+            return self
+
+        if _count_containers(free, MAX_OBSERVE_EXTRAS_CONTAINERS) > MAX_OBSERVE_EXTRAS_CONTAINERS:
+            self._flatten_extras()
+            return self
+
+        if len(_canon_json(free)) <= MAX_OBSERVE_EXTRAS_BYTES:
+            return self
+
+        self._shrink_extras()
+        free = {k: v for k, v in extras.items() if not _is_preserved_key(k)}
+        if len(_canon_json(free)) > MAX_OBSERVE_EXTRAS_BYTES:
+            self._flatten_extras()
         return self
+
+    def _flatten_extras(self) -> None:
+        """Replace the free-form extras with a bounded text rendering — the
+        never-reject fallback for a structure too nested/large to store
+        verbatim. Preservation (``_full``) keys are kept; best-effort render so
+        nothing is dropped silently."""
+        extras = self.__pydantic_extra__
+        if extras is None:
+            return
+        free = {k: v for k, v in extras.items() if not _is_preserved_key(k)}
+        text = _safe_render_extras(free)
+        for key in [k for k in extras if not _is_preserved_key(k)]:
+            del extras[key]
+        extras["extras_text"] = text
+        extras["extras_truncated"] = True
+
+    def _shrink_extras(self) -> None:
+        """Truncate the largest free-form string values to
+        ``MAX_OBSERVE_EXTRA_VALUE_CHARS`` (largest-first) until the serialized
+        free extras fit or no oversized string remains. Marks
+        ``extras_truncated`` when anything was cut. Preservation keys are
+        never touched."""
+        extras = self.__pydantic_extra__
+        if extras is None:
+            return
+        truncated_any = False
+        string_items = sorted(
+            ((k, v) for k, v in extras.items() if isinstance(v, str) and not _is_preserved_key(k)),
+            key=lambda kv: len(kv[1]),
+            reverse=True,
+        )
+        for key, value in string_items:
+            if len(value) > MAX_OBSERVE_EXTRA_VALUE_CHARS:
+                extras[key] = value[:MAX_OBSERVE_EXTRA_VALUE_CHARS]
+                truncated_any = True
+            free = {k: v for k, v in extras.items() if not _is_preserved_key(k)}
+            if len(_canon_json(free)) <= MAX_OBSERVE_EXTRAS_BYTES:
+                break
+        if truncated_any:
+            extras["extras_truncated"] = True
 
 
 # Module-level adapter for the observe event. Everything routes through the
@@ -721,7 +878,16 @@ def ensure_observe_event(v: Any) -> ObserveEvent:
     """
     if isinstance(v, ObserveEvent):
         return v
-    return _OBSERVE_EVENT_ADAPTER.validate_python(v)
+    try:
+        return _OBSERVE_EVENT_ADAPTER.validate_python(v)
+    except ValidationError:
+        # Last-resort never-drop fallback (mirrors ensure_remember_content):
+        # if some pathological input still fails the model after the
+        # write-first coercions + extras bounding, persist it under a default
+        # action with the raw payload serialized into result rather than
+        # dropping the observation at the signature layer.
+        raw = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+        return _OBSERVE_EVENT_ADAPTER.validate_python({"action": "observed", "result": raw})
 
 
 def _coerce_observe_event(v: Any, _handler: Any) -> ObserveEvent:
