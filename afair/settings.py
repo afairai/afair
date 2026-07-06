@@ -298,6 +298,19 @@ class Settings(BaseSettings):
     # background LLM calls to run unattended.
     cold_path_enabled: bool = True
 
+    # ── Telemetry retention (ADR-0005)
+    telemetry_retention_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "The Pruner ages pipeline_events + observability_snapshots rows out "
+            "past this many days. Those tables are OPERATIONAL TELEMETRY (the "
+            "pipeline's flight recorder), not user memory — I2 protects the "
+            "memory substrate, not the instrumentation (ADR-0005). Set high to "
+            "keep a long diagnostic window; the tables carry no recalled data."
+        ),
+    )
+
     # Phase 4 Track 2 — per-hit surprise score uses entity-novelty against
     # the user's "recent context window": the last N events' canonical
     # entities. A hit with all-familiar entities scores 0.0, all-novel

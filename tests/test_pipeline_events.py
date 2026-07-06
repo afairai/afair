@@ -7,7 +7,6 @@ extract fires.
 
 from __future__ import annotations
 
-import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,6 +15,7 @@ from afair.substrate import open_db
 from afair.substrate import pipeline_events as pe
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Iterator
     from pathlib import Path
 
@@ -58,14 +58,22 @@ def test_record_caps_detail_length(db: sqlite3.Connection) -> None:
     assert len(row["detail"]) <= 500
 
 
-def test_pipeline_events_are_append_only(db: sqlite3.Connection) -> None:
-    """The I2 triggers reject UPDATE + DELETE — tracing is immutable
-    like the substrate it traces."""
+def test_pipeline_events_are_prunable_telemetry(db: sqlite3.Connection) -> None:
+    """ADR-0005: pipeline_events is OPERATIONAL TELEMETRY, not user memory —
+    the append-only I2 triggers were retired so the Pruner can age it out.
+    A DELETE (and UPDATE) must now SUCCEED, unlike the memory substrate."""
     pe.record(db, event_id="01EVENT", stage=pe.STAGE_EVENT_WRITTEN)
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-        db.execute("UPDATE pipeline_events SET status = 'fake'")
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-        db.execute("DELETE FROM pipeline_events")
+    # No append-only trigger exists on either telemetry table.
+    triggers = db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND tbl_name IN ('pipeline_events', 'observability_snapshots')"
+    ).fetchall()
+    assert triggers == []
+    # DELETE + UPDATE succeed (no ABORT).
+    db.execute("UPDATE pipeline_events SET status = 'fake'")
+    db.execute("DELETE FROM pipeline_events")
+    db.commit()
+    assert db.execute("SELECT COUNT(*) AS n FROM pipeline_events").fetchone()["n"] == 0
 
 
 def test_record_safe_swallows_failures() -> None:

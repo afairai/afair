@@ -15,7 +15,6 @@ pipeline records them.
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +34,7 @@ from afair.substrate import observability, open_db, write_event
 from afair.substrate import pipeline_events as pe
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Iterator
     from pathlib import Path
 
@@ -265,14 +265,14 @@ def test_snapshot_counts_only(db: sqlite3.Connection) -> None:
     observability.write_snapshot(db, producer="test", counters={"a": 1, "b": None})
 
 
-def test_snapshots_append_only(db: sqlite3.Connection) -> None:
-    """I2: the snapshot table has the same no-UPDATE/no-DELETE triggers as
-    pipeline_events."""
+def test_snapshots_are_prunable_telemetry(db: sqlite3.Connection) -> None:
+    """ADR-0005: observability_snapshots is operational telemetry, not memory —
+    the append-only triggers were retired so the Pruner can age it out. A
+    DELETE now succeeds (the writer still only ever INSERTs)."""
     observability.write_snapshot(db, producer="test", counters={"a": 1})
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-        db.execute("UPDATE observability_snapshots SET producer = 'x'")
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-        db.execute("DELETE FROM observability_snapshots")
+    db.execute("DELETE FROM observability_snapshots")
+    db.commit()
+    assert db.execute("SELECT COUNT(*) AS n FROM observability_snapshots").fetchone()["n"] == 0
 
 
 # ── WARN log hygiene ─────────────────────────────────────────────────────────

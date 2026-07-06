@@ -15,6 +15,13 @@ Scope (v0):
     deleted. Safe because a decided edge's durable never-re-review guard
     is the append-only ``edge_reviews`` substrate table, not the queue
     row (proposed_corrections is non-substrate, no I2 triggers).
+  - Telemetry retention (ADR-0005): ``pipeline_events`` +
+    ``observability_snapshots`` rows older than
+    ``settings.telemetry_retention_days`` are deleted. Those tables are
+    OPERATIONAL TELEMETRY (the pipeline's flight recorder), not user
+    memory — I2 protects the memory substrate, not the instrumentation, so
+    the triggers were retired (schema.py) and this deletion is I2-honest,
+    the same footing as the OAuth-row GC.
 
 What Pruner MUST NEVER touch:
   - The events table — substrate is immutable per I2.
@@ -64,6 +71,17 @@ graph every cycle and would otherwise re-file the identical closed question).
 proposed_corrections is non-substrate (no I2 triggers) so this deletion is
 I2-honest — same footing as the OAuth-row GC above."""
 
+TELEMETRY_TABLES = ("pipeline_events", "observability_snapshots")
+"""Operational-telemetry tables the Pruner ages out (ADR-0005). Both are the
+pipeline's flight recorder, never recalled; their append-only triggers were
+retired in schema.py so they can be pruned. Retention window comes from
+``settings.telemetry_retention_days``."""
+
+TELEMETRY_PRUNE_BATCH = 5000
+"""Rows deleted per DELETE statement, so a first prune on a multi-year vault
+(~1M rows) never holds one giant write lock. Looped until nothing older than
+the cutoff remains."""
+
 
 class Pruner(ColdPathWorker):
     """OAuth + stale-failure pruning. No LLM; pure SQL."""
@@ -77,6 +95,7 @@ class Pruner(ColdPathWorker):
             "oauth_login_state_deleted": 0,
             "stale_failed_extractions_deleted": 0,
             "decided_edge_reviews_deleted": 0,
+            "telemetry_rows_deleted": 0,
         }
         now_iso = datetime.now(UTC).isoformat()
 
@@ -104,12 +123,54 @@ class Pruner(ColdPathWorker):
             )
         stats["decided_edge_reviews_deleted"] = cursor.rowcount or 0
 
-        # Settings is unused for now; param retained for the Worker contract.
-        _ = settings
+        # Telemetry retention (ADR-0005). Age pipeline_events +
+        # observability_snapshots out past the configured window. Both are
+        # operational telemetry, not user memory — their I2 triggers were
+        # retired, so this deletion is I2-honest.
+        telemetry_cutoff = (
+            datetime.now(UTC) - timedelta(days=settings.telemetry_retention_days)
+        ).isoformat()
+        stats["telemetry_rows_deleted"] = _prune_telemetry(conn, telemetry_cutoff)
+        if stats["telemetry_rows_deleted"]:
+            log.info("pruner.telemetry_pruned", rows=stats["telemetry_rows_deleted"])
+
         # time module imported but only used implicitly — keep the import
         # visible to readers since the worker conceptually "uses time".
         _ = time
         return stats
+
+
+def _prune_telemetry(conn: sqlite3.Connection, cutoff_iso: str) -> int:
+    """Delete telemetry rows recorded before ``cutoff_iso`` from both
+    flight-recorder tables, batched so a first prune on a large vault never
+    holds one giant write lock.
+
+    Returns the total rows deleted across both tables. Bounded loop: each
+    ``DELETE ... LIMIT`` chunk commits before the next; the loop ends when a
+    table has no rows older than the cutoff left. (SQLite must be built with
+    ``ENABLE_UPDATE_DELETE_LIMIT`` for ``DELETE ... LIMIT``; the amalgamation
+    afair ships is, and a subquery form is used to stay portable.)
+    """
+    total = 0
+    for table in TELEMETRY_TABLES:
+        while True:
+            with conn:
+                cursor = conn.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE id IN (
+                        SELECT id FROM {table}
+                        WHERE recorded_at < ?
+                        LIMIT ?
+                    )
+                    """,  # table names are module constants (TELEMETRY_TABLES), never user input
+                    (cutoff_iso, TELEMETRY_PRUNE_BATCH),
+                )
+            deleted = cursor.rowcount or 0
+            total += deleted
+            if deleted < TELEMETRY_PRUNE_BATCH:
+                break
+    return total
 
 
 def _prune_stale_failed_extractions(conn: sqlite3.Connection, cutoff_iso: str) -> int:

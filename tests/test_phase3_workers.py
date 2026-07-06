@@ -45,6 +45,64 @@ def settings_local(tmp_path: Path) -> Settings:
 # ── Pruner ────────────────────────────────────────────────────────────────
 
 
+def _insert_pipeline_event(db: sqlite3.Connection, *, pid: str, recorded_at: str) -> None:
+    with db:
+        db.execute(
+            "INSERT INTO pipeline_events (id, event_id, stage, status, recorded_at) "
+            "VALUES (?, '01EV', 'event.written', 'ok', ?)",
+            (pid, recorded_at),
+        )
+
+
+def test_pruner_ages_out_old_telemetry_keeps_recent(db, settings_local: Settings) -> None:
+    """ADR-0005: pipeline_events + observability_snapshots older than
+    telemetry_retention_days are deleted; recent rows are kept. The retired
+    triggers no longer ABORT the delete."""
+    from datetime import UTC, datetime, timedelta
+
+    from afair.substrate import observability
+
+    old = (datetime.now(UTC) - timedelta(days=120)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+
+    _insert_pipeline_event(db, pid="pe_old", recorded_at=old)
+    _insert_pipeline_event(db, pid="pe_recent", recorded_at=recent)
+    # observability_snapshots: write two, then back-date one to the old window.
+    observability.write_snapshot(db, producer="test", counters={"a": 1})
+    observability.write_snapshot(db, producer="test", counters={"b": 2})
+    with db:
+        rows = db.execute("SELECT id FROM observability_snapshots ORDER BY id").fetchall()
+        db.execute(
+            "UPDATE observability_snapshots SET recorded_at = ? WHERE id = ?", (old, rows[0]["id"])
+        )
+
+    stats = Pruner().run(db, settings_local)  # default retention 90 days
+
+    # One old pipeline_event + one old snapshot pruned; both recent rows kept.
+    assert stats["telemetry_rows_deleted"] == 2
+    pe_ids = {r["id"] for r in db.execute("SELECT id FROM pipeline_events").fetchall()}
+    assert pe_ids == {"pe_recent"}
+    assert db.execute("SELECT COUNT(*) AS n FROM observability_snapshots").fetchone()["n"] == 1
+
+
+def test_pruner_telemetry_respects_retention_setting(db, settings_local: Settings) -> None:
+    """A shorter telemetry_retention_days prunes more aggressively; a longer one
+    keeps rows the default would have dropped."""
+    from datetime import UTC, datetime, timedelta
+
+    recorded = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    _insert_pipeline_event(db, pid="pe30", recorded_at=recorded)
+
+    # 30-day-old row survives the default 90-day window.
+    assert Pruner().run(db, settings_local)["telemetry_rows_deleted"] == 0
+    assert db.execute("SELECT COUNT(*) AS n FROM pipeline_events").fetchone()["n"] == 1
+
+    # With a 7-day window it is pruned.
+    tight = settings_local.model_copy(update={"telemetry_retention_days": 7})
+    assert Pruner().run(db, tight)["telemetry_rows_deleted"] == 1
+    assert db.execute("SELECT COUNT(*) AS n FROM pipeline_events").fetchone()["n"] == 0
+
+
 def test_pruner_deletes_expired_oauth_rows(db, settings_local: Settings) -> None:
     """Past expires_at → row goes. Future expires_at → row stays."""
     from datetime import UTC, datetime, timedelta

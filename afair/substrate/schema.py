@@ -496,8 +496,16 @@ SCHEMA_DDL: tuple[str, ...] = (
     #   conflict_resolver.judged — conflict_resolver verdict written
     #
     # Designed to answer "where did event X get stuck?" without grepping
-    # logs. Append-only like everything else; readers compose the
-    # timeline with ORDER BY recorded_at.
+    # logs. Readers compose the timeline with ORDER BY recorded_at.
+    #
+    # OPERATIONAL TELEMETRY, not user memory (ADR-0005). This is the pipeline's
+    # flight recorder — instrumentation about how the plumbing ran; it carries
+    # no user memory and is never recalled. Like proposed_corrections above and
+    # export_jobs below, it is deliberately NON-substrate: no append-only
+    # triggers. The Pruner ages rows out past TELEMETRY_RETENTION_DAYS (I2
+    # protects the user's memory, not the flight recorder — see the ADR). The
+    # DROP TRIGGER statements below retire the old I2 triggers on existing
+    # vaults created before ADR-0005; a fresh vault never creates them.
     """
     CREATE TABLE IF NOT EXISTS pipeline_events (
         id              TEXT PRIMARY KEY,
@@ -512,26 +520,23 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS pipeline_events_event_id_idx ON pipeline_events(event_id, recorded_at)",
     "CREATE INDEX IF NOT EXISTS pipeline_events_stage_idx ON pipeline_events(stage, recorded_at DESC)",
-    """
-    CREATE TRIGGER IF NOT EXISTS pipeline_events_no_update
-    BEFORE UPDATE ON pipeline_events
-    BEGIN
-        SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS pipeline_events_no_delete
-    BEFORE DELETE ON pipeline_events
-    BEGIN
-        SELECT RAISE(ABORT, 'pipeline_events is append-only (Invariant I2)');
-    END
-    """,
+    # ADR-0005: retire the append-only triggers so the Pruner can age telemetry
+    # out. Idempotent DROP (a no-op on a fresh post-ADR-0005 vault). Additive in
+    # the migration-runner sense — every statement is safe to re-run at boot.
+    "DROP TRIGGER IF EXISTS pipeline_events_no_update",
+    "DROP TRIGGER IF EXISTS pipeline_events_no_delete",
     # ── observability_snapshots: expectation-checker counters (Phase 0.5) ──
     # One row per checker cycle. ``counters`` is a JSON object of
     # INTEGER-ONLY values (enforced by the writer in observability.py —
     # never content, names, or paths). /health reads only the latest row
     # (single indexed LIMIT 1) so per-probe aggregate scans stay off the
-    # hot path. Append-only like everything else; growth is ~35k rows/year.
+    # hot path.
+    #
+    # OPERATIONAL TELEMETRY, not user memory (ADR-0005), the same as
+    # pipeline_events above: instrumentation counters, never recalled, ~35k
+    # rows/year. NON-substrate, no append-only triggers; the Pruner ages rows
+    # out past TELEMETRY_RETENTION_DAYS. The DROP TRIGGER statements below
+    # retire the pre-ADR-0005 I2 triggers on existing vaults.
     """
     CREATE TABLE IF NOT EXISTS observability_snapshots (
         id           TEXT PRIMARY KEY,
@@ -542,20 +547,9 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS observability_snapshots_recorded_at_idx "
     "ON observability_snapshots(recorded_at DESC)",
-    """
-    CREATE TRIGGER IF NOT EXISTS observability_snapshots_no_update
-    BEFORE UPDATE ON observability_snapshots
-    BEGIN
-        SELECT RAISE(ABORT, 'observability_snapshots is append-only (Invariant I2)');
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS observability_snapshots_no_delete
-    BEFORE DELETE ON observability_snapshots
-    BEGIN
-        SELECT RAISE(ABORT, 'observability_snapshots is append-only (Invariant I2)');
-    END
-    """,
+    # ADR-0005: retire the append-only triggers (idempotent DROP).
+    "DROP TRIGGER IF EXISTS observability_snapshots_no_update",
+    "DROP TRIGGER IF EXISTS observability_snapshots_no_delete",
     # ── tuner_state ────────────────────────────────────────────────────
     # Append-only log of every self-modification the tuner makes
     # (and observations / hypotheses it considers).

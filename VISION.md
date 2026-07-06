@@ -52,6 +52,8 @@ External tool signatures are versioned and additive. New tools may be added. Exi
 ### I2. Substrate Immutability
 The raw event log is append-only and content-addressed. Nothing is ever overwritten or deleted (except via explicit user-invoked right-to-erasure paths, which are themselves logged). The substrate is git-like: history is the truth.
 
+I2 protects the user's **memory** — the events, interpretations, entities, edges, and temporal/belief metadata that constitute what the vault remembers. It does **not** cover purely operational tables: a regenerable suggestion queue (`proposed_corrections`), an ephemeral job record (`export_jobs`), or the pipeline's operational flight recorder (`pipeline_events`, `observability_snapshots`). Those carry no user memory, are never recalled, and are deliberately non-substrate: no append-only triggers, and the Pruner ages the telemetry out past a retention window. Pruning the flight recorder is no more an I2 erasure than rotating a log file is. See ADR-0005.
+
 ### I3. Backward-Compatible Evolution
 Any data written by an earlier version must remain readable, queryable, and re-interpretable by every later version, forever. Schema migrations are not migrations, they are new materialized views over unchanged substrate.
 

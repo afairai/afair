@@ -2,8 +2,11 @@
 
 Records one row per stage in an event's journey from substrate write
 through extraction → embedding → entity canonicalization → consolidation.
-The table is append-only (Invariant I2 triggers); readers compose the
-timeline with ``ORDER BY recorded_at``.
+This table is OPERATIONAL TELEMETRY, not user memory (ADR-0005): the
+pipeline's flight recorder, never recalled, prunable past a retention
+window — so it is NON-substrate and carries no append-only triggers (like
+proposed_corrections / export_jobs). Readers compose the timeline with
+``ORDER BY recorded_at``.
 
 Use this instead of grepping logs when answering:
   * "Where did event 01KSX... get stuck?"

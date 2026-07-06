@@ -9,9 +9,12 @@ run on Fly's ~30s health probe.
 
 Invariant fit:
 
-  - **I2 append-only.** The table has the same RAISE(ABORT) no-UPDATE /
-    no-DELETE triggers as ``pipeline_events`` (schema.py). :func:`write_snapshot`
-    only ever INSERTs.
+  - **Operational telemetry, not user memory (ADR-0005).** Like
+    ``pipeline_events``, this table is the pipeline's flight recorder — never
+    recalled, prunable past a retention window. It is NON-substrate: no
+    append-only triggers, and the Pruner ages old rows out. I2 protects the
+    user's memory, not the instrumentation about how the plumbing ran.
+    :func:`write_snapshot` still only ever INSERTs.
   - **Counts only.** :func:`write_snapshot` rejects any counter value that
     is not ``int | None`` (raises ``ValueError``). This is the code-level
     guarantee that no content, entity name, error string, or filesystem
