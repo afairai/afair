@@ -191,6 +191,13 @@ class ExtractionRetryWorker(ColdPathWorker):
                 stats["still_failing"] += 1
                 unwritten_failures += 1
                 continue
+            # Corner: a re-extraction whose result deduplicates to an existing
+            # SUCCESS (write_interpretation is an idempotent no-op on a success)
+            # appends no row — but this worker only selects events whose LATEST
+            # interp is a FAILURE, so that success would already be the latest
+            # (id above the lagged frontier) and the hash would not be a
+            # candidate here at all. Effectively unreachable; noted for the
+            # frontier-advance reasoning above.
             latest = read_latest_interpretation(conn, event_hash)
             if latest is not None and latest.extraction.get("status") != "failed":
                 stats["succeeded"] += 1
