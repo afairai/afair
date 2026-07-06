@@ -511,7 +511,11 @@ def _event_to_hit(
     if compact:
         # Keep only conflicts that carry a user-facing signal (unresolved OR a
         # caveat template); drop the caveat-less confirms/compatible/unrelated/
-        # evolves. Cap each reason. Coverage is computed pre-filter elsewhere.
+        # evolves. Cap the count (an event can be in tension with many others —
+        # an unbounded vector otherwise) AND each reason. The FULL conflict
+        # history is one verbosity="full"/by_id away, and coverage's unresolved
+        # count is computed from the UNFILTERED map elsewhere, so the honesty
+        # signal is never capped — only the per-hit list is.
         kept: list[dict[str, Any]] = []
         for c in conflicts or []:
             verdict = str(c.get("verdict", ""))
@@ -521,7 +525,9 @@ def _event_to_hit(
                 if isinstance(reason, str):
                     c2["reason"] = reason[:COMPACT_CONFLICT_REASON_CHARS]
                 kept.append(c2)
-        conflict_flags: list[ConflictFlag] = [ConflictFlag(**c) for c in kept]
+        conflict_flags: list[ConflictFlag] = [
+            ConflictFlag(**c) for c in kept[:COMPACT_MAX_CONFLICTS]
+        ]
     else:
         conflict_flags = [ConflictFlag(**c) for c in (conflicts or [])]
     return RecallHit(
@@ -1481,7 +1487,11 @@ def recall(
                 )
             except ValueError as exc:
                 # One bad decision must not void the rest of an operator batch;
-                # surfaced per-item, never silently swallowed.
+                # surfaced per-item, never silently swallowed. Only ValueError
+                # (validation: bad verdict/to_kind) is isolated this way — a
+                # deeper fault (e.g. sqlite3.Error) still aborts mid-batch, but
+                # decide_correction is idempotent, so re-sending the batch yields
+                # `already_decided` for the ones that landed and retries the rest.
                 decisions_out.append(
                     CorrectionOutcomeView(proposal_id=d.proposal_id, status="error", note=str(exc))
                 )

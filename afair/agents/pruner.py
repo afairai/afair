@@ -98,7 +98,8 @@ class Pruner(ColdPathWorker):
         with conn:
             cursor = conn.execute(
                 "DELETE FROM proposed_corrections "
-                "WHERE kind = 'edge_review' AND status != 'proposed' AND decided_at < ?",
+                "WHERE kind = 'edge_review' AND status != 'proposed' "
+                "AND decided_at IS NOT NULL AND decided_at < ?",
                 (er_cutoff,),
             )
         stats["decided_edge_reviews_deleted"] = cursor.rowcount or 0

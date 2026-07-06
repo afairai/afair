@@ -147,6 +147,20 @@ def _conflicts() -> list[dict]:
     ]
 
 
+def _many_kept_conflicts(n: int) -> list[dict]:
+    """n caveat-bearing conflicts (all 'conflicts' verdict → kept in compact)."""
+    return [
+        {
+            "with_event_id": f"ev{i}",
+            "with_content_hash": f"sha256:{i:064d}",
+            "verdict": "conflicts",
+            "reason": "R" * 400,
+            "confidence": 0.85,
+        }
+        for i in range(n)
+    ]
+
+
 # ── _shape_interpretation (pure) ─────────────────────────────────────────────
 
 
@@ -264,6 +278,34 @@ def test_compact_hit_caps_payload_and_conflicts_and_linked() -> None:
     assert kept_verdicts == _COMPACT_KEPT_VERDICTS
     for c in hit.conflicts:
         assert len(c.reason) <= 160
+
+
+def test_compact_caps_conflict_count() -> None:
+    from afair.mcp.handlers import COMPACT_MAX_CONFLICTS
+
+    hit = _event_to_hit(
+        _maximal_event(),
+        db=None,
+        full_payload=False,
+        conflicts=_many_kept_conflicts(12),
+        entity_overlay=None,
+        interpretation_extraction=_maximal_extraction(),
+        linked_event_ids=[],
+        verbosity="compact",
+    )
+    assert len(hit.conflicts) == COMPACT_MAX_CONFLICTS  # 12 kept-eligible → capped at 5
+    # full keeps all 12.
+    full = _event_to_hit(
+        _maximal_event(),
+        db=None,
+        full_payload=False,
+        conflicts=_many_kept_conflicts(12),
+        entity_overlay=None,
+        interpretation_extraction=_maximal_extraction(),
+        linked_event_ids=[],
+        verbosity="full",
+    )
+    assert len(full.conflicts) == 12
 
 
 def test_full_hit_keeps_everything() -> None:

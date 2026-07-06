@@ -93,6 +93,27 @@ def _seed_bloated(ctx: ServerContext, idx: int) -> None:
             "source_attribution": "a long provenance string " * 5,
         },
     )
+    # Worst case for compact: many caveat-bearing conflicts (8 seeded → the
+    # compact cap serves the top COMPACT_MAX_CONFLICTS, each ~160-char reason +
+    # two ids). Stored as conflict_resolver interpretation rows keyed by the
+    # other side's hash (how read_conflicts_batch finds them).
+    for j in range(8):
+        other_hash = f"sha256:{idx:03d}{j:061d}"
+        write_interpretation(
+            ctx.db,
+            event=event,
+            version=1,
+            produced_by=f"conflict_resolver:v0:{other_hash}",
+            extraction={
+                "status": "success",
+                "verdict": "conflicts",
+                "reason": "R" * 300,
+                "confidence": 0.85,
+                "event_a_hash": event.content_hash,
+                "event_b_hash": other_hash,
+                "event_b_id": f"ev{idx}_{j}",
+            },
+        )
 
 
 def test_compact_recall_stays_within_size_budget(ctx: ServerContext, settings: Settings) -> None:
@@ -102,9 +123,18 @@ def test_compact_recall_stays_within_size_budget(ctx: ServerContext, settings: S
 
     result = handlers.recall(query="aurora", depth="shallow", limit=10)
     assert len(result.hits) == 10
+    # Compact bounds every unbounded vector: conflicts are capped, not just
+    # reason-truncated — so even a hit in tension with 8 others serves <= 5.
+    from afair.mcp.handlers import COMPACT_MAX_CONFLICTS
+
+    assert all(len(h.conflicts) <= COMPACT_MAX_CONFLICTS for h in result.hits)
+
     raw = result.model_dump_json(exclude_none=True)
-    assert len(raw) < 30_000  # ~3KB/hit hard ceiling incl. envelope
-    assert len(raw) / len(result.hits) < 2_500
+    # Alarm = the capped worst case (5 conflicts + 5 entities + 5 edges + capped
+    # text/summary ~3.3KB/hit) with headroom; it fires if a change inflates
+    # compact past the known dense-hit ceiling. Typical hits are ~1-1.5KB.
+    assert len(raw) < 40_000
+    assert len(raw) / len(result.hits) < 3_800
 
 
 def test_verbosity_sizes_are_ordered(ctx: ServerContext, settings: Settings) -> None:

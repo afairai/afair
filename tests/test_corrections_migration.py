@@ -122,6 +122,38 @@ def test_migration_is_idempotent(db: sqlite3.Connection) -> None:
     assert _has_open_unique_index(db)
 
 
+def test_legacy_vault_boots_clean_through_open_db(tmp_path: Path) -> None:
+    """Production path: a LEGACY-shaped vault (inline UNIQUE, ADR-0004 CHECK,
+    rows in all four statuses) opened through the real open_db migrates at boot
+    — all rows preserved, partial index attached — and a second boot is a
+    no-op. Pins the fleet-boot behavior end to end."""
+    conn = open_db(tmp_path)
+    _revert_to_old_shape(conn)
+    statuses = ("proposed", "confirmed", "rejected", "applied")
+    for i, status in enumerate(statuses):
+        eid = _entity(conn, f"Boot{i}", "product")
+        _insert(conn, pid=f"row_{status}", kind="edge_review", entity_id=eid, status=status)
+    conn.close()
+
+    # Boot #1 through the production path — migrations run inside init_db.
+    conn2 = open_db(tmp_path)
+    ids = {r["id"] for r in conn2.execute("SELECT id FROM proposed_corrections").fetchall()}
+    assert ids == {f"row_{s}" for s in statuses}  # every row preserved
+    assert _has_open_unique_index(conn2)
+    table_sql = conn2.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()["sql"]
+    assert "UNIQUE(kind, entity_id)" not in table_sql
+    conn2.close()
+
+    # Boot #2 is idempotent — index-based already, nothing rebuilt, rows intact.
+    conn3 = open_db(tmp_path)
+    assert migrate_proposed_corrections_open_unique(conn3) is False
+    ids2 = {r["id"] for r in conn3.execute("SELECT id FROM proposed_corrections").fetchall()}
+    assert ids2 == {f"row_{s}" for s in statuses}
+    conn3.close()
+
+
 def test_open_slot_dedupes_but_decided_frees_it(db: sqlite3.Connection) -> None:
     """After migration: a duplicate OPEN insert for the same (kind, entity) is
     rejected by the partial index; but an insert for a subject that has only a

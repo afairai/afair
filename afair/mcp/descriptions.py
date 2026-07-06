@@ -190,8 +190,8 @@ ARGUMENTS (all optional; combine as needed):
     much of each hit's interpretation/conflicts/linked-list detail is
     served — NOT the payload (see full_payload).
       "compact" → the AI-useful minimum: capped summary + payload text,
-                  top canonical entities and edges, only caveat-bearing
-                  conflicts. Use this by default.
+                  top canonical entities and edges, only the top
+                  caveat-bearing conflicts. Use this by default.
       "standard"→ the full interpretation minus the redundant raw entity
                   list and null edge validity bounds.
       "full"    → every field. Use standard/full, or by_id + full_payload,
