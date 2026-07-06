@@ -479,15 +479,9 @@ def _run_extraction(
             error_type=LLMResponseError.error_type,
             error_message=validated_or_error,
         )
-        pe.record(
-            db,
-            event_id=event_id,
-            event_hash=event.content_hash,
-            stage=pe.STAGE_EXTRACTION_FAILED,
-            status=pe.STATUS_FAILED,
-            producer=produced_by,
-            detail=f"validation: {validated_or_error}",
-        )
+        # write_failed_interpretation now records the STAGE_EXTRACTION_FAILED
+        # terminal pipeline row for every failure branch (this one included),
+        # so recording it again here would double-count. See interpretation.py.
         return
 
     validated_or_error["status"] = "success"

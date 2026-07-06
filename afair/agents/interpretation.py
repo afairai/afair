@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 from ulid import ULID
 
+from ..substrate import pipeline_events as pe
 from ..substrate.payload import canonical_json
 
 if TYPE_CHECKING:
@@ -140,13 +141,32 @@ def write_failed_interpretation(
         "retries": _count_failed_extractor_attempts(conn, event.content_hash),
         "attempted_at": _now_iso(),
     }
-    return write_interpretation(
+    interpretation = write_interpretation(
         conn,
         event=event,
         version=version,
         produced_by=produced_by,
         extraction=extraction,
     )
+    # Terminal-stage trace, recorded here so EVERY extraction-failure branch
+    # gets it exactly once — the warm-path Extractor has seven failure paths
+    # and only one used to record ``extraction.failed`` explicitly, leaving
+    # the other six with a pipeline timeline that ends at
+    # ``extraction.started``. That gap made the Phase 0.5 ExpectationChecker
+    # miscount every one of them as a silent ``stuck_extraction`` for a week.
+    # Centralizing the record removes the miscount and the duplicate. Emit is
+    # best-effort (``pe.record`` swallows its own failures): the failed
+    # interpretation row above is the durable record; tracing is advisory.
+    pe.record(
+        conn,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EXTRACTION_FAILED,
+        status=pe.STATUS_FAILED,
+        producer=produced_by,
+        detail=f"{error_type}: {error_message}",
+    )
+    return interpretation
 
 
 def _count_failed_extractor_attempts(conn: sqlite3.Connection, event_hash: str) -> int:
