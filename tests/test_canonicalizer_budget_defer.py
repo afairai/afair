@@ -128,6 +128,27 @@ def test_budget_zero_defers_instead_of_creating(
     assert _mention_count(db) == 0  # deferred events keep zero mentions
 
 
+def test_deferral_blocks_watermark_advance(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2a drain-blocker: a cycle that DEFERS any event (LLM budget gone) must
+    NOT advance the watermark — the deferred events are still candidates and
+    would be skipped next cycle if the cursor jumped past them."""
+    from afair.substrate import watermarks
+
+    # Disable the lag so a clean cycle *would* advance — isolating the deferral
+    # as the reason it doesn't here.
+    monkeypatch.setattr(watermarks, "FRONTIER_LAG_SECONDS", -3600)
+    _event_with_entities(
+        db, text="Cherry product launch", entities=[{"name": "Cherry", "type": "product"}]
+    )
+    monkeypatch.setattr(ec, "MAX_LLM_CALLS_PER_CYCLE", 0)
+
+    stats = EntityCanonicalizer().run(db, settings)
+    assert stats["events_deferred_no_budget"] == 1
+    assert watermarks.read_watermark_id(db, watermarks.WORKER_CANONICALIZER) is None
+
+
 def test_deferred_events_process_on_next_cycle_with_budget(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

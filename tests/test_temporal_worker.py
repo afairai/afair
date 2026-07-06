@@ -105,6 +105,30 @@ def test_worker_classifies_and_writes(
     assert row.computed_by == tw.TEMPORAL_VERSION
 
 
+def test_llm_error_blocks_watermark_advance(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2a drain-blocker: a cycle where the LLM errors leaves the candidate
+    unclassified — even though the batch is small (drained by size), the
+    watermark must NOT advance, or that event would be skipped next cycle."""
+    from afair.agents.llm import LLMError
+    from afair.substrate import watermarks
+
+    # Disable the concurrency lag so a CLEAN cycle *would* advance — isolating
+    # the blocker as the reason it doesn't here.
+    monkeypatch.setattr(watermarks, "FRONTIER_LAG_SECONDS", -3600)
+    _seed(db, "some dated thing")
+
+    def _raise(**_kwargs: Any) -> LLMResult:
+        raise LLMError("provider down")
+
+    monkeypatch.setattr(tw, "call_tool", _raise)
+    stats = tw.TemporalWorker().run(db, settings)
+    assert stats["llm_errors"] == 1
+    assert stats["events_classified"] == 0
+    assert watermarks.read_watermark_id(db, watermarks.WORKER_TEMPORAL) is None
+
+
 def test_worker_is_idempotent(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

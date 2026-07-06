@@ -146,10 +146,9 @@ def _prune_telemetry(conn: sqlite3.Connection, cutoff_iso: str) -> int:
     holds one giant write lock.
 
     Returns the total rows deleted across both tables. Bounded loop: each
-    ``DELETE ... LIMIT`` chunk commits before the next; the loop ends when a
-    table has no rows older than the cutoff left. (SQLite must be built with
-    ``ENABLE_UPDATE_DELETE_LIMIT`` for ``DELETE ... LIMIT``; the amalgamation
-    afair ships is, and a subquery form is used to stay portable.)
+    chunk (a ``DELETE`` over a ``SELECT ... LIMIT`` subquery — the portable
+    form) commits before the next; the loop ends when a table has no rows
+    older than the cutoff left.
     """
     total = 0
     for table in TELEMETRY_TABLES:

@@ -164,6 +164,31 @@ def test_transient_failure_is_retried(
     assert select_retry_candidates(ctx.db) == []
 
 
+def test_unwritten_failure_blocks_watermark_advance(
+    ctx: ServerContext, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2a drain-blocker: if extract_sync raises (the except path appends NO new
+    interpretation row), that candidate's latest interp stays at/below the
+    frontier. The watermark must NOT advance, or the event would be stranded
+    below the cursor and never retried again."""
+    from afair.substrate import watermarks
+
+    # Disable the lag so a clean cycle *would* advance — isolating the
+    # except-path as the reason it doesn't here.
+    monkeypatch.setattr(watermarks, "FRONTIER_LAG_SECONDS", -3600)
+    event = _write_text_event(ctx, "doc that errors on retry")
+    _seed_failure(ctx, event, "llm_timeout")
+
+    def _boom(_event_id: str) -> None:
+        raise RuntimeError("extract_sync blew up (e.g. missing context)")
+
+    monkeypatch.setattr("afair.agents.extractor.extract_sync", _boom)
+    stats = ExtractionRetryWorker().run(ctx.db, settings_local)
+    assert stats["candidates"] == 1
+    assert stats["still_failing"] == 1  # the except path
+    assert watermarks.read_watermark_id(ctx.db, watermarks.WORKER_EXTRACTION_RETRY) is None
+
+
 def test_rate_limit_failure_is_also_transient(
     ctx: ServerContext, settings_local: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

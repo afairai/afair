@@ -1,8 +1,8 @@
 """pipeline_events lifecycle tracing tests.
 
-Verifies the table is append-only, the helper writes the expected
-row shapes, and the lifecycle instrumentation in remember/observe/
-extract fires.
+Verifies the helper writes the expected row shapes, the table is prunable
+telemetry (ADR-0005, not append-only memory), and the lifecycle
+instrumentation in remember/observe/extract fires.
 """
 
 from __future__ import annotations
@@ -74,6 +74,52 @@ def test_pipeline_events_are_prunable_telemetry(db: sqlite3.Connection) -> None:
     db.execute("DELETE FROM pipeline_events")
     db.commit()
     assert db.execute("SELECT COUNT(*) AS n FROM pipeline_events").fetchone()["n"] == 0
+
+
+def test_legacy_vault_telemetry_triggers_retired_on_open(tmp_path: Path) -> None:
+    """ADR-0005 migration: a vault created BEFORE the ADR still has the four
+    append-only triggers on pipeline_events + observability_snapshots. Opening
+    it (init runs SCHEMA_DDL, which now carries DROP TRIGGER IF EXISTS) must
+    retire exactly those four, and a DELETE must then succeed. Idempotent on a
+    second open. This pins the exact path the live vault runs next boot."""
+    telemetry = ("pipeline_events", "observability_snapshots")
+
+    conn = open_db(tmp_path)
+    # Re-create the pre-ADR-0005 append-only triggers to simulate a legacy vault.
+    for tbl in telemetry:
+        conn.execute(
+            f"CREATE TRIGGER {tbl}_no_update BEFORE UPDATE ON {tbl} "
+            f"BEGIN SELECT RAISE(ABORT, '{tbl} is append-only (Invariant I2)'); END"
+        )
+        conn.execute(
+            f"CREATE TRIGGER {tbl}_no_delete BEFORE DELETE ON {tbl} "
+            f"BEGIN SELECT RAISE(ABORT, '{tbl} is append-only (Invariant I2)'); END"
+        )
+    conn.commit()
+    assert _telemetry_trigger_count(conn) == 4
+    conn.close()
+
+    # Re-open = boot on the legacy vault → the DROP TRIGGER statements fire.
+    conn = open_db(tmp_path)
+    assert _telemetry_trigger_count(conn) == 0
+    # And a DELETE now works (no ABORT).
+    pe.record(conn, event_id="01EV", stage=pe.STAGE_EVENT_WRITTEN)
+    conn.execute("DELETE FROM pipeline_events")
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) AS n FROM pipeline_events").fetchone()["n"] == 0
+    conn.close()
+
+    # Idempotent: a second open is a clean no-op, still zero triggers.
+    conn = open_db(tmp_path)
+    assert _telemetry_trigger_count(conn) == 0
+    conn.close()
+
+
+def _telemetry_trigger_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' "
+        "AND tbl_name IN ('pipeline_events', 'observability_snapshots')"
+    ).fetchone()["n"]
 
 
 def test_record_safe_swallows_failures() -> None:
