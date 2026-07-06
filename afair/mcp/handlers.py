@@ -1197,9 +1197,17 @@ def _recency_rerank(events: list[Event]) -> list[Event]:
 
     def _key(e: Event) -> datetime:
         try:
-            return datetime.fromisoformat(e.created_at)
+            dt = datetime.fromisoformat(e.created_at)
         except (ValueError, TypeError):
             return datetime.min.replace(tzinfo=UTC)
+        # Normal writes are tz-aware (_now_iso), but rows written with an
+        # explicit created_at= (backfills/eval) can be naive. Comparing a naive
+        # dt against the tz-aware fallback (or another aware row) inside sorted()
+        # raises TypeError OUTSIDE this function's try/except → recall 500.
+        # Normalize naive → UTC so the key is always aware and comparable.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
 
     return sorted(events, key=_key, reverse=True)
 

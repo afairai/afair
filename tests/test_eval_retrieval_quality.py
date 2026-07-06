@@ -136,3 +136,30 @@ def test_recency_rerank_orders_newest_first() -> None:
     # old first in input; recency re-rank must put the newer one on top.
     out = _recency_rerank([_ev("old", 700), _ev("new", 5)])
     assert [e.id for e in out] == ["new", "old"]
+
+
+def test_recency_rerank_handles_mixed_naive_and_aware_timestamps() -> None:
+    """A row written with an explicit naive created_at (backfills/eval) must not
+    crash the sort. Comparing naive vs tz-aware datetimes inside sorted() raises
+    TypeError outside recall's try/except → a 500. The key normalizes naive→UTC.
+    """
+    from afair.mcp.handlers import _recency_rerank
+    from afair.substrate.events import Event
+
+    def _ev(tag: str, created_at: str) -> Event:
+        return Event(
+            id=tag,
+            content_hash=f"sha256:{abs(hash(tag)):064d}"[:71],
+            created_at=created_at,
+            origin="agent",
+            kind="remember",
+            payload={"content_type": "text", "text": tag},
+            schema_version=1,
+        )
+
+    # "naive" has no offset (backfill); "aware" is a normal UTC write. Sorting a
+    # mix must not raise, and newest-first ordering is preserved by wall-clock.
+    naive = _ev("naive", "2020-01-01T00:00:00")  # no tzinfo
+    aware = _ev("aware", "2026-01-01T00:00:00+00:00")
+    out = _recency_rerank([naive, aware])
+    assert [e.id for e in out] == ["aware", "naive"]
