@@ -1042,6 +1042,65 @@ def count_corroborating_sources(
     return len(sources)
 
 
+def count_corroborating_sources_batch(
+    conn: sqlite3.Connection, edges: list[EntityEdge]
+) -> dict[str, int]:
+    """Corroboration count per edge for a whole batch, grouped by predicate.
+
+    Behaviour-identical to calling :func:`count_corroborating_sources` once per
+    edge (same merge-resolved endpoint comparison, same live-only + distinct-
+    source semantics, each edge's own source event excluded), but issues ONE
+    indexed fetch + ONE merge-resolve per DISTINCT predicate instead of per
+    edge. The edge scorer used to call the single helper in a loop, so every
+    scored edge full-scanned entity_edges; batching collapses a cycle's scans to
+    one per predicate. Served by ``entity_edges_predicate_lower_idx``.
+
+    Returns ``{edge_id: count}`` for every edge in the input.
+    """
+    if not edges:
+        return {}
+
+    by_predicate: dict[str, list[EntityEdge]] = {}
+    for edge in edges:
+        by_predicate.setdefault(edge.predicate, []).append(edge)
+
+    out: dict[str, int] = {}
+    for predicate, group in by_predicate.items():
+        sibling_rows = conn.execute(
+            """
+            SELECT e.subject_id, e.object_id, e.source_event_id
+            FROM entity_edges e
+            LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+            WHERE LOWER(e.predicate) = LOWER(?)
+              AND i.id IS NULL
+            """,
+            (predicate,),
+        ).fetchall()
+
+        ids_to_resolve: set[str] = set()
+        for edge in group:
+            ids_to_resolve.add(edge.subject_id)
+            ids_to_resolve.add(edge.object_id)
+        for r in sibling_rows:
+            ids_to_resolve.add(r["subject_id"])
+            ids_to_resolve.add(r["object_id"])
+        resolved = resolve_canonical_batch(conn, list(ids_to_resolve))
+
+        for edge in group:
+            target_subj = resolved.get(edge.subject_id, edge.subject_id)
+            target_obj = resolved.get(edge.object_id, edge.object_id)
+            sources: set[str] = set()
+            for r in sibling_rows:
+                if r["source_event_id"] == edge.source_event_id:
+                    continue
+                rs = resolved.get(r["subject_id"], r["subject_id"])
+                ro = resolved.get(r["object_id"], r["object_id"])
+                if rs == target_subj and ro == target_obj:
+                    sources.add(r["source_event_id"])
+            out[edge.id] = len(sources)
+    return out
+
+
 def read_entities_batch(conn: sqlite3.Connection, entity_ids: Iterable[str]) -> dict[str, Entity]:
     """Bulk-fetch entities by ID. Used by recall to materialize the
     canonical_entities surface on many hits in one query.

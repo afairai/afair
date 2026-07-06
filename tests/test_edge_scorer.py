@@ -552,3 +552,79 @@ def test_promoted_base_rate_changes_next_score(db: sqlite3.Connection, settings:
     EdgeConfidenceScorer().run(db, settings)
     after = latest_edge_scores_batch(db, [edge.id])[edge.id].confidence
     assert after > before
+
+
+# ── P0-5a: batched corroboration + SQL-side proposal selection ──────────────
+
+
+def test_corroboration_batch_matches_single(db: sqlite3.Connection) -> None:
+    """count_corroborating_sources_batch must return the same count per edge as
+    the single-edge helper it replaces on the scorer's hot path."""
+    from afair.substrate import count_corroborating_sources
+    from afair.substrate.entities import count_corroborating_sources_batch
+
+    # Two events asserting the SAME triple (shared endpoints) + one unrelated.
+    _ev1, subj, obj, edge1 = _seed_edge(db, text="Sajinth runs Athara")
+    _ev2, _s, _o, edge2 = _seed_edge(db, text="Sajinth runs Athara again", subj=subj, obj=obj)
+    _ev3, _s3, _o3, edge3 = _seed_edge(
+        db, text="Priya leads Beta", subject_name="Priya", object_name="Beta", predicate="leads"
+    )
+
+    edges = [edge1, edge2, edge3]
+    batch = count_corroborating_sources_batch(db, edges)
+    for edge in edges:
+        single = count_corroborating_sources(
+            db,
+            subject_id=edge.subject_id,
+            predicate=edge.predicate,
+            object_id=edge.object_id,
+            exclude_event_id=edge.source_event_id,
+        )
+        assert batch[edge.id] == single
+    # Sanity: the two shared-triple edges corroborate each other; the lone one
+    # has no corroboration.
+    assert batch[edge1.id] == 1
+    assert batch[edge2.id] == 1
+    assert batch[edge3.id] == 0
+
+
+def test_corroboration_batch_empty() -> None:
+    from afair.substrate.entities import count_corroborating_sources_batch
+
+    # No DB access needed for the empty case.
+    assert count_corroborating_sources_batch(None, []) == {}  # type: ignore[arg-type]
+
+
+def test_propose_edge_reviews_bounded_pool(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proposal selection caps its candidate pool in SQL. Even with far
+    more weak edges than the pool, the cycle still proposes exactly K and never
+    materializes an unbounded IN-list."""
+    monkeypatch.setattr(es, "EDGE_REVIEW_CANDIDATE_POOL", 4)
+    for i in range(12):
+        _seed_weak_edge(db, i)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    # Capped at MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE (3), drawn from the pool.
+    assert stats["edge_reviews_proposed"] == es.MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE
+
+
+def test_predicate_lower_index_used(db: sqlite3.Connection) -> None:
+    """The corroboration fetch must use the LOWER(predicate) expression index,
+    not full-scan entity_edges."""
+    _seed_edge(db, text="Sajinth runs Athara")
+    plan = db.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT e.subject_id, e.object_id, e.source_event_id
+        FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        WHERE LOWER(e.predicate) = LOWER(?)
+          AND i.id IS NULL
+        """,
+        ("runs",),
+    ).fetchall()
+    detail = " ".join(str(row["detail"]) for row in plan)
+    assert "entity_edges_predicate_lower_idx" in detail
+    assert "SCAN e" not in detail

@@ -39,14 +39,12 @@ from ..substrate.confidence import (
 )
 from ..substrate.edge_confidence import (
     EDGE_CONFIDENCE_EPSILON,
-    latest_edge_confidence_batch,
     latest_edge_scores_batch,
     write_edge_confidence_score,
 )
 from ..substrate.entities import (
     EntityEdge,
-    count_corroborating_sources,
-    latest_edge_reviews_batch,
+    count_corroborating_sources_batch,
     read_entity_by_id,
     resolve_canonical,
 )
@@ -78,6 +76,14 @@ edge-review proposal per SUBJECT entity at a time; a second low-confidence edge
 on the same subject waits until the first is decided (the pruner clears applied
 rows)."""
 
+EDGE_REVIEW_CANDIDATE_POOL = 50
+"""SQL-side cap on the low-confidence edge pool a single cycle considers for
+review proposals. Generous headroom over ``MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE``
+so the true K lowest-confidence edges are virtually always in the pool. Replaces
+the old "load ALL live edges then build IN(...) lists over the whole set", which
+exceeded SQLite's 32,766-variable limit on a large graph and failed the cycle
+every 240s forever (ADR-0004 C4 scaling fix)."""
+
 EDGE_SCORER_PRODUCED_BY = "edge_confidence_scorer:v0"
 
 
@@ -100,9 +106,13 @@ class EdgeConfidenceScorer(ColdPathWorker):
             edge_ids = [e.id for e in edges]
             latest_v1 = _latest_v1_confidence(conn, edge_ids)
             latest_any = latest_edge_scores_batch(conn, edge_ids)
+            # Corroboration once for the whole cycle (one indexed fetch +
+            # resolve per DISTINCT predicate) instead of a full entity_edges
+            # scan per edge.
+            corroborating = count_corroborating_sources_batch(conn, edges)
             for edge in edges:
                 new_conf, components = compute_edge_confidence(
-                    _recover_signals(conn, edge),
+                    _recover_signals(conn, edge, corroborating=corroborating.get(edge.id, 0)),
                     base_rate=base_rate,
                     corroboration_weight=corroboration_weight,
                 )
@@ -235,23 +245,21 @@ def _latest_v1_confidence(conn: sqlite3.Connection, edge_ids: list[str]) -> dict
 # ── signal recovery ─────────────────────────────────────────────────────────
 
 
-def _recover_signals(conn: sqlite3.Connection, edge: EntityEdge) -> EdgeConfidenceSignals:
+def _recover_signals(
+    conn: sqlite3.Connection, edge: EntityEdge, *, corroborating: int
+) -> EdgeConfidenceSignals:
     """Recover the edge-confidence signals from the substrate for a stored edge.
 
-    Every signal degrades to None/0 gracefully (I3): a legacy edge whose
-    extractor interpretation is unrecoverable still gets a sensible score from
-    crispness + corroboration alone.
+    ``corroborating`` is supplied by the caller from a single per-cycle
+    ``count_corroborating_sources_batch`` pass rather than recomputed per edge
+    (the old per-edge count full-scanned entity_edges). Every other signal
+    degrades to None/0 gracefully (I3): a legacy edge whose extractor
+    interpretation is unrecoverable still gets a sensible score from crispness +
+    corroboration alone.
     """
     event_hash = _source_event_hash(conn, edge.source_event_id)
     extraction_confidence = _recover_extraction_confidence(conn, edge.source_event_id)
     subj_conf, obj_conf = _recover_mention_confidences(conn, edge)
-    corroborating = count_corroborating_sources(
-        conn,
-        subject_id=edge.subject_id,
-        predicate=edge.predicate,
-        object_id=edge.object_id,
-        exclude_event_id=edge.source_event_id,
-    )
     source_conflicted = _source_is_conflicted(conn, event_hash)
     return EdgeConfidenceSignals(
         extraction_confidence=extraction_confidence,
@@ -342,36 +350,55 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     inserted into ``proposed_corrections`` (kind ``edge_review``) with
     ``INSERT OR IGNORE`` on the UNIQUE(kind, entity_id), so a re-run never
     duplicates an open proposal. Returns the number of new proposals.
-    """
-    live_rows = conn.execute(
-        """
-        SELECT e.* FROM entity_edges e
-        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
-        WHERE i.id IS NULL
-        """
-    ).fetchall()
-    if not live_rows:
-        return 0
-    edges = [_row_to_edge(r) for r in live_rows]
-    ids = [e.id for e in edges]
-    served = latest_edge_confidence_batch(conn, ids)
-    reviewed = latest_edge_reviews_batch(conn, ids)
-    scores = latest_edge_scores_batch(conn, ids)
 
-    candidates: list[tuple[float, EntityEdge]] = []
-    for edge in edges:
-        if edge.id in reviewed:
-            continue  # already has an operator verdict
-        conf = served.get(edge.id, edge.confidence)
-        if conf >= EDGE_REVIEW_PROPOSAL_THRESHOLD:
-            continue  # confident enough — not a review candidate
-        candidates.append((conf, edge))
-    candidates.sort(key=lambda c: c[0])
+    Selection is done in SQL — a ``latest_scores`` CTE (ROW_NUMBER rn=1
+    reproduces the batch helper's latest-score-wins) LEFT-JOINed with
+    ``edge_invalidations`` (live only) and filtered by ``NOT EXISTS
+    edge_reviews`` and ``COALESCE(latest_score, e.confidence) < threshold``
+    (the column fallback). The old version loaded ALL live edges and built
+    IN(...) lists over the whole set through the batch helpers — on a large
+    graph that blew past SQLite's 32,766-variable limit and failed the cycle
+    every 240s forever. Bounding the pool to ``EDGE_REVIEW_CANDIDATE_POOL``
+    lowest-confidence candidates removes the unbounded IN-lists entirely; the
+    only deviation is that if those slots are all absorbed by the
+    ``UNIQUE(kind, subject)`` constraint the remainder waits one cycle
+    (self-healing).
+    """
+    candidate_rows = conn.execute(
+        """
+        WITH latest_scores AS (
+            SELECT edge_id, confidence,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY edge_id
+                       ORDER BY computed_at DESC, id DESC
+                   ) AS rn
+            FROM edge_confidence_scores
+        )
+        SELECT e.*, COALESCE(ls.confidence, e.confidence) AS served_confidence
+        FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        LEFT JOIN latest_scores ls ON ls.edge_id = e.id AND ls.rn = 1
+        WHERE i.id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
+          AND COALESCE(ls.confidence, e.confidence) < ?
+        ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC
+        LIMIT ?
+        """,
+        (EDGE_REVIEW_PROPOSAL_THRESHOLD, EDGE_REVIEW_CANDIDATE_POOL),
+    ).fetchall()
+    if not candidate_rows:
+        return 0
+
+    edges = [_row_to_edge(r) for r in candidate_rows]
+    served = {r["id"]: float(r["served_confidence"]) for r in candidate_rows}
+    # Bounded (<= pool) components fetch for the evidence string.
+    scores = latest_edge_scores_batch(conn, [e.id for e in edges])
 
     proposed = 0
-    for conf, edge in candidates:
+    for edge in edges:
         if proposed >= MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE:
             break
+        conf = served[edge.id]
         components = scores[edge.id].components if edge.id in scores else {}
         if _insert_edge_review_proposal(conn, edge=edge, confidence=conf, components=components):
             proposed += 1
