@@ -15,6 +15,7 @@ See the relevance-decay design notes for the full picture
 from __future__ import annotations
 
 import calendar
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -22,7 +23,6 @@ from pydantic import BaseModel
 from ulid import ULID
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Callable
 
 
@@ -110,7 +110,10 @@ def write_event_temporal(
                     created_at,
                 ),
             )
-    except Exception as exc:  # narrowed on the message below
+    except sqlite3.IntegrityError as exc:
+        # A UNIQUE-constraint violation = this temporal row already exists;
+        # treat as a no-op. Any other integrity error (NOT NULL / FK / CHECK)
+        # is a real bug and propagates.
         if "UNIQUE constraint" in str(exc):
             return None
         raise

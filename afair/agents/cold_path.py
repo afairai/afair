@@ -46,6 +46,7 @@ regardless of activity is fine.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -163,6 +164,13 @@ class ColdPathScheduler:
                     stats = worker.run(conn, self._settings)
                 except Exception as e:
                     log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
+                    # Roll back any open transaction so a worker that raised
+                    # between a bare execute and its commit doesn't leak an
+                    # open tx that the NEXT worker's commit would absorb
+                    # (attributing this worker's partial writes to it). The
+                    # shared per-daemon connection is reused across workers.
+                    with contextlib.suppress(Exception):
+                        conn.rollback()
                     continue
                 self._last_success[worker.name] = time.monotonic()
                 log.info("cold_path.worker_done", worker=worker.name, **stats)

@@ -23,6 +23,7 @@ No LLM, so no budget pressure — pure SQL + the pure model in
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -56,11 +57,15 @@ from .entity_canonicalizer import EDGE_EXEMPT_EVENT_KINDS
 from .verdicts import is_unresolved_conflict
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from ..settings import Settings
 
 log = structlog.get_logger(__name__)
+
+# Narrowed error set for a tunable-registry lookup fallback: a whitelist miss
+# (KeyError), a DB hiccup (sqlite3.Error), or a malformed stored value
+# (ValueError/TypeError from the float() coercion). A genuine programming bug
+# (AttributeError, etc.) propagates instead of being silently swallowed.
+_TUNABLE_FALLBACK_ERRORS = (KeyError, sqlite3.Error, ValueError, TypeError)
 
 
 MAX_EDGES_PER_CYCLE = 100
@@ -240,9 +245,9 @@ class EdgeConfidenceScorer(ColdPathWorker):
 
 def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float]:
     """Resolve base_rate + corroboration_weight through the tuner registry,
-    falling back to the module defaults (surprise-window pattern). Until S8
-    registers the specs, ``registry.get`` raises KeyError and the except path
-    serves the pure-model defaults — so this worker ships before S8."""
+    falling back to the module defaults (surprise-window pattern). A registry
+    hiccup must never break scoring, so a narrowed error serves the pure-model
+    defaults; a genuine bug propagates."""
     from ..substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION
 
     base_rate = DEFAULT_BASE_RATE
@@ -253,7 +258,13 @@ def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float]:
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
-    except Exception:
+    except _TUNABLE_FALLBACK_ERRORS as exc:
+        log.warning(
+            "tunable_registry.fallback",
+            worker="edge_scorer",
+            tunable="edge_confidence.base_rate/corroboration_weight",
+            error=str(exc),
+        )
         return DEFAULT_BASE_RATE, W_CORROBORATION
     return base_rate, corroboration_weight
 

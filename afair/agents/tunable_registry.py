@@ -154,30 +154,13 @@ REGISTRY: tuple[TunableSpec, ...] = (
         bounded_delta=0.30,  # int gets a bit more headroom since 20% of 20 is 4
         rationale="Number of recent events the surprise scorer compares against.",
     ),
-    # ── entity canonicalizer ──────────────────────────────────────────
-    TunableSpec(
-        worker="entity_canonicalizer",
-        tunable="llm_escalation_threshold",
-        kind="float",
-        default=0.75,
-        min_value=0.50,
-        max_value=0.95,
-        bounded_delta=0.15,
-        rationale=(
-            "Confidence threshold below which entity matching escalates from Haiku to Sonnet."
-        ),
-    ),
-    # ── consolidator ──────────────────────────────────────────────────
-    TunableSpec(
-        worker="consolidator",
-        tunable="salience_cutoff",
-        kind="float",
-        default=0.50,
-        min_value=0.30,
-        max_value=0.80,
-        bounded_delta=0.20,
-        rationale="Only events at or above this salience are included in the daily roundup.",
-    ),
+    # NB: two once-registered tunables were removed as dead (P2e hygiene) —
+    # ``entity_canonicalizer.llm_escalation_threshold`` (the canonicalizer
+    # hardcodes SONNET_ESCALATION_THRESHOLD instead) and
+    # ``consolidator.salience_cutoff`` (the consolidator has no salience
+    # filter). Both were scouted by the tuner but read by nothing, so a
+    # promote recorded a no-op self-modification — a violation of the
+    # registry's own contract. Re-add either only alongside its real consumer.
     # ── schema evolver (ADR-0003 Phase 4) ─────────────────────────────
     # Only the two signal THRESHOLDS are tunable. The evolver's guardrails
     # (per-cycle caps, the 30-day cooldown, the slug format, sample

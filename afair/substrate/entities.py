@@ -37,6 +37,7 @@ additional rows, never as in-place mutation. Reads compose the
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -47,7 +48,6 @@ from .kinds import resolve_kind_batch, resolve_kind_slug
 from .sqlutil import iter_param_chunks
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Iterable
 
 
@@ -338,9 +338,9 @@ def write_entity_mention(
                     confidence,
                 ),
             )
-    except Exception as exc:
-        # IntegrityError on the UNIQUE constraint = already linked.
-        # Surface anything else.
+    except sqlite3.IntegrityError as exc:
+        # A UNIQUE-constraint violation = already linked; treat as a no-op.
+        # Any other integrity error (NOT NULL / FK / CHECK) is a bug → raise.
         if "UNIQUE constraint" in str(exc):
             return None
         raise
@@ -401,7 +401,8 @@ def write_entity_edge(
                     confidence,
                 ),
             )
-    except Exception as exc:
+    except sqlite3.IntegrityError as exc:
+        # UNIQUE violation = row already present → no-op; else propagate.
         if "UNIQUE constraint" in str(exc):
             return None
         raise
@@ -598,7 +599,8 @@ def write_edge_invalidation(
                 """,
                 (row_id, edge_id, invalidated_at, invalidated_by, reason, source_event_id),
             )
-    except Exception as exc:
+    except sqlite3.IntegrityError as exc:
+        # UNIQUE violation = row already present → no-op; else propagate.
         if "UNIQUE constraint" in str(exc):
             return None
         raise
@@ -678,7 +680,8 @@ def write_merge_invalidation(
                 """,
                 (_new_row_id(), merge_id, _now_iso(), invalidated_by, reason, source_event_id),
             )
-    except Exception as exc:
+    except sqlite3.IntegrityError as exc:
+        # UNIQUE violation = row already present → no-op; else propagate.
         if "UNIQUE constraint" in str(exc):
             return False
         raise
@@ -709,7 +712,8 @@ def retract_entity(
                 """,
                 (_new_row_id(), entity_id, _now_iso(), retracted_by, reason, source_event_id),
             )
-    except Exception as exc:
+    except sqlite3.IntegrityError as exc:
+        # UNIQUE violation = row already present → no-op; else propagate.
         if "UNIQUE constraint" in str(exc):
             return False
         raise
@@ -873,6 +877,8 @@ def find_entity_by_name(
 
 
 def iter_mentions_for_event(conn: sqlite3.Connection, event_hash: str) -> list[EntityMention]:
+    """Read all mentions for an event. Test utility (no production call site);
+    kept because the entity-graph tests assert against it."""
     rows = conn.execute(
         "SELECT * FROM entity_mentions WHERE event_hash = ? ORDER BY canonicalized_at",
         (event_hash,),
@@ -970,6 +976,8 @@ def resolve_canonical(conn: sqlite3.Connection, eid: str) -> str:
 
 
 def read_edge_invalidations(conn: sqlite3.Connection, edge_id: str) -> list[EdgeInvalidation]:
+    """Read all invalidations for an edge. Test utility (no production call
+    site); kept because the belief/edge tests assert against it."""
     rows = conn.execute(
         "SELECT * FROM edge_invalidations WHERE edge_id = ? ORDER BY invalidated_at",
         (edge_id,),

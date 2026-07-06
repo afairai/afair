@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -128,9 +129,13 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from ..substrate.events import Event
+
+# Narrowed error set for a tunable-registry lookup fallback (recall must never
+# fail on a tunable hiccup): a whitelist miss (KeyError), a DB hiccup
+# (sqlite3.Error), or a malformed stored value (ValueError/TypeError). A real
+# programming bug propagates instead of being swallowed.
+_TUNABLE_FALLBACK_ERRORS = (KeyError, sqlite3.Error, ValueError, TypeError)
 
 # All MCP-initiated events carry origin "agent" in v1. Per-client refinement
 # (e.g., "agent:claude-code") happens server-side in a later phase by reading
@@ -649,7 +654,15 @@ def _resolve_auto_confirm_floor(db: Any) -> float:
     try:
         registry = _TunableRegistry(db)
         return float(registry.get("belief", "auto_confirm_floor"))
-    except Exception:
+    except _TUNABLE_FALLBACK_ERRORS as exc:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "tunable_registry.fallback",
+            worker="recall",
+            tunable="belief.auto_confirm_floor",
+            error=str(exc),
+        )
         return _MIN_AUTO_CONFIRM_CONFIDENCE
 
 
@@ -726,7 +739,15 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
         _spec = _registry.get_spec("surprise", "context_window")
         _reg_value = _registry.get("surprise", "context_window")
         surprise_window = _reg_value if _reg_value != _spec.default else ctx.surprise_context_window
-    except Exception:
+    except _TUNABLE_FALLBACK_ERRORS as exc:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "tunable_registry.fallback",
+            worker="recall",
+            tunable="surprise.context_window",
+            error=str(exc),
+        )
         surprise_window = ctx.surprise_context_window
     recent_context = _recent_canonical_context(db, surprise_window)
 

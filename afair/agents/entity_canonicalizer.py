@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import sqlite3
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -111,12 +112,13 @@ from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from ..settings import Settings
     from ..substrate.events import Event
 
 log = structlog.get_logger(__name__)
+
+# See edge_scorer._TUNABLE_FALLBACK_ERRORS — narrowed so a real bug propagates.
+_TUNABLE_FALLBACK_ERRORS = (KeyError, sqlite3.Error, ValueError, TypeError)
 
 
 # ── version + producer markers ────────────────────────────────────────────
@@ -1473,7 +1475,13 @@ def _resolve_edge_confidence_weights(conn: sqlite3.Connection) -> tuple[float, f
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
-    except Exception:
+    except _TUNABLE_FALLBACK_ERRORS as exc:
+        log.warning(
+            "tunable_registry.fallback",
+            worker="entity_canonicalizer",
+            tunable="edge_confidence.base_rate/corroboration_weight",
+            error=str(exc),
+        )
         return DEFAULT_BASE_RATE, W_CORROBORATION
     return base_rate, corroboration_weight
 

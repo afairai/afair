@@ -143,6 +143,72 @@ def test_pruner_does_not_touch_events_table(db, settings_local: Settings) -> Non
     assert before == after
 
 
+def _insert_interp(
+    db, *, event, produced_by: str, status: str, produced_at: str, version: int = 1
+) -> None:
+    from ulid import ULID
+
+    db.execute(
+        """
+        INSERT INTO interpretations (id, event_id, event_hash, version, produced_at,
+                                     produced_by, extraction)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(ULID()),
+            event.id,
+            event.content_hash,
+            version,
+            produced_at,
+            produced_by,
+            json.dumps({"status": status, "best_guess_kind": "x"}),
+        ),
+    )
+    db.commit()
+
+
+def test_prune_stale_failed_extractions_batched(db, settings_local: Settings) -> None:
+    """The batched (anti-join) delete removes a stale failed extractor row that
+    has a success sibling — including across the retry-producer family — and
+    keeps a failed row with no success sibling. Behavior-preserving after the
+    N+1 rewrite."""
+    from afair.agents.pruner import _prune_stale_failed_extractions
+
+    old = "2020-01-01T00:00:00+00:00"
+    future_cutoff = "2099-01-01T00:00:00+00:00"
+
+    # (1) failed + success sibling, same producer → deleted.
+    e1 = write_event(db, origin="u", kind="remember", payload={"content_type": "text", "text": "1"})
+    _insert_interp(db, event=e1, produced_by="extractor:m", status="failed", produced_at=old)
+    _insert_interp(
+        db, event=e1, produced_by="extractor:m#retry1", status="success", produced_at=old
+    )
+
+    # (2) failed via retry-family + base success → deleted (family match).
+    e2 = write_event(db, origin="u", kind="remember", payload={"content_type": "text", "text": "2"})
+    _insert_interp(db, event=e2, produced_by="extractor:m#retry2", status="failed", produced_at=old)
+    _insert_interp(db, event=e2, produced_by="extractor:m", status="success", produced_at=old)
+
+    # (3) failed with NO success sibling → kept (still informative).
+    e3 = write_event(db, origin="u", kind="remember", payload={"content_type": "text", "text": "3"})
+    _insert_interp(db, event=e3, produced_by="extractor:m", status="failed", produced_at=old)
+
+    deleted = _prune_stale_failed_extractions(db, future_cutoff)
+    assert deleted == 2
+
+    remaining = {
+        (r["event_hash"], json.loads(r["extraction"])["status"])
+        for r in db.execute("SELECT event_hash, extraction FROM interpretations")
+    }
+    # Both success rows survive; e3's lone failure survives; the two stale
+    # failures (e1, e2) are gone.
+    assert (e1.content_hash, "success") in remaining
+    assert (e2.content_hash, "success") in remaining
+    assert (e3.content_hash, "failed") in remaining
+    assert (e1.content_hash, "failed") not in remaining
+    assert (e2.content_hash, "failed") not in remaining
+
+
 def _pc_entity(db, name: str, kind: str) -> str:
     from afair.substrate import write_entity
 

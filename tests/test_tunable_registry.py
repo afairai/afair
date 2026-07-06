@@ -311,3 +311,40 @@ def test_registry_resolves_promoted_edge_confidence_value(conn) -> None:
     )
     r.invalidate("edge_confidence", "base_rate")
     assert r.get("edge_confidence", "base_rate") == 0.75
+
+
+# ─── P2e: dead-tunable removal + narrowed fallback ─────────────────────────
+
+
+def test_removed_dead_tunables_absent_from_registry() -> None:
+    """The two dead tunables (read by nothing) were removed in P2e; the tuner
+    must no longer scout them."""
+    keys = {(s.worker, s.tunable) for s in REGISTRY}
+    assert ("entity_canonicalizer", "llm_escalation_threshold") not in keys
+    assert ("consolidator", "salience_cutoff") not in keys
+
+
+def test_resolver_fallback_on_narrowed_error(conn, monkeypatch, caplog) -> None:
+    """A narrowed registry error (KeyError) → the resolver serves the static
+    default and logs the fallback, rather than hard-failing."""
+    from afair.agents import entity_dedup
+
+    def _boom(self, worker, tunable):
+        raise KeyError("not whitelisted")
+
+    monkeypatch.setattr(TunableRegistry, "get", _boom)
+    value = entity_dedup._resolve_kind_unify_floor(conn)
+    assert value == entity_dedup.KIND_UNIFY_AUTO_CONFIRM_FLOOR
+
+
+def test_resolver_propagates_non_narrowed_error(conn, monkeypatch) -> None:
+    """A genuine programming bug (AttributeError) is NOT swallowed — it
+    propagates so the bug surfaces instead of degrading silently to default."""
+    from afair.agents import entity_dedup
+
+    def _bug(self, worker, tunable):
+        raise AttributeError("real bug")
+
+    monkeypatch.setattr(TunableRegistry, "get", _bug)
+    with pytest.raises(AttributeError):
+        entity_dedup._resolve_kind_unify_floor(conn)

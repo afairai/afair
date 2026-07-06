@@ -120,9 +120,9 @@ def rrf_merge(
 ) -> list[Event]:
     """Pure merge function — combine two ranked result lists via RRF.
 
-    Separated from ``hybrid_search`` so callers that fetched FTS and vec
-    results in parallel (e.g., recall with the embedding API call running
-    concurrently with FTS) can merge without re-running the queries.
+    Recall fetches the FTS and vec result lists in parallel (the embedding
+    API call runs concurrently with FTS) and calls this to merge them without
+    re-running the queries.
     """
     if not fts_hits and not vec_hits:
         return []
@@ -142,25 +142,3 @@ def rrf_merge(
 
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)
     return [by_id[eid] for eid in sorted_ids[:limit]]
-
-
-def hybrid_search(
-    conn: sqlite3.Connection,
-    *,
-    query: str,
-    query_vector: Sequence[float] | None,
-    limit: int = 20,
-    rrf_k: int = 60,
-) -> list[Event]:
-    """Combine FTS5 + vector results via Reciprocal Rank Fusion.
-
-    Sequential variant — runs FTS, then vec, then merges. Callers that want
-    to overlap the embedding API call with FTS should fetch the two
-    result lists themselves (in parallel) and call ``rrf_merge`` directly.
-
-    When ``query_vector`` is ``None`` this falls back to FTS-only —
-    useful when semantic_recall is disabled or the embedding API failed.
-    """
-    fts_hits = search_fts(conn, query, limit=limit)
-    vec_hits = search_vec(conn, query_vector, limit=limit) if query_vector is not None else []
-    return rrf_merge(fts_hits, vec_hits, limit=limit, rrf_k=rrf_k)

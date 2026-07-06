@@ -186,41 +186,41 @@ def _prune_stale_failed_extractions(conn: sqlite3.Connection, cutoff_iso: str) -
     portion before ``#retry`` so 'extractor:anthropic/claude#retry2'
     is treated as the same producer family as 'extractor:anthropic/claude'.
     """
-    candidates = conn.execute(
-        """
-        SELECT id, event_hash, version, produced_by
-        FROM interpretations
-        WHERE produced_by LIKE 'extractor:%'
-          AND produced_at < ?
-          AND json_extract(extraction, '$.status') = 'failed'
-        """,
-        (cutoff_iso,),
-    ).fetchall()
-
-    deleted = 0
-    for row in candidates:
-        base_producer = (row["produced_by"] or "").split("#retry", 1)[0]
-        # Is there ANY successful row at the same (event_hash, version)
-        # produced by this family?
-        success = conn.execute(
+    # One correlated anti-join DELETE instead of the old per-row SELECT +
+    # per-row DELETE-in-its-own-tx (Perf audit — N+1). The base-producer
+    # family match (compare the portion before ``#retry``) moves into SQL:
+    # ``instr``/``substr`` derive the base producer of each failed row and the
+    # EXISTS subquery checks for a success sibling under that family.
+    with conn:
+        cursor = conn.execute(
             """
-            SELECT 1 FROM interpretations
-            WHERE event_hash = ?
-              AND version = ?
-              AND produced_by LIKE ?
-              AND json_extract(extraction, '$.status') = 'success'
-            LIMIT 1
+            DELETE FROM interpretations
+            WHERE id IN (
+                SELECT f.id
+                FROM interpretations f
+                WHERE f.produced_by LIKE 'extractor:%'
+                  AND f.produced_at < :cutoff
+                  AND json_extract(f.extraction, '$.status') = 'failed'
+                  AND EXISTS (
+                      SELECT 1 FROM interpretations s
+                      WHERE s.event_hash = f.event_hash
+                        AND s.version = f.version
+                        AND json_extract(s.extraction, '$.status') = 'success'
+                        AND s.produced_by LIKE (
+                            (CASE
+                                WHEN instr(f.produced_by, '#retry') > 0
+                                THEN substr(
+                                    f.produced_by, 1, instr(f.produced_by, '#retry') - 1
+                                )
+                                ELSE f.produced_by
+                             END) || '%'
+                        )
+                  )
+            )
             """,
-            (row["event_hash"], row["version"], base_producer + "%"),
-        ).fetchone()
-        if success is None:
-            continue  # keep — no success exists yet, the failure is still informative
-        with conn:
-            conn.execute("DELETE FROM interpretations WHERE id = ?", (row["id"],))
-        deleted += 1
-        log.info(
-            "pruner.dropped_stale_failure",
-            event_hash=row["event_hash"][:24] + "...",
-            produced_by=row["produced_by"],
+            {"cutoff": cutoff_iso},
         )
+    deleted = cursor.rowcount or 0
+    if deleted:
+        log.info("pruner.dropped_stale_failures", count=deleted)
     return deleted

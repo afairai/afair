@@ -118,7 +118,7 @@ from .payload import (
     derive_searchable_text,
 )
 from .schema import SCHEMA_VERSION
-from .search import hybrid_search, rrf_merge, search_fts, search_vec
+from .search import rrf_merge, search_fts, search_vec
 from .temporal import (
     TEMPORAL_CLASSES,
     EventTemporal,
@@ -172,7 +172,6 @@ __all__ = [
     "find_edges_for_source_event",
     "find_entity_by_name",
     "find_live_merge_from",
-    "hybrid_search",
     "init_db",
     "iter_edges_for_entity",
     "iter_events",

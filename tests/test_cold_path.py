@@ -122,3 +122,62 @@ def test_status_reports_each_worker(tmp_path: Path, settings_local: Settings) ->
     st = sched.status()
     assert set(st.keys()) == {"counting", "raiser"}
     assert all("interval_seconds" in v for v in st.values())
+
+
+class _LeakyWriter(ColdPathWorker):
+    """Opens a write on the shared connection then raises before commit."""
+
+    name = "leaky"
+    interval_seconds = 0
+
+    def run(self, conn: sqlite3.Connection, _settings: Settings) -> dict[str, Any]:
+        conn.execute(
+            """
+            INSERT INTO oauth_codes (
+                code, client_id, redirect_uri, scope, code_challenge,
+                code_challenge_method, user_sub, user_email, expires_at, created_at
+            ) VALUES ('leak', 'c', 'u', NULL, 'ch', 'S256', 'u', NULL, '2999-01-01', '2999-01-01')
+            """
+        )
+        msg = "boom after an uncommitted write"
+        raise RuntimeError(msg)
+
+
+class _RowChecker(ColdPathWorker):
+    """Records whether the leaked row is visible on the shared connection."""
+
+    name = "checker"
+    interval_seconds = 0
+
+    def __init__(self) -> None:
+        self.seen: int | None = None
+
+    def run(self, conn: sqlite3.Connection, _settings: Settings) -> dict[str, Any]:
+        self.seen = conn.execute("SELECT COUNT(*) FROM oauth_codes WHERE code = 'leak'").fetchone()[
+            0
+        ]
+        return {"seen": self.seen}
+
+
+def test_worker_failure_rolls_back_open_transaction(
+    tmp_path: Path, settings_local: Settings
+) -> None:
+    """A worker that raises after an uncommitted write must not leak the open
+    transaction to the next worker. Same connection sees its own uncommitted
+    writes, so without the rollback the checker would see the leaked row (1);
+    with it, the tx is rolled back and the checker sees 0."""
+    leaky = _LeakyWriter()
+    checker = _RowChecker()
+    open_db(tmp_path)
+    sched = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[leaky, checker],
+        poll_seconds=1,
+    )
+    sched.start()
+    deadline = time.monotonic() + 3.0
+    while checker.seen is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert checker.seen == 0

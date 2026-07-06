@@ -238,8 +238,13 @@ def test_registry_override_raises_floor(conn, monkeypatch) -> None:
 
 
 def test_registry_error_falls_back_to_static_floor(conn, monkeypatch) -> None:
-    """A misbehaving registry never breaks the cycle — the static constant is
-    served (recall/dedup must never fail on a tunable lookup)."""
+    """A registry hiccup (whitelist miss / DB error / malformed value) never
+    breaks the cycle — the static constant is served (recall/dedup must never
+    fail on a tunable lookup). P2e narrowed the catch: a genuine bug now
+    propagates (see test_resolver_propagates_non_narrowed_error), so this
+    simulates a realistic DB-level hiccup, which stays in the fallback set."""
+    import sqlite3
+
     import afair.agents.tunable_registry as tr
 
     class _Boom:
@@ -247,7 +252,7 @@ def test_registry_error_falls_back_to_static_floor(conn, monkeypatch) -> None:
             pass
 
         def get(self, *_a, **_k):
-            raise RuntimeError("registry down")
+            raise sqlite3.OperationalError("registry down")
 
     monkeypatch.setattr(tr, "TunableRegistry", _Boom)
     assert ed._resolve_kind_unify_floor(conn) == ed.KIND_UNIFY_AUTO_CONFIRM_FLOOR

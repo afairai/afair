@@ -27,6 +27,7 @@ clusters are judged per run.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -48,11 +49,12 @@ from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from ..settings import Settings
 
 log = structlog.get_logger(__name__)
+
+# See edge_scorer._TUNABLE_FALLBACK_ERRORS — narrowed so a real bug propagates.
+_TUNABLE_FALLBACK_ERRORS = (KeyError, sqlite3.Error, ValueError, TypeError)
 
 
 DEDUP_PRODUCED_BY = "entity_deduplicator:v0"
@@ -101,7 +103,13 @@ def _resolve_kind_unify_floor(conn: sqlite3.Connection) -> float:
 
     try:
         return float(TunableRegistry(conn).get("entity_dedup", "kind_unify_floor"))
-    except Exception:
+    except _TUNABLE_FALLBACK_ERRORS as exc:
+        log.warning(
+            "tunable_registry.fallback",
+            worker="entity_dedup",
+            tunable="kind_unify_floor",
+            error=str(exc),
+        )
         return KIND_UNIFY_AUTO_CONFIRM_FLOOR
 
 
