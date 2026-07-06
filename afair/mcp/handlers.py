@@ -46,7 +46,10 @@ from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
 from ..agents.conflict_resolver import read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
-from ..agents.interpretation import read_latest_interpretations_batch
+from ..agents.interpretation import (
+    read_latest_interpretations_batch,
+    read_latest_salience_batch,
+)
 from ..agents.invalidation import (
     INVALIDATE_KIND,
     InvalidationInfo,
@@ -393,10 +396,51 @@ def _strip_null_validity(edge: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in edge.items() if not (k in ("valid_from", "valid_to") and v is None)}
 
 
+def _render_why_durable(
+    salience_extraction: dict[str, Any], overlay: dict[str, Any] | None
+) -> str | None:
+    """A compact human-readable "why this memory is durable" line (W2).
+
+    Pure: composes the salience score, its top-2 nonzero component drivers, and
+    the temporal_class + surprise_score already on the overlay into one string.
+    Every part is omitted when absent; returns None when nothing is available
+    (an event with no salience row AND no temporal/surprise signal). Never
+    raises — a malformed component value is simply skipped.
+    """
+    parts: list[str] = []
+    sal = salience_extraction.get("salience")
+    components = salience_extraction.get("salience_components")
+    top: list[str] = []
+    if isinstance(components, dict):
+        drivers = sorted(
+            (
+                (k, v)
+                for k, v in components.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+            ),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )
+        top = [k for k, _ in drivers[:2]]
+    if isinstance(sal, (int, float)) and not isinstance(sal, bool):
+        line = f"salience {round(float(sal), 2)}"
+        if top:
+            line += f" ({', '.join(top)})"
+        parts.append(line)
+    tclass = overlay.get("temporal_class") if overlay else None
+    if tclass:
+        parts.append(f"temporal:{tclass}")
+    surprise = overlay.get("surprise_score") if overlay else None
+    if isinstance(surprise, (int, float)) and not isinstance(surprise, bool):
+        parts.append(f"surprise {round(float(surprise), 2)}")
+    return "; ".join(parts) if parts else None
+
+
 def _shape_interpretation(
     extraction: dict[str, Any] | None,
     overlay: dict[str, Any] | None,
     verbosity: str,
+    salience_extraction: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the per-hit ``interpretation`` dict at the requested verbosity.
 
@@ -414,6 +458,24 @@ def _shape_interpretation(
         if overlay:
             base = base if base is not None else {}
             base.update(overlay)
+        # Durability rationale (W2) — full verbosity ONLY, so compact/standard
+        # stay on their existing shape and add zero queries. Merged here (not a
+        # new RecallHit field) so the surface freeze holds; keys are simply
+        # absent when there is no salience row.
+        if verbosity == "full" and salience_extraction is not None:
+            durability: dict[str, Any] = {}
+            sal = salience_extraction.get("salience")
+            if isinstance(sal, (int, float)) and not isinstance(sal, bool):
+                durability["salience"] = round(float(sal), 3)
+            components = salience_extraction.get("salience_components")
+            if components is not None:
+                durability["salience_components"] = components
+            why = _render_why_durable(salience_extraction, overlay)
+            if why is not None:
+                durability["why_durable"] = why
+            if durability:
+                base = base if base is not None else {}
+                base.update(durability)
         if base is None:
             return None
         if verbosity == "standard":
@@ -478,6 +540,7 @@ def _event_to_hit(
     conflicts: list[dict[str, Any]] | None = None,
     entity_overlay: dict[str, Any] | None = None,
     interpretation_extraction: dict[str, Any] | None = None,
+    salience_extraction: dict[str, Any] | None = None,
     linked_event_ids: list[str] | None = None,
     client: str | None = None,
     verbosity: str = "standard",
@@ -524,7 +587,9 @@ def _event_to_hit(
     # (canonical entities + edges + surprise + temporal) is merged inside the
     # shaper so no RecallHit field is added (the 2026-05-26 surface freeze holds;
     # only the free-form dict content varies).
-    interpretation = _shape_interpretation(interpretation_extraction, entity_overlay, verbosity)
+    interpretation = _shape_interpretation(
+        interpretation_extraction, entity_overlay, verbosity, salience_extraction
+    )
 
     # Same fall-back for linked_event_ids when the caller didn't batch.
     if linked_event_ids is None:
@@ -1729,6 +1794,9 @@ def recall(
         # Provenance (ADR-0006): by_id/by_content_hash always serve the full
         # shape, so always surface the writing client.
         provenance_map = read_event_provenance_batch(db, [target.id])
+        # Durability rationale (W2): by_id/by_content_hash serve verbosity="full",
+        # so always fetch the salience overlay for this single event.
+        salience_map = read_latest_salience_batch(db, [target.content_hash])
         interp_for_target = interp_map.get(target.content_hash)
         return RecallResult(
             hits=[
@@ -1742,6 +1810,7 @@ def recall(
                     interpretation_extraction=(
                         interp_for_target.extraction if interp_for_target else None
                     ),
+                    salience_extraction=salience_map.get(target.content_hash),
                     linked_event_ids=linked_map.get(target.content_hash, []),
                     client=_earliest_client(provenance_map.get(target.id)),
                     # by_id/by_content_hash are the re-fetch escape hatch: always
@@ -1888,6 +1957,10 @@ def recall(
     provenance_map = (
         read_event_provenance_batch(db, [e.id for e in events]) if verbosity != "compact" else {}
     )
+    # Durability rationale (W2): merged only at verbosity="full", so compact and
+    # standard add ZERO queries here — the salience overlay is fetched only when
+    # it will actually be served.
+    salience_map = read_latest_salience_batch(db, event_hashes) if verbosity == "full" else {}
     return RecallResult(
         hits=[
             _event_to_hit(
@@ -1900,6 +1973,7 @@ def recall(
                 interpretation_extraction=(
                     interp_map[e.content_hash].extraction if e.content_hash in interp_map else None
                 ),
+                salience_extraction=salience_map.get(e.content_hash),
                 linked_event_ids=linked_map.get(e.content_hash, []),
                 client=_earliest_client(provenance_map.get(e.id)),
                 verbosity=verbosity,

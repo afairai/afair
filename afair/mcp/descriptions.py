@@ -194,9 +194,12 @@ ARGUMENTS (all optional; combine as needed):
                   caveat-bearing conflicts. Use this by default.
       "standard"→ the full interpretation minus the redundant raw entity
                   list and null edge validity bounds.
-      "full"    → every field. Use standard/full, or by_id + full_payload,
-                  when you need salient_facts / raw entities / the complete
-                  conflict history. by_id/by_content_hash always serve full.
+      "full"    → every field, plus the durability rationale
+                  (interpretation.salience / salience_components / why_durable:
+                  a short "why this memory ranks as durable" line). Use
+                  standard/full, or by_id + full_payload, when you need
+                  salient_facts / raw entities / the complete conflict history.
+                  by_id/by_content_hash always serve full.
   - cursor: Opaque paging token for search/browse. Pass the ``next_cursor``
     from a prior recall back here verbatim to get the next page. Best-effort:
     rankings are recomputed per call. A bad cursor serves page 1 with a note.

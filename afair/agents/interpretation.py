@@ -342,3 +342,45 @@ def read_latest_interpretations_batch(
         )
 
     return out
+
+
+def read_latest_salience_batch(
+    conn: sqlite3.Connection,
+    event_hashes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """The latest salience interpretation's ``extraction`` dict per event_hash.
+
+    Same batched, latest-wins shape as :func:`read_latest_interpretations_batch`
+    but filtered to the salience producer (``produced_by LIKE 'salience:%'``).
+    The salience worker writes ``{salience, salience_components, status}`` into a
+    separate interpretation row (see agents/salience.py) — invisible to the
+    extractor-only recall read. Recall surfaces it as the durability rationale at
+    verbosity="full" only (W2), so this runs off the compact/standard hot path.
+
+    Returns a dict keyed by event_hash → the row's ``extraction`` dict. Hashes
+    with no salience row are absent (the caller treats that as "no rationale",
+    never an error).
+    """
+    import json
+
+    if not event_hashes:
+        return {}
+
+    placeholders = ",".join("?" * len(event_hashes))
+    rows = conn.execute(
+        f"""
+        SELECT event_hash, produced_at, version, extraction FROM interpretations
+        WHERE event_hash IN ({placeholders})
+          AND produced_by LIKE 'salience:%'
+        ORDER BY event_hash, produced_at DESC, version DESC
+        """,
+        event_hashes,
+    ).fetchall()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        h = row["event_hash"]
+        if h in out:
+            continue  # keep the newest (latest-wins) salience row per hash
+        out[h] = json.loads(row["extraction"])
+    return out
