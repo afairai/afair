@@ -233,13 +233,16 @@ def build_server(settings: Settings) -> FastMCP:
         full_payload: bool = False,
         stats: bool = False,
         feedback: schemas.RecallFeedback | None = None,
-        decide: schemas.CorrectionDecision | None = None,
+        decide: schemas.CorrectionDecision | list[schemas.CorrectionDecision] | None = None,
+        pending_limit: int | None = None,
+        pending_offset: int = 0,
     ) -> schemas.RecallResult:
         # decide= applies corrections (entity merges/retractions, observe
         # events) — a write, so it needs write scope like remember/observe.
         # feedback= only writes a best-effort tuner_state telemetry row
-        # (no user-facing state), so read-only tokens may still give it.
-        if decide is not None:
+        # (no user-facing state), so read-only tokens may still give it. An
+        # empty batch (decide=[]) decides nothing, so it needs no write scope.
+        if decide is not None and (not isinstance(decide, list) or decide):
             enforce_write_scope()
         return handlers.recall(
             query=query,
@@ -252,6 +255,8 @@ def build_server(settings: Settings) -> FastMCP:
             stats=stats,
             feedback=feedback,
             decide=decide,
+            pending_limit=pending_limit,
+            pending_offset=pending_offset,
         )
 
     @mcp.tool(description=descriptions.OBSERVE, version="1")

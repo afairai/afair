@@ -97,8 +97,10 @@ from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
 from .context import connect_for_thread, get_context
 from .schemas import (
+    MAX_DECIDE_BATCH,
     MAX_FEEDBACK_IDS_PER_CALL,
     MAX_FEEDBACK_TOPIC_CHARS,
+    MAX_PENDING_LIMIT,
     MAX_REMEMBER_BYTES,
     BinaryContent,
     CompoundBlobRefPart,
@@ -107,6 +109,7 @@ from .schemas import (
     ConflictFlag,
     ContextSummary,
     CorrectionDecision,
+    CorrectionOutcomeView,
     Depth,
     InvalidationSummary,
     ObserveEvent,
@@ -1265,7 +1268,9 @@ def recall(
     full_payload: bool = False,
     stats: bool = False,
     feedback: RecallFeedback | None = None,
-    decide: CorrectionDecision | None = None,
+    decide: CorrectionDecision | list[CorrectionDecision] | None = None,
+    pending_limit: int | None = None,
+    pending_offset: int = 0,
 ) -> RecallResult:
     """Read the vault. Six call modes share this signature:
 
@@ -1305,31 +1310,61 @@ def recall(
     # tell the user "done"; the outcome rides back on `note`. Kept in its own
     # variable so the query path's note reassignments can't clobber it on a
     # combined recall(decide=..., query=...) call.
+    decisions_out: list[CorrectionOutcomeView] = []
     decide_note: str | None = None
     if decide is not None:
-        outcome = decide_correction(
-            db,
-            proposal_id=decide.proposal_id,
-            verdict=decide.verdict,
-            to_kind=decide.to_kind,
-        )
-        # decide_correction dispatches ont_-prefixed ids to the ontology
-        # queue (ADR-0003 Phase 5); the note labels which queue acted.
-        label = (
-            "ontology revision"
-            if decide.proposal_id.startswith(ONTOLOGY_PROPOSAL_ID_PREFIX)
-            else "correction"
-        )
-        decide_note = f"{label} {decide.verdict}: {outcome.note}"
+        batch = decide if isinstance(decide, list) else [decide]
+        if len(batch) > MAX_DECIDE_BATCH:
+            msg = f"decide accepts at most {MAX_DECIDE_BATCH} decisions per call; got {len(batch)}"
+            raise ValueError(msg)
+        for d in batch:
+            try:
+                outcome = decide_correction(
+                    db, proposal_id=d.proposal_id, verdict=d.verdict, to_kind=d.to_kind
+                )
+                decisions_out.append(
+                    CorrectionOutcomeView(
+                        proposal_id=outcome.proposal_id, status=outcome.status, note=outcome.note
+                    )
+                )
+            except ValueError as exc:
+                # One bad decision must not void the rest of an operator batch;
+                # surfaced per-item, never silently swallowed.
+                decisions_out.append(
+                    CorrectionOutcomeView(proposal_id=d.proposal_id, status="error", note=str(exc))
+                )
+        applied = sum(1 for o in decisions_out if o.status in ("applied", "confirmed", "rejected"))
+        if len(batch) == 1:
+            # Preserve the single-decision note format shipped clients read:
+            # "<label> <verdict>: <note>". decide_correction dispatches
+            # ont_-prefixed ids to the ontology queue (ADR-0003 Phase 5).
+            single = batch[0]
+            label = (
+                "ontology revision"
+                if single.proposal_id.startswith(ONTOLOGY_PROPOSAL_ID_PREFIX)
+                else "correction"
+            )
+            decide_note = f"{label} {single.verdict}: {decisions_out[0].note}"
+        else:
+            decide_note = f"{applied}/{len(batch)} corrections decided"
 
     summary: ContextSummary | None = None
     if stats:
         summary = _build_stats_summary(db)
 
     # Surface the open audit queue on the session-start/check-in call
-    # (stats=True), and after a decision so the client sees what remains.
+    # (stats=True), after a decision so the client sees what remains, and
+    # whenever the caller explicitly pages it (pending_limit set). Pagination is
+    # additive per I1: a client draining the queue asks for a page, decides it,
+    # then re-fetches at pending_offset=0 (deciding removes rows from the open
+    # set, so advancing the offset would skip the new head — see the helper).
+    include_pending = stats or decide is not None or pending_limit is not None
+    eff_pending_limit = min(pending_limit if pending_limit is not None else 20, MAX_PENDING_LIMIT)
+    eff_pending_offset = max(0, pending_offset)
     pending: list[ProposedCorrectionView] = (
-        _pending_correction_views(db) if (stats or decide is not None) else []
+        _pending_correction_views(db, limit=eff_pending_limit, offset=eff_pending_offset)
+        if include_pending
+        else []
     )
 
     # The cheap universal nudge: the TRUE open-queue total on every recall,
@@ -1355,6 +1390,7 @@ def recall(
                 summary=summary,
                 pending_corrections=pending,
                 pending_corrections_count=pending_count,
+                decisions=decisions_out,
             )
         invalidations = _attach_invalidations([target], db)
         conflicts = _attach_conflicts([target], db)
@@ -1382,6 +1418,7 @@ def recall(
             summary=summary,
             pending_corrections=pending,
             pending_corrections_count=pending_count,
+            decisions=decisions_out,
         )
 
     # ── Search / browse mode ───────────────────────────────────────────────
@@ -1501,6 +1538,7 @@ def recall(
         coverage=_compute_coverage(events, invalidations, conflicts, overlay),
         pending_corrections=pending,
         pending_corrections_count=pending_count,
+        decisions=decisions_out,
     )
 
 
@@ -1531,11 +1569,25 @@ def _combine_notes(*parts: str | None) -> str | None:
     return "; ".join(kept) if kept else None
 
 
-def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorrectionView]:
+def _pending_correction_views(
+    db: Any, *, limit: int = 20, offset: int = 0
+) -> list[ProposedCorrectionView]:
     """Open entity-audit AND ontology proposals, mapped to the recall wire
     model. One list, one decide loop (ADR-0003 Phase 5): ontology proposals
     carry ``kind='ontology_<action>'`` and dispatch on their ``ont_`` id
-    prefix server-side, so the client treats every row identically."""
+    prefix server-side, so the client treats every row identically.
+
+    Pagination: each source is fetched to ``offset + limit`` (entity-audit
+    first, ontology second — the existing order), the two are concatenated,
+    then the window ``[offset : offset + limit]`` is sliced. Queues are at most
+    a few hundred rows, so slicing the concatenation in Python is simpler and
+    correct versus threading a cross-table offset through SQL.
+
+    Drain semantics: deciding a proposal removes it from the open set, so a
+    client working the queue down should re-fetch at ``pending_offset=0`` after
+    each decide batch rather than advancing the offset (advancing would skip the
+    rows that shifted into the head)."""
+    fetch = offset + limit
     views = [
         ProposedCorrectionView(
             id=p.id,
@@ -1546,7 +1598,7 @@ def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorre
             evidence=p.evidence,
             confidence=p.confidence,
         )
-        for p in read_pending_corrections(db, limit=limit)
+        for p in read_pending_corrections(db, limit=fetch)
     ]
     views += [
         ProposedCorrectionView(
@@ -1557,9 +1609,9 @@ def _pending_correction_views(db: Any, *, limit: int = 20) -> list[ProposedCorre
             confidence=p.confidence,
             subject_slug=p.subject_slug,
         )
-        for p in read_pending_ontology_proposals(db, limit=limit)
+        for p in read_pending_ontology_proposals(db, limit=fetch)
     ]
-    return views
+    return views[offset : offset + limit]
 
 
 # ── observe ─────────────────────────────────────────────────────────────────

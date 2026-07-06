@@ -133,19 +133,20 @@ def _prompt_for(action: str, subject_slug: str, detail: dict[str, Any], evidence
 
 
 def read_pending_ontology_proposals(
-    conn: sqlite3.Connection, *, limit: int = 20
+    conn: sqlite3.Connection, *, limit: int = 20, offset: int = 0
 ) -> list[PendingOntologyProposal]:
     """Open proposals (``status='proposed'``), most-confident first —
-    the same ordering contract as ``read_pending_corrections``."""
+    the same ordering contract as ``read_pending_corrections`` (incl. the
+    ``id`` tiebreaker for stable pagination) plus the additive ``offset``."""
     rows = conn.execute(
         """
         SELECT id, action, subject_slug, detail, evidence, confidence
         FROM proposed_ontology_revisions
         WHERE status = 'proposed'
-        ORDER BY confidence DESC, detected_at ASC
-        LIMIT ?
+        ORDER BY confidence DESC, detected_at ASC, id ASC
+        LIMIT ? OFFSET ?
         """,
-        (limit,),
+        (limit, offset),
     ).fetchall()
     out: list[PendingOntologyProposal] = []
     for r in rows:

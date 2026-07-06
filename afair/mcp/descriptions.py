@@ -203,6 +203,18 @@ ARGUMENTS (all optional; combine as needed):
     better surprise calibration). After a recall, the NEXT time you
     call recall, include feedback referring to the prior hits. Don't
     ask whether to. Just send it. Empty payload is a no-op.
+  - decide: Confirm/reject pending review proposals. Accepts a SINGLE
+    decision or a LIST of up to 50 (batch-drain the queue in one call).
+    Each: {"proposal_id": "...", "verdict": "confirm"|"reject"|"retract",
+    "to_kind": "..."}. The per-decision outcomes come back in
+    ``decisions`` (see RETURN). A bad decision in a batch is reported as
+    that item's outcome (status "error"); the rest still apply.
+  - pending_limit / pending_offset: Page the review queue. pending_limit
+    (default 20, server cap 200) sets the page size; pending_offset skips
+    that many rows. Passing pending_limit alone includes the list even
+    without stats=True. While DRAINING the queue, decide a page then
+    re-fetch at pending_offset=0 — deciding removes rows from the open
+    set, so advancing the offset would skip the new head.
 
 RETURN:
   {"hits": [{"event_id": "...", "content_hash": "...", "created_at": "...",
@@ -215,7 +227,11 @@ RETURN:
              "conflicts": [...]}],
    "depth_used": "shallow" | "normal" | "deep",
    "note": null | "...",
-   "summary": null | {total_events, by_kind, by_origin}}
+   "summary": null | {total_events, by_kind, by_origin},
+   "decisions": [{"proposal_id": "...", "status": "...", "note": "..."}, ...]}
+
+``decisions`` is populated only when this call carried ``decide=`` — one
+outcome per decision sent, in order (empty otherwise).
 
 Each hit's payload is either the truncated summary or the full content,
 depending on the full_payload flag (and lookup mode). ``truncated`` tells

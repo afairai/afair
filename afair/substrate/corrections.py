@@ -113,12 +113,14 @@ def _prompt_for(conn: sqlite3.Connection, kind: str, name: str, detail: dict[str
 
 
 def read_pending_corrections(
-    conn: sqlite3.Connection, *, limit: int = 20
+    conn: sqlite3.Connection, *, limit: int = 20, offset: int = 0
 ) -> list[PendingCorrection]:
     """Open proposals (``status='proposed'``), most-confident first.
 
     Joined to ``entities`` for the canonical name so the caller has a
-    ready-to-ask question without a second lookup.
+    ready-to-ask question without a second lookup. ``offset`` pages the queue;
+    ``p.id`` is the final ORDER BY tiebreaker so pagination is stable across
+    calls even when many rows share a confidence + detected_at.
     """
     rows = conn.execute(
         """
@@ -127,10 +129,10 @@ def read_pending_corrections(
         FROM proposed_corrections p
         JOIN entities e ON e.id = p.entity_id
         WHERE p.status = 'proposed'
-        ORDER BY p.confidence DESC, p.detected_at ASC
-        LIMIT ?
+        ORDER BY p.confidence DESC, p.detected_at ASC, p.id ASC
+        LIMIT ? OFFSET ?
         """,
-        (limit,),
+        (limit, offset),
     ).fetchall()
     out: list[PendingCorrection] = []
     for r in rows:

@@ -571,3 +571,144 @@ def test_recall_binary_returns_metadata_not_bytes(ctx: ServerContext) -> None:
     assert payload["filename_hint"] == "bug.png"
     assert payload["size_bytes"] == len(raw)
     assert "text" not in payload  # bytes aren't inlined
+
+
+# ── batch decide + pending-queue pagination (P1-1) ───────────────────────────
+
+
+def _seed_retype_proposal(ctx: ServerContext, name: str) -> str:
+    """Insert one open retype proposal (person → product) with a real entity,
+    returning its proposal id. Confirm applies a kind assignment + observe;
+    reject just closes it."""
+    from ulid import ULID
+
+    from afair.substrate import write_entity, write_event
+
+    ev = write_event(
+        ctx.db, origin="user", kind="remember", payload={"content_type": "text", "text": name}
+    )
+    ent = write_entity(
+        ctx.db,
+        canonical_name=name,
+        kind="person",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.8,
+    )
+    pid = str(ULID())
+    import json
+
+    with ctx.db:
+        ctx.db.execute(
+            """
+            INSERT INTO proposed_corrections (
+                id, kind, entity_id, detail, evidence, confidence, tier,
+                detected_by, detected_at, status
+            ) VALUES (?, 'retype', ?, ?, 'domain-shaped name', 0.9, 'review',
+                      'test', '2026-01-01T00:00:00+00:00', 'proposed')
+            """,
+            (
+                pid,
+                ent.id,
+                json.dumps({"from_kind": "person", "to_kind": "product", "name": name}),
+            ),
+        )
+    return pid
+
+
+def test_recall_batch_decide_applies_and_reports(ctx: ServerContext) -> None:
+    from afair.mcp.schemas import CorrectionDecision
+
+    p1 = _seed_retype_proposal(ctx, "a.team")
+    p2 = _seed_retype_proposal(ctx, "b.team")
+    p3 = _seed_retype_proposal(ctx, "c.team")
+    assert handlers.recall().pending_corrections_count == 3
+
+    r = handlers.recall(
+        decide=[
+            CorrectionDecision(proposal_id=p1, verdict="confirm"),
+            CorrectionDecision(proposal_id=p2, verdict="reject"),
+            CorrectionDecision(proposal_id=p3, verdict="confirm"),
+        ]
+    )
+    assert len(r.decisions) == 3
+    by_id = {d.proposal_id: d.status for d in r.decisions}
+    assert by_id[p1] == "applied"
+    assert by_id[p2] == "rejected"
+    assert by_id[p3] == "applied"
+    assert r.pending_corrections_count == 0
+
+    # One observe event per APPLIED change (the two confirms).
+    observes = ctx.db.execute(
+        "SELECT COUNT(*) FROM events WHERE kind = 'observe' "
+        "AND json_extract(payload, '$.action') = 'confirm_correction'"
+    ).fetchone()[0]
+    assert observes == 2
+
+    # Re-sending the same batch → all already-decided (idempotent).
+    again = handlers.recall(
+        decide=[
+            CorrectionDecision(proposal_id=p1, verdict="confirm"),
+            CorrectionDecision(proposal_id=p2, verdict="reject"),
+            CorrectionDecision(proposal_id=p3, verdict="confirm"),
+        ]
+    )
+    assert all(d.status == "already_decided" for d in again.decisions)
+
+
+def test_recall_single_decide_keeps_legacy_note(ctx: ServerContext) -> None:
+    from afair.mcp.schemas import CorrectionDecision
+
+    p1 = _seed_retype_proposal(ctx, "x.team")
+    r = handlers.recall(decide=CorrectionDecision(proposal_id=p1, verdict="confirm"))
+    assert len(r.decisions) == 1
+    # Legacy single-decision note format preserved for shipped clients.
+    assert r.note is not None
+    assert r.note.startswith("correction confirm:")
+
+
+def test_recall_batch_decide_over_cap_raises(ctx: ServerContext) -> None:
+    from afair.mcp.schemas import CorrectionDecision
+
+    batch = [CorrectionDecision(proposal_id=f"p{i}", verdict="confirm") for i in range(51)]
+    with pytest.raises(ValueError, match="at most 50"):
+        handlers.recall(decide=batch)
+
+
+def test_recall_batch_decide_isolates_bad_item(ctx: ServerContext) -> None:
+    from afair.mcp.schemas import CorrectionDecision
+
+    good = _seed_retype_proposal(ctx, "good.team")
+    # 'revert' is meaningless for a non-ontology proposal → decide_correction
+    # raises ValueError; the batch loop turns that into a per-item error outcome
+    # instead of voiding the whole batch.
+    r = handlers.recall(
+        decide=[
+            CorrectionDecision(proposal_id="not_an_ontology_id", verdict="revert"),
+            CorrectionDecision(proposal_id=good, verdict="confirm"),
+        ]
+    )
+    by_id = {d.proposal_id: d.status for d in r.decisions}
+    assert by_id["not_an_ontology_id"] == "error"
+    assert by_id[good] == "applied"
+
+
+def test_recall_pending_pagination(ctx: ServerContext) -> None:
+    for i in range(30):
+        _seed_retype_proposal(ctx, f"subj{i:02d}.team")
+
+    page1 = handlers.recall(pending_limit=20)
+    assert len(page1.pending_corrections) == 20  # list included without stats
+
+    page2 = handlers.recall(pending_limit=20, pending_offset=20)
+    assert len(page2.pending_corrections) == 10
+    ids1 = {p.id for p in page1.pending_corrections}
+    ids2 = {p.id for p in page2.pending_corrections}
+    assert ids1.isdisjoint(ids2)  # disjoint pages, stable id tiebreaker
+
+    # pending_limit alone (no stats/decide) includes the list.
+    assert handlers.recall().pending_corrections == []  # plain recall omits it
+
+    # Over-cap pending_limit is clamped to MAX_PENDING_LIMIT.
+    clamped = handlers.recall(pending_limit=500)
+    assert len(clamped.pending_corrections) == 30  # all 30 (< 200 cap), not rejected

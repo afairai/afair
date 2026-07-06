@@ -488,6 +488,30 @@ class ProposedCorrectionView(BaseModel):
     'ontology_add', the PROPOSED new slug)."""
 
 
+MAX_DECIDE_BATCH = 50
+"""Most decisions a single ``recall(decide=[...])`` call may carry. Bounds the
+per-request work (one ``decide_correction`` + observe event each) so a draining
+client can't submit an unbounded batch in one turn."""
+
+MAX_PENDING_LIMIT = 200
+"""Ceiling on ``recall(pending_limit=...)``. The review queue is at most a few
+hundred rows; this caps the served page even if a client asks for more."""
+
+
+class CorrectionOutcomeView(BaseModel):
+    """Per-decision outcome when recall carried ``decide=`` (single or batch).
+
+    Additive response field per I1 — mirrors the substrate ``CorrectionOutcome``
+    so a draining client sees exactly what happened to each proposal it sent.
+    """
+
+    proposal_id: str
+    status: str
+    """'applied' | 'confirmed' | 'rejected' | 'not_found' | 'already_decided'
+    | 'reverted' | 'not_applied' | 'error'."""
+    note: str
+
+
 class RecallResult(BaseModel):
     """Result of any `recall` call.
 
@@ -517,6 +541,9 @@ class RecallResult(BaseModel):
     coverage: RecallCoverage | None = None
     pending_corrections: list[ProposedCorrectionView] = []
     pending_corrections_count: int = 0
+    decisions: list[CorrectionOutcomeView] = []
+    """Per-decision outcomes when this call carried ``decide=`` (single or
+    batch). Empty on calls that didn't decide anything. Additive per I1."""
 
 
 # ── recall feedback ─────────────────────────────────────────────────────────
