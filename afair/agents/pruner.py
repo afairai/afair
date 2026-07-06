@@ -34,6 +34,11 @@ What Pruner MUST NEVER touch:
     entity_audit's anti-re-nag memory (its detectors re-scan the whole
     graph every cycle and would re-file the identical closed question if
     the decided row were gone).
+  - The edge_serves table — it is a DURABLE gate input, not telemetry: the
+    edge_scorer's serve-gated review query and its never-served auto-expiry
+    sweep both key on the presence/absence of a row here. Deleting a stamp
+    would let an already-served edge be auto-expired as if never served.
+    Append-only (I2 triggers), never pruned.
 
 Defaults are conservative; the worker is meant to be run-and-forget.
 """

@@ -188,6 +188,72 @@ def test_recall_surfaces_entity_edges_for_relations(ctx: ServerContext, settings
     assert edges[0]["trust"] == "auto_confirmed"
 
 
+def test_recall_records_edge_serves_for_surfaced_edges(
+    ctx: ServerContext, settings: Settings
+) -> None:
+    """A — serve-gated review: a recall that surfaces an edge stamps it in
+    edge_serves, so the edge_scorer later treats it as review-worthy and the
+    auto-expiry sweep leaves it alone."""
+    _seed_event_with_entities(
+        ctx, text="Sajinth introduced himself", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _seed_event_with_entities(
+        ctx, text="Athara launched", entities=[{"name": "Athara", "type": "organization"}]
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+    _seed_event_with_entities(
+        ctx,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
+    # No serve rows until a recall surfaces the edge.
+    assert ctx.db.execute("SELECT COUNT(*) FROM edge_serves").fetchone()[0] == 0
+    handlers.recall(query="Sajinth", depth="shallow")
+    assert ctx.db.execute("SELECT COUNT(*) FROM edge_serves").fetchone()[0] >= 1
+
+
+def test_recall_edge_serve_write_is_fail_soft(
+    ctx: ServerContext, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A — the recall hot-path serve write must never fail a recall. If
+    record_edge_serves raises, recall still returns its hits and the overlay."""
+    _seed_event_with_entities(
+        ctx, text="Sajinth introduced himself", entities=[{"name": "Sajinth", "type": "person"}]
+    )
+    _seed_event_with_entities(
+        ctx, text="Athara launched", entities=[{"name": "Athara", "type": "organization"}]
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+    _seed_event_with_entities(
+        ctx,
+        text="Sajinth runs Athara",
+        entities=[
+            {"name": "Sajinth", "type": "person"},
+            {"name": "Athara", "type": "organization"},
+        ],
+        relations=[{"subject": "Sajinth", "predicate": "runs", "object": "Athara"}],
+    )
+    EntityCanonicalizer().run(ctx.db, settings)
+
+    def _boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("simulated serve write failure")
+
+    monkeypatch.setattr(handlers, "record_edge_serves", _boom)
+    result = handlers.recall(query="Sajinth", depth="shallow")
+    assert result.hits  # recall still succeeds
+    hit_with_edge = next(
+        (h for h in result.hits if h.interpretation and h.interpretation.get("entity_edges")),
+        None,
+    )
+    assert hit_with_edge is not None  # overlay still attached
+
+
 def test_recall_dedupes_canonical_entities_when_same_entity_mentioned_twice(
     ctx: ServerContext, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

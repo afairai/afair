@@ -450,6 +450,34 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'edge_confidence_scores is append-only (Invariant I2)');
     END
     """,
+    # ── edge_serves: the "this edge was actually served in a recall" signal ──
+    # A DURABLE gate input, not telemetry. An edge only earns a review-queue
+    # slot after recall has surfaced it to the operator at least once
+    # (edge_scorer's serve-gated candidate query), and the auto-expiry sweep
+    # keys on the ABSENCE of a row here — so this table must be append-only and
+    # is deliberately NOT prunable (see the Pruner "MUST NEVER touch" list). One
+    # row per edge, stamped the first time it was served; INSERT OR IGNORE on
+    # the PK makes the recall-hot-path write idempotent and cheap.
+    """
+    CREATE TABLE IF NOT EXISTS edge_serves (
+        edge_id         TEXT PRIMARY KEY REFERENCES entity_edges(id),
+        first_served_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_serves_no_update
+    BEFORE UPDATE ON edge_serves
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_serves is append-only (Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_serves_no_delete
+    BEFORE DELETE ON edge_serves
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_serves is append-only (Invariant I2)');
+    END
+    """,
     # ── proposed_corrections: the entity-audit review queue (ADR-0002) ───────
     # MUTABLE derived state, not substrate — the audit worker regenerates it, a
     # decision updates its status, the pruner ages out decided edge_review rows.

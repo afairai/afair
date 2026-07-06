@@ -21,6 +21,7 @@ from afair.substrate import (
     latest_edge_scores_batch,
     open_db,
     record_edge_review,
+    record_edge_serves,
     write_entity,
     write_entity_edge,
     write_entity_mention,
@@ -319,9 +320,15 @@ def test_calibration_report_bucket_and_brier_math(
 # ── edge-review proposals + decide loop (ADR-0004 S6) ───────────────────────
 
 
-def _seed_weak_edge(conn: sqlite3.Connection, i: int) -> Any:
+def _seed_weak_edge(conn: sqlite3.Connection, i: int, *, serve: bool = True) -> Any:
     """A low-confidence edge (vague predicate, new endpoints, no extraction) on
-    a DISTINCT subject so the UNIQUE(kind, subject) doesn't collapse proposals."""
+    a DISTINCT subject so the UNIQUE(kind, subject) doesn't collapse proposals.
+    Its computed served confidence is ~0.365 — below both the 0.5 expiry floor
+    and the 0.6 review threshold.
+
+    Stamped as SERVED by default — the serve-gated review query only proposes
+    edges recall actually surfaced. Pass ``serve=False`` to model an edge recall
+    never returned (a candidate for auto-expiry)."""
     _ev, _subj, _obj, edge = _seed_edge(
         conn,
         text=f"Person{i} is loosely connected to the Org{i}",
@@ -333,6 +340,8 @@ def _seed_weak_edge(conn: sqlite3.Connection, i: int) -> Any:
         subject_name=f"Person{i}",
         object_name=f"Org{i}",
     )
+    if serve:
+        record_edge_serves(conn, [edge.id])
     return edge
 
 
@@ -414,6 +423,7 @@ def test_calibration_growth_resumes_after_decide_same_subject(
             obj_conf=0.5,
             object_name=obj_name,
         )
+        record_edge_serves(db, [edge.id])
         return edge
 
     edge_a = _weak_edge_on_x("OrgAlpha")
@@ -511,6 +521,145 @@ def test_decide_stale_edge_id_closes_proposal(db: sqlite3.Connection, settings: 
     # The proposal is closed (rejected) so it stops blocking the queue.
     remaining = [p for p in read_pending_corrections(db) if p.id == proposal.id]
     assert remaining == []
+
+
+# ── serve-gated review + auto-expiry of never-served low-confidence edges ────
+
+
+def test_record_edge_serves_is_idempotent(db: sqlite3.Connection) -> None:
+    edge = _seed_weak_edge(db, 1, serve=False)
+    first = record_edge_serves(db, [edge.id])
+    assert first == 1  # one new stamp
+    again = record_edge_serves(db, [edge.id, edge.id])
+    assert again == 0  # already stamped; INSERT OR IGNORE absorbs it
+    rows = db.execute(
+        "SELECT first_served_at FROM edge_serves WHERE edge_id = ?", (edge.id,)
+    ).fetchall()
+    assert len(rows) == 1  # exactly one row, timestamp never moved
+
+
+def test_edge_serves_is_append_only(db: sqlite3.Connection) -> None:
+    """I2: edge_serves triggers refuse UPDATE and DELETE."""
+    import pytest as _pytest
+
+    edge = _seed_weak_edge(db, 1, serve=False)
+    record_edge_serves(db, [edge.id])
+    with _pytest.raises(Exception, match="append-only"):
+        db.execute("UPDATE edge_serves SET first_served_at = 'x' WHERE edge_id = ?", (edge.id,))
+    with _pytest.raises(Exception, match="append-only"):
+        db.execute("DELETE FROM edge_serves WHERE edge_id = ?", (edge.id,))
+
+
+def test_served_low_conf_is_queued_unserved_same_conf_is_not(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """REGRESSION: identical sub-0.6 edges — the SERVED one is queued for
+    review, the never-served one is not. Both fresh, so neither is expired."""
+    from afair.substrate import read_pending_corrections
+
+    served = _seed_weak_edge(db, 1, serve=True)
+    unserved = _seed_weak_edge(db, 2, serve=False)
+
+    EdgeConfidenceScorer().run(db, settings)
+
+    reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    edge_ids = {p.detail["edge_id"] for p in reviews}
+    assert served.id in edge_ids
+    assert unserved.id not in edge_ids
+
+
+def test_never_served_low_conf_old_edge_is_auto_expired(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION: a never-served <0.5 edge past the grace period is invalidated
+    (auto-expired) and writes NO edge_review row — the calibration set stays a
+    pure record of operator verdicts."""
+    from afair.substrate import iter_edges_for_entity, read_pending_corrections
+
+    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)  # treat the fresh edge as old
+    edge = _seed_weak_edge(db, 1, serve=False)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_unserved"] == 1
+    # Invalidated → gone from live reads.
+    live = iter_edges_for_entity(db, edge.subject_id)
+    assert all(e.id != edge.id for e in live)
+    # No edge_review row was written (auto-expiry must not contaminate calibration).
+    assert db.execute("SELECT COUNT(*) FROM edge_reviews").fetchone()[0] == 0
+    # No edge_review PROPOSAL was queued for it either.
+    reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert all(p.detail["edge_id"] != edge.id for p in reviews)
+    # The invalidation is producer-tagged + reasoned (I7).
+    inval = db.execute(
+        "SELECT invalidated_by, reason FROM edge_invalidations WHERE edge_id = ?", (edge.id,)
+    ).fetchone()
+    assert inval["invalidated_by"] == es.EDGE_AUTO_EXPIRE_PRODUCER
+    assert "never served" in inval["reason"]
+
+
+def test_fresh_never_served_edge_is_not_expired(db: sqlite3.Connection, settings: Settings) -> None:
+    """The 14-day grace holds: a never-served low-conf edge younger than the
+    grace is left alone (recall still has a chance to surface it)."""
+    edge = _seed_weak_edge(db, 1, serve=False)
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_unserved"] == 0
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM edge_invalidations WHERE edge_id = ?", (edge.id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_reviewed_edge_is_never_auto_expired(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edge the operator touched (a review row) is entrenched (ADR-0002) and
+    never auto-expired, even if never served + old + low confidence."""
+    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
+    edge = _seed_weak_edge(db, 1, serve=False)
+    record_edge_review(db, edge_id=edge.id, verdict="confirm", reviewed_by="op")
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edges_expired_unserved"] == 0
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM edge_invalidations WHERE edge_id = ?", (edge.id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_auto_expiry_is_capped_and_drains(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most MAX_EDGE_EXPIRIES_PER_CYCLE per run; the backlog drains across
+    cycles (an invalidated edge leaves the candidate set, so it is chosen once)."""
+    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
+    monkeypatch.setattr(es, "MAX_EDGE_EXPIRIES_PER_CYCLE", 5)
+    for i in range(7):
+        _seed_weak_edge(db, i, serve=False)
+
+    first = EdgeConfidenceScorer().run(db, settings)
+    assert first["edges_expired_unserved"] == 5  # capped
+    second = EdgeConfidenceScorer().run(db, settings)
+    assert second["edges_expired_unserved"] == 2  # the remaining two drain
+    third = EdgeConfidenceScorer().run(db, settings)
+    assert third["edges_expired_unserved"] == 0  # nothing left
+
+
+def test_auto_expiry_leaves_calibration_report_pure(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-expiry writes no edge_reviews, so calibration still sees zero
+    reviewed edges (it only counts operator verdicts)."""
+    from afair.substrate.confidence import calibration_report
+
+    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
+    for i in range(3):
+        _seed_weak_edge(db, i, serve=False)
+    EdgeConfidenceScorer().run(db, settings)
+    assert calibration_report(db)["reviewed"] == 0
 
 
 # ── proposed_corrections CHECK migration (ADR-0004 S6a) ─────────────────────
@@ -709,8 +858,9 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
         subject_name="Person0",
         object_name="Thing0",
     )
+    record_edge_serves(db, [_e0.id])
     for j in range(1, 4):
-        _seed_edge(
+        _e, _s, _o, edge_j = _seed_edge(
             db,
             text=f"Person0 is loosely connected to the Thing{j}",
             predicate="is loosely connected to the",
@@ -721,6 +871,7 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
             obj_conf=0.5,
             object_name=f"Thing{j}",
         )
+        record_edge_serves(db, [edge_j.id])
     # One weak edge on a DISTINCT subject, created last → sorts past page 1.
     _seed_weak_edge(db, 99)
 

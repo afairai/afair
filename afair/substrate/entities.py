@@ -612,6 +612,33 @@ def write_edge_invalidation(
     )
 
 
+def record_edge_serves(conn: sqlite3.Connection, edge_ids: list[str]) -> int:
+    """Stamp each edge as SERVED in a recall (first time only).
+
+    The durable signal behind the serve-gated review queue (edge_scorer only
+    proposes edges that were actually surfaced to the operator) and the
+    auto-expiry sweep (which keys on the ABSENCE of a row here). Append-only:
+    one row per edge via ``INSERT OR IGNORE`` on the PK, so a re-serve is a
+    cheap no-op and the first-served timestamp never moves. Batched under the
+    host-parameter ceiling. Returns the number of NEW rows written.
+
+    Called on the recall hot path — the caller wraps it fail-soft so a stamp
+    failure never fails or meaningfully slows a recall.
+    """
+    if not edge_ids:
+        return 0
+    unique = list(dict.fromkeys(edge_ids))
+    now = _now_iso()
+    before = conn.total_changes
+    with conn:
+        for chunk in iter_param_chunks(unique):
+            conn.executemany(
+                "INSERT OR IGNORE INTO edge_serves (edge_id, first_served_at) VALUES (?, ?)",
+                [(eid, now) for eid in chunk],
+            )
+    return conn.total_changes - before
+
+
 def find_live_merge_from(conn: sqlite3.Connection, from_entity_id: str) -> str | None:
     """The id of the live (not-invalidated) merge out of ``from_entity_id``,
     or None. Used to reverse a merge: find it, then invalidate it."""

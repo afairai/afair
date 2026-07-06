@@ -23,7 +23,7 @@ No LLM, so no budget pressure — pure SQL + the pure model in
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -47,6 +47,7 @@ from ..substrate.entities import (
     count_corroborating_sources_batch,
     read_entity_by_id,
     resolve_canonical,
+    write_edge_invalidation,
 )
 from .cold_path import ColdPathWorker
 from .conflict_resolver import read_conflicts_batch
@@ -93,6 +94,28 @@ noisy entity monopolizing the lowest-confidence slots can't starve rank-N+1
 subjects (ADR-0004 C4 scaling fix)."""
 
 EDGE_SCORER_PRODUCED_BY = "edge_confidence_scorer:v0"
+
+EDGE_EXPIRY_CONFIDENCE_THRESHOLD = 0.5
+"""Served confidence below which a never-served edge is auto-expired. Aligned
+with ``LOW_CONFIDENCE_EDGE_CAVEAT_THRESHOLD`` (handlers.py) — an edge recall
+would only ever surface WITH a low-confidence caveat, and that never actually
+got served, is noise worth retiring. Strictly below the 0.6 review threshold:
+a served edge in [0.5, 0.6) is worth a human glance (queued), while an edge
+under 0.5 that recall never even surfaced is not."""
+
+EDGE_EXPIRY_MIN_AGE_DAYS = 14
+"""Grace period before a never-served low-confidence edge can be auto-expired.
+Load-bearing for rollout safety: on day one every historical edge is
+technically "never served" (edge_serves starts empty), so without the grace a
+first cycle would mass-expire the whole legacy graph. 14 days gives recall a
+fair chance to surface a genuinely useful edge before the sweep touches it."""
+
+MAX_EDGE_EXPIRIES_PER_CYCLE = 25
+"""Hard cap on auto-expiries per cycle — bounds the blast radius of the sweep
+(a bad threshold can only retire 25 edges before the operator notices the
+``edges_expired_unserved`` stat), and keeps the write batch small."""
+
+EDGE_AUTO_EXPIRE_PRODUCER = "edge_scorer:auto_expire:v1"
 
 
 class EdgeConfidenceScorer(ColdPathWorker):
@@ -141,6 +164,13 @@ class EdgeConfidenceScorer(ColdPathWorker):
                     # flat-0.8 edge getting its first real score.
                     stats["legacy_backfilled"] += 1
 
+        # Auto-expire never-served low-confidence edges (serve-gated review).
+        # Runs BEFORE proposal so an edge that qualifies for expiry this cycle
+        # is out of the candidate set and never queued. Writes ONLY
+        # edge_invalidations (append-only, I2) — NO edge_reviews row, so the
+        # calibration set stays a pure record of operator verdicts.
+        stats["edges_expired_unserved"] = _expire_unserved_low_confidence_edges(conn)
+
         # Propose the lowest-confidence uncertain edges for operator review
         # (ADR-0004 C4). This gives record_edge_review its first production
         # caller and makes the calibration set grow.
@@ -163,7 +193,8 @@ class EdgeConfidenceScorer(ColdPathWorker):
                 f"scored={stats['edges_scored']} "
                 f"skipped_unchanged={stats['edges_skipped_unchanged']} "
                 f"legacy_backfilled={stats['legacy_backfilled']} "
-                f"reviews_proposed={stats['edge_reviews_proposed']}"
+                f"reviews_proposed={stats['edge_reviews_proposed']} "
+                f"expired_unserved={stats['edges_expired_unserved']}"
             ),
         )
         return stats
@@ -352,9 +383,12 @@ def _row_to_edge(row: Any) -> EntityEdge:
 def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     """Queue the K lowest-confidence uncertain edges for operator review.
 
-    Selects live (non-invalidated), unreviewed edges whose SERVED confidence is
-    below the threshold — those resolve to `proposed` (served < threshold <
-    the auto-confirm floor). Lowest confidence first. Each is inserted into
+    Selects live (non-invalidated), unreviewed, and ACTUALLY-SERVED edges
+    (``EXISTS edge_serves`` — an edge recall never surfaced is not worth the
+    operator's attention; that reversal is the core of the serve-gated review
+    design) whose SERVED confidence is below the threshold — those resolve to
+    `proposed` (served < threshold < the auto-confirm floor). Lowest confidence
+    first. Each is inserted into
     ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE``,
     which under the partial unique index ``proposed_corrections_open_unique``
     (one OPEN row per (kind, subject)) means a re-run never duplicates an open
@@ -442,6 +476,7 @@ def _fetch_review_candidate_page(
         LEFT JOIN latest_scores ls ON ls.edge_id = e.id AND ls.rn = 1
         WHERE i.id IS NULL
           AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
+          AND EXISTS (SELECT 1 FROM edge_serves sv WHERE sv.edge_id = e.id)
           AND COALESCE(ls.confidence, e.confidence) < ?
     """
     params: list[Any] = [EDGE_REVIEW_PROPOSAL_THRESHOLD]
@@ -451,6 +486,79 @@ def _fetch_review_candidate_page(
     sql += " ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC LIMIT ?"
     params.append(page_size)
     return conn.execute(sql, params).fetchall()
+
+
+def _edge_age_days(discovered_at: str) -> int:
+    """Whole days between an edge's ``discovered_at`` and now (UTC), floored at
+    0. Naive timestamps are read as UTC (the substrate writes tz-aware ISO, but
+    be defensive)."""
+    try:
+        dt = datetime.fromisoformat(discovered_at)
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return max(0, int((datetime.now(UTC) - dt).total_seconds() // 86400))
+
+
+def _expire_unserved_low_confidence_edges(conn: sqlite3.Connection) -> int:
+    """Auto-expire edges that recall never served and that sit below the expiry
+    confidence floor, once they are past the grace period.
+
+    An edge earns retirement only when ALL hold: live (not already
+    invalidated), unreviewed (the operator never touched it — reviewed edges
+    are entrenched, ADR-0002), NEVER served (no ``edge_serves`` row), served
+    confidence < ``EDGE_EXPIRY_CONFIDENCE_THRESHOLD`` (0.5), and older than
+    ``EDGE_EXPIRY_MIN_AGE_DAYS`` (14d). Capped at ``MAX_EDGE_EXPIRIES_PER_CYCLE``
+    (25) per run.
+
+    Retirement is an append-only ``edge_invalidations`` row (I2 — never an
+    UPDATE/DELETE of the edge; the edge and its interpretation stay as history,
+    I3, re-derivable under a version bump). No ``edge_reviews`` row is written,
+    so the calibration report stays a pure record of operator verdicts.
+    Idempotent across cycles: an invalidated edge fails the ``i.id IS NULL``
+    filter next time, so it is chosen at most once (the append-only invalidation
+    with ``source_event_id=None`` is itself producer-tagged + reasoned, I7)."""
+    cutoff = (datetime.now(UTC) - timedelta(days=EDGE_EXPIRY_MIN_AGE_DAYS)).isoformat()
+    rows = conn.execute(
+        """
+        WITH latest_scores AS (
+            SELECT edge_id, confidence,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY edge_id
+                       ORDER BY computed_at DESC, id DESC
+                   ) AS rn
+            FROM edge_confidence_scores
+        )
+        SELECT e.id, e.discovered_at,
+               COALESCE(ls.confidence, e.confidence) AS served_confidence
+        FROM entity_edges e
+        LEFT JOIN edge_invalidations i ON i.edge_id = e.id
+        LEFT JOIN latest_scores ls ON ls.edge_id = e.id AND ls.rn = 1
+        WHERE i.id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM edge_serves sv WHERE sv.edge_id = e.id)
+          AND COALESCE(ls.confidence, e.confidence) < ?
+          AND e.discovered_at < ?
+        ORDER BY served_confidence ASC, e.discovered_at ASC, e.id ASC
+        LIMIT ?
+        """,
+        (EDGE_EXPIRY_CONFIDENCE_THRESHOLD, cutoff, MAX_EDGE_EXPIRIES_PER_CYCLE),
+    ).fetchall()
+    expired = 0
+    for r in rows:
+        conf = float(r["served_confidence"])
+        age = _edge_age_days(r["discovered_at"])
+        result = write_edge_invalidation(
+            conn,
+            edge_id=r["id"],
+            invalidated_by=EDGE_AUTO_EXPIRE_PRODUCER,
+            reason=f"auto-expired: never served, confidence {conf:.2f}, age {age}d",
+            source_event_id=None,
+        )
+        if result is not None:
+            expired += 1
+    return expired
 
 
 def _insert_edge_review_proposal(

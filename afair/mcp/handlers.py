@@ -74,6 +74,7 @@ from ..substrate import (
     read_object,
     read_pending_corrections,
     read_pending_ontology_proposals,
+    record_edge_serves,
     resolve_canonical_batch,
     resolve_entity_kind_batch,
     retracted_entity_ids,
@@ -783,6 +784,11 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
     served_confidence = latest_edge_confidence_batch(db, all_edge_ids)
     auto_confirm_floor = _resolve_auto_confirm_floor(db)
     event_id_to_hash = {e.id: e.content_hash for e in events}
+    # Edges that actually reach a recall response (ADR — serve-gated review):
+    # only these earn a review-queue slot, and the auto-expiry sweep keys on
+    # the ABSENCE of a serve stamp. Collected across all hits, stamped once
+    # below in a single fail-soft write.
+    served_edge_ids: list[str] = []
     for source_event_id, edges in edges_by_event_id.items():
         edge_content_hash = event_id_to_hash.get(source_event_id)
         if edge_content_hash is None:
@@ -822,8 +828,20 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                     "confidence": round(conf, 3),
                 }
             )
+            served_edge_ids.append(edge.id)
         if edge_views:
             overlay.setdefault(edge_content_hash, {})["entity_edges"] = edge_views
+
+    # Stamp the served edges (ADR — serve-gated review). Fail-soft: a stamp
+    # failure must never fail or meaningfully slow a recall; the review gate
+    # simply misses this edge for one cycle and the next recall re-stamps it.
+    if served_edge_ids:
+        try:
+            record_edge_serves(db, served_edge_ids)
+        except Exception:
+            import structlog as _structlog
+
+            _structlog.get_logger(__name__).warning("recall.edge_serve_record_failed")
 
     return overlay
 
