@@ -36,7 +36,9 @@ plan, a date that matters, something I'm working through: call
 `afair.remember(content={type:"text", text:"<plain language>"},
 type_hint="decision"|"preference"|"fact"|"plan"|"person"|"event"|...)`.
 Default to more, not less. Forgetting costs me time; an extra remember
-costs nothing.
+costs nothing. Optionally pass `asserted_by: "user"` when I stated the
+fact directly, or `"model"` when you inferred it. Self-reported and
+advisory: it records provenance, never raises trust. Omit if unsure.
 
 **Whenever you take an action:**
 Edit a file, run a query, call a tool, fetch a URL: call
@@ -98,7 +100,7 @@ Each `recall` hit carries:
 - `invalidation`: non-null when the fact was later superseded.
   Filter these out for "current state" questions; keep them for
   "history" questions.
-- `next_cursor`: non-null when more results exist — pass it back as
+- `next_cursor`: non-null when more results exist; pass it back as
   `cursor` to page.
 ```
 
@@ -130,3 +132,7 @@ Refinements here are append-only: note the date, what was added, why.
   review queue was accumulating silently because a plain `recall` never
   surfaced the count (the list is gated behind `stats`/`decide`), so
   nothing prompted the operator to work it down.
+- 2026-07-07: added the optional `asserted_by: "user" | "model"` remember
+  field (v0.1.17, ADR-0006). Self-reported, advisory provenance only: it is
+  stored and served but can never raise the trust of a derived fact;
+  operator-grade trust still comes only from `recall(decide=...)`.
