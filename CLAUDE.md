@@ -23,13 +23,16 @@ All of this is in daily real-world use.
 - **MCP surface** (`afair/mcp/`): the three frozen v1 verbs
   (remember / recall / observe) over Streamable HTTP, OAuth 2.1 + scoped-bearer
   auth, multi-modal content (text/PDF/audio/image), streaming blob upload,
-  async vault export.
-- **Cold-path agents** (`afair/agents/`): extractor, salience, mode-switcher,
-  surprise, temporal (relevance-decay), entity canonicalizer + emergent entity
-  graph (5 substrate tables), schema evolver (emergent ontology, ADR-0003:
-  proposes kind revisions from usage; the operator confirms/rejects/reverts
-  through `recall(decide=)`), conflict resolver, consolidator, and the
-  recursive self-improvement loop (tuner + multi-vendor judge + rollback
+  async vault export, per-event client provenance (ADR-0006), host
+  canonicalization on managed vaults. The wire contract is locked by the
+  golden surface guard (see §4).
+- **Cold-path agents** (`afair/agents/`): extractor, extraction retry,
+  salience, mode-switcher, surprise, temporal (relevance-decay), entity
+  canonicalizer + emergent entity graph, edge scorer (ADR-0004), schema
+  evolver (emergent ontology, ADR-0003: proposes kind revisions from usage;
+  the operator confirms/rejects/reverts through `recall(decide=)`), conflict
+  resolver, consolidator, pruner, expectation checker (observability), and
+  the recursive self-improvement loop (tuner + multi-vendor judge + rollback
   monitor).
 - **Hosted layer**: per-user single-tenant Fly machines (I8), provisioned and
   retired from afair-web. Each user gets a per-user vanity host
@@ -42,62 +45,78 @@ All of this is in daily real-world use.
 
 ### 0.2 Recently shipped + current focus
 
-Since the open-source launch the vault has hardened considerably (v0.1.4 →
-v0.1.8, all live on the fleet):
+The v0.1.4 to v0.1.8 hardening era (the ADR-0004 edge-confidence model,
+ADR-0003 Phase 2 made effective, the dedup operator-override and
+pending-review-nudge fixes, the public open-core split) is settled history;
+per-release detail lives in the CHANGELOG. Since then eight more releases
+shipped (v0.1.10 to v0.1.17, all live on the fleet):
 
-- **Edge-confidence model (ADR-0004, `Accepted`).** The flat 0.8 edge
-  confidence is replaced by a transparent log-odds model: a write-time prior in
-  the `entity_edges.confidence` column plus an append-only
-  `edge_confidence_scores` overlay (latest-wins, column fallback). A cold-path
-  `edge_scorer` backfills legacy rows (never mutated, I2/I3) and re-scores on new
-  corroboration / a contested source. Consumers wired: a discriminating
-  auto-confirm floor, per-edge served `confidence` + a low-confidence caveat in
-  recall (served WITH a caveat, not suppressed — operator-decided fork), the
-  `edge_review` proposal queue (`record_edge_review`'s first production caller),
-  the article-synth filter, and three bounded tuner tunables with
-  `calibration_report` as promote evidence (`promote_enabled` still False).
-  Shipped v0.1.7.
-- **Observability Phase 0.5.** The `expectation_checker` cold-path worker
-  makes silent pipeline failures visible: every 15 min it counts stuck
-  extractions (an `event.written` with no terminal extraction stage past a
-  30-min grace), retry-exhausted, and permanent failures from the unchanged
-  `pipeline_events` / `interpretations` substrate, and appends one
-  integer-only row to a new append-only `observability_snapshots` table
-  (I2 triggers). `/health` now surfaces `version` + a counts/ages/booleans
-  `pipeline` block (single indexed `LIMIT 1` read of the latest snapshot) +
-  per-worker `seconds_since_last_success` — 200 on a backlog, 503 only when
-  the DB is down (enrichment is fully try/except-isolated). Detection only:
-  no mutation, no 503-on-backlog, no content/paths in the body or WARN logs.
-  A `pipeline_events.timeline()` read helper answers "where did event X get
-  stuck". No MCP surface change (I1).
-- **ADR-0003 Phase 2 made effective (`Accepted`).** Kind-decoupling (v2
-  identities, mutable kinds) shipped in v0.1.5; a six-slice completion pass
-  closed the gaps: a read-only checkup (`scripts/checkup_entities.py`), the
-  canonicalizer defers on LLM-budget exhaustion instead of minting cross-kind
-  duplicates, the deduplicator unifies kinds via assignment at high confidence
-  (no review flood) and skips recorded homonym splits, and a supervised drain
-  tool (`scripts/drain_entity_dedup.py`; runbook in `docs/self-hosting.md`). The
-  operator vault's v1 cross-kind backlog was drained 191 → 98 (residue = genuine
-  homonyms the LLM correctly keeps separate).
-- **Reliability + review-loop fixes.** The dedup operator-override fix (the
-  "Graphiti" re-merge cycle — `agent_derived` never overrides an operator
-  decision, ADR-0002 entrenchment); a bounded cold-path retry for transient
-  `llm_timeout` extraction failures; and the **pending-review-count nudge** —
-  every recall now carries `pending_corrections_count`, so a client proactively
-  surfaces the review queue (the fix for the silent-accumulation problem where
-  proposals only surfaced on `stats=True`/`decide`).
-- **Public (open-core, AGPLv3).** The repo is public in the `afairai` org; the
-  deploy is split (the fleet ships from the private afair-web repo); OSS
-  community-health files are in place; fleet/operator tooling lives only in
-  afair-web and was scrubbed from this repo's history. No secrets were ever in
-  history; business-confidential docs were never committed (always gitignored).
-- **scripts/ hygiene.** Only self-hoster and contributor scripts remain; fleet
-  tooling moved to afair-web; `bench.py` defaults to the local server.
+- **Observability Phase 0.5 + the silent-failure batch (v0.1.10, v0.1.11).**
+  The `expectation_checker` cold-path worker makes silent pipeline failures
+  visible: every 15 min it counts stuck, retry-exhausted, and permanently
+  failed extractions into the `observability_snapshots` table; `/health`
+  serves `version` + a counts/ages/booleans `pipeline` block + per-worker
+  `seconds_since_last_success` (200 on a backlog, 503 only when the DB is
+  down); `pipeline_events.timeline()` answers "where did event X get stuck".
+  The P0 batch then closed the failure modes the checker exposed: every
+  extractor failure branch records `extraction.failed`, a failed extraction
+  no longer shadows an earlier success or starves canonicalizer selection,
+  `open_threads` reads from consolidation events, and observe intake
+  truncates oversized extras.
+- **Recall at scale + the pending-corrections root fix (v0.1.12, v0.1.13;
+  ADR-0005 `Accepted`).** Recall gained verbosity levels (compact default),
+  a limit cap, cursor pagination, batch `decide`, and pending-queue
+  pagination, plus null-free serialization and extractor output caps. P2a
+  added `worker_watermarks` (mutable re-scan cursors with a lagged
+  never-skip frontier) so cold-path workers stop re-scanning history, a
+  UNION entity-match rewrite, a session-start salient index, and a capped
+  anyio thread limiter. ADR-0005 reclassified `pipeline_events` /
+  `observability_snapshots` as prunable operational telemetry: their I2
+  triggers are retired and the Pruner ages rows out past
+  `telemetry_retention_days` (default 90).
+- **The schema regression + the golden surface guard (v0.1.14, v0.1.15).**
+  A `| str` param widening had leaked a top-level `anyOf` that broke
+  claude.ai tool surfacing while all tests stayed green; v0.1.14 restored
+  the clean inputSchema, hardened remember intake (invalidation-target
+  validation, truncate-preserve context/type_hint, naive-timestamp
+  normalization), and fixed a batch of cold-path correctness bugs. v0.1.15
+  locked the wire contract: `tests/goldens/mcp_surface.json` + shape lints
+  fail any non-additive surface diff (registered in §4).
+- **Noise reduction: the review-queue churn root fix (v0.1.15).** Four
+  linked parts: reviews are serve-gated (an edge earns a review slot only
+  after a recall actually served it; new append-only `edge_serves` table)
+  and never-served low-confidence edges auto-expire past a grace anchored
+  to a serve-tracking epoch, so a deploy can't mass-retire the legacy
+  graph; write-time gates stop noisy edges being created (no edges from
+  observe events, confidently-transient sources, or non-durable
+  predicates), with a bounded retro-sweep for the existing graph;
+  structural-junk kind-review proposals are suppressed; and `decide` honors
+  `to_kind` on confirm, not only on reject.
+- **P2 hardening (v0.1.16).** Compound intake: per-part spill to the object
+  store (FTS still covers spilled text), a sum-of-parts byte cap, message
+  flattening under the extractor char budget, compound grounding so
+  compound relations stop being dropped, and a queryable
+  `pdf_no_text_layer` marker. OAuth: a transport-only host-canonicalization
+  middleware (`afair/mcp/host_canon.py`), and the refresh-token grant now
+  binds to the presenting client, verifies confidential-client secrets,
+  rotates single-use, and detects reuse. P2e hygiene: dead tunables
+  removed, registry fallbacks narrowed, worker transactions rolled back on
+  failure, dead code deleted.
+- **Event provenance (#29, ADR-0006 `Accepted`, v0.1.17).** "Which of my AI
+  tools wrote this memory" is now answerable: every HTTP write stamps the
+  credential-derived client into the append-only `event_provenance` sidecar
+  (out of the content hash, so dedup holds; `origin` stays coarse). Recall
+  hits carry `client`, stats gain `by_client`, and provenance rides export
+  (I4). Recall at `verbosity="full"` also serves the durability rationale
+  (salience + components + a `why_durable` line), and `remember` gained an
+  optional advisory `asserted_by: "user" | "model"` field that records who
+  asserted a fact but by construction can never raise trust
+  (operator-grade trust still comes only from `recall(decide=)`).
 
-**Current focus: distribution.** Get afair in front of MCP users — the
+**Current focus: distribution.** Get afair in front of MCP users: the
 awesome-mcp-servers PR (#8895, blocked on a Glama listing), mcp.so, console.dev
 / selfh.st / Changelog, the X launch article (`afair-web/marketing/`), and a
-hand-written Show HN (HN requires 100% human-written text — no AI drafting).
+hand-written Show HN (HN requires 100% human-written text, no AI drafting).
 
 ### 0.3 Blocked
 
@@ -107,7 +126,7 @@ hand-written Show HN (HN requires 100% human-written text — no AI drafting).
 
 - **Vault Dashboard**: read-only insight surface on the control plane
   (entity-graph hero, surprise heatmap). After the daily-use window.
-- **Early-access signup professionalization**: at ≥50–100 signups: dedicated
+- **Early-access signup professionalization**: at 50 to 100 signups: dedicated
   store, double opt-in, admin broadcast.
 - **Funding stance**: bootstrap-default / VC-conditional (private note).
 ## 1. Naming (post-rebrand)
@@ -194,6 +213,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/adr/ADR-0003-emergent-ontology.md` | Proposed design that discharges the I6 debt: entity kinds become an append-only registry (add/rename/merge/split/deprecate revisions), kind decouples from entity identity (v2 IDs + kind-assignment overlay + resolution views, no migration), and the VISION §6.5 Schema-Evolver ships as a propose-only cold-path worker gated by the ADR-0002 `recall(decide=)` confirm loop | When the ontology model / Schema-Evolver design changes |
 | `docs/adr/ADR-0004-edge-confidence-model.md` | Replaces the flat 0.8 edge confidence with a transparent log-odds model (write-time prior in the `confidence` column + append-only `edge_confidence_scores` overlay, latest-wins with column fallback). Wires the consumers: discriminating auto-confirm floor, per-edge served `confidence` + low-confidence caveat in recall, the `edge_review` proposal queue (first production caller of `record_edge_review`), the article-synthesizer filter, and three bounded tuner tunables with `calibration_report` as the evidence. Legacy edges never mutated (I2/I3); scored by the cold-path `edge_scorer`. Low-confidence edges served with a caveat, not suppressed | When the confidence model / its consumers change |
 | `docs/adr/ADR-0005-telemetry-retention.md` | Classifies `pipeline_events` + `observability_snapshots` as OPERATIONAL TELEMETRY (the pipeline's flight recorder), not user memory: I2 protects the memory substrate, not regenerable instrumentation. Retires the four append-only triggers on ONLY those two tables (idempotent `DROP TRIGGER IF EXISTS`; fresh vaults never create them) and lets the Pruner age rows out past `telemetry_retention_days` (default 90). Draws the memory-vs-telemetry line explicitly and durably (VISION §4 cross-ref); a one-way relaxation reversed by re-adding the triggers | When the memory/telemetry line or the retention window changes |
+| `docs/adr/ADR-0006-event-provenance.md` | Client provenance lives in an out-of-hash sidecar, not in `origin`: `origin` is part of the event content hash, so per-client refinement would break dedup and fork the hash contract. Instead every HTTP write stamps the credential-derived client into the append-only `event_provenance` table (no backfill; absence = pre-provenance or non-HTTP write); serves `RecallHit.client` + stats `by_client`, rides export (I4), Pruner never-touch. Also draws the caller-asserted boundary: `asserted_by` is content (in-payload, in-hash, advisory, can never raise trust) | When the provenance model or its consumers change |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3: the open-source core license (see VISION §12) | Only on a license change |
@@ -218,6 +238,11 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/drain_entity_dedup.py` | Supervised operator drain of the same-name cluster backlog (loops the deduplicator at a raised cap; `--dry-run`/`--max-clusters`/`--sleep`) | When the deduplicator interface changes |
 | `scripts/install_clients.py` | One-command MCP client installer (writes config + snippet) | When client integration changes |
 | `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
+| `afair/substrate/provenance.py` + the `event_provenance` table | The ADR-0006 sidecar implementation: `INSERT OR IGNORE` stamps one row per distinct `(event_id, client)` (a second client on a dedup'd event appends an honest second row; stamping sits fail-soft OUTSIDE the `was_inserted` branch), batch reads ordered author-first, `by_client` distinct-event counts. Append-only (I2 triggers from day one); slug is credential-derived only, never headers/args | When the provenance model changes |
+| `afair/mcp/host_canon.py` | Transport-only host canonicalization on managed vaults (v0.1.16): a vault reached on a non-canonical host gets a 308 to the canonical issuer for browser/discovery GETs and a `421 Misdirected Request` for `POST /mcp`; the token audience is never widened. No-op unless `environment=fly` with an explicit `oauth_issuer`; health + `/internal/*` pass through | When the canonical-host policy changes |
+| `afair/agents/extraction_retry.py` | Bounded cold-path retry of TRANSIENT extraction failures (`llm_timeout` / `llm_rate_limit`); deterministic failures are never retried. A retry appends a NEW interpretation row (I2; the failure stays as audit trail) and the attempt count is derived from the failed rows, not a mutable counter | When the retry policy / failure taxonomy changes |
+| `afair/substrate/watermarks.py` + the `worker_watermarks` table | Mutable per-worker re-scan cursors (P2a): a worker advances only after a fully-drained zero-failure cycle, to a LAGGED frontier so a concurrently pre-minted id can never be stranded (never-skip contract). Non-substrate, no I2 triggers (the `proposed_corrections` / `export_jobs` framing); deleting a row just re-scans once, lossless. Also hosts the `edge_serves_epoch` marker that anchors edge auto-expiry grace | When a worker's cursor contract changes |
+| the `edge_serves` table (`substrate/schema.py`; written from recall's entity overlay) | Append-only "this edge was actually served in a recall" signal (I2 triggers; on the Pruner never-touch list; a durable gate input, NOT telemetry). Gates the review queue (only served edges are proposed) and the auto-expiry of never-served low-confidence edges, whose grace anchors to the serve-tracking epoch so a deploy can't mass-retire the legacy graph | When the serve-gating / expiry policy changes |
 | _(hosted fleet ops: `provision`/`retire`/`hourly-backup` workflows + `provision_user.py`/`retire_user.py`/`recover_user.py`/`onboarding_email.py`)_ | Live only in the private **afair-web** repo (control plane); scrubbed from this repo's history | n/a here |
 | `AGENTS.md` | Thin pointer file at repo root for non-Claude AI assistants (Codex CLI, Cursor) that look for AGENTS.md by convention: redirects to CLAUDE.md as canonical | When the read-order changes |
 | `assets/logo/` | Brand assets: primary logo (`afair-elephant.png`), inverse (dark mode), SVG trace, favicon set, GitHub social preview. Regeneration recipe in the afair-web operator runbook | When the source logo changes |
@@ -227,12 +252,12 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 (Full text in VISION.md §4, these are summaries for lookup, not authoritative.)
 
 - **I1**: MCP tools are versioned and additive. Shipped signatures never break.
-- **I2**: Substrate is append-only, content-addressed. Protects the user's *memory* (events, interpretations, entities, edges, temporal/belief metadata) — NOT purely operational tables (`proposed_corrections`, `export_jobs`, and the telemetry flight recorder `pipeline_events` / `observability_snapshots`), which are non-substrate, carry no I2 triggers, and are prunable (ADR-0005).
+- **I2**: Substrate is append-only, content-addressed. Protects the user's *memory* (events, interpretations, entities, edges, temporal/belief metadata), NOT purely operational tables (`proposed_corrections`, `export_jobs`, `worker_watermarks`, and the telemetry flight recorder `pipeline_events` / `observability_snapshots`), which are non-substrate, carry no I2 triggers, and are prunable or mutable (ADR-0005).
 - **I3**: Old data must remain readable, queryable, re-interpretable. Migrations are forbidden; new views over unchanged substrate are required.
 - **I4**: User owns the substrate. Self-hosting is first-class.
 - **I5**: No code path privileges one AI provider. litellm wrapper, env-driven model selection.
 - **I6**: No fixed ontology. Extractor uses context cues, not a hardcoded enum of types.
-- **I7**: Self-modification is recorded and reversible. I1–I6 are exempt from self-modification.
+- **I7**: Self-modification is recorded and reversible. I1 to I6 are exempt from self-modification.
 - **I8**: Single-tenant. No shared DB, no shared app server. Per-user dedicated Fly machine in managed.
 
 ## 6. Path-scoped rules
