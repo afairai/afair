@@ -10,6 +10,15 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.17](https://github.com/afairai/afair/compare/v0.1.16...v0.1.17) (2026-07-06)
+
+
+### Features
+
+* **provenance:** server-authoritative client provenance sidecar (W1) ([f3fc124](https://github.com/afairai/afair/commit/f3fc1249d8c1c82492b58ebed13d2bd5b7c09366))
+* **recall:** surface durability rationale at verbosity=full (W2) ([e4b0f1d](https://github.com/afairai/afair/commit/e4b0f1d91e38a562f4c57f6d471d8607e08e9305))
+* **remember:** optional asserted_by field feeding entrenchment (W3) ([1f54462](https://github.com/afairai/afair/commit/1f54462d794283b1c0c7df9c27a3558e103e4a8f))
+
 ## [0.1.16](https://github.com/afairai/afair/compare/v0.1.15...v0.1.16) (2026-07-06)
 
 
