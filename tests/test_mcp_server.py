@@ -295,6 +295,61 @@ async def test_remember_bare_string_content_becomes_text(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_remember_stringified_invalidates_matches_native(tmp_path: Path) -> None:
+    """AFAIR-H: a JSON-stringified ``invalidates`` supersedes identically to the
+    native list. A client that stringifies array args sent ``'["sha256:..."]'``
+    and the WHOLE remember was rejected (``Input should be a valid list``),
+    silently dropping the supersession. The call layer is where it fired."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    first = _tool_data(await server.call_tool("remember", {"content": "old fact to supersede"}))
+    target = first["content_hash"]
+
+    result = _tool_data(
+        await server.call_tool(
+            "remember",
+            {"content": "new fact", "invalidates": json.dumps([target])},
+        )
+    )
+    assert result["ok"] is True
+    assert result["invalidated"] == [target]
+
+
+@pytest.mark.asyncio
+async def test_remember_stringified_parent_hashes_accepted(tmp_path: Path) -> None:
+    """The sibling ``parent_hashes`` list carries the same stringified-arg risk;
+    a JSON-stringified list is accepted rather than rejecting the whole call."""
+    import json
+
+    server = build_server(_settings_for(tmp_path))
+    first = _tool_data(await server.call_tool("remember", {"content": "parent fact"}))
+    parent = first["content_hash"]
+
+    result = _tool_data(
+        await server.call_tool(
+            "remember",
+            {"content": "child fact", "parent_hashes": json.dumps([parent])},
+        )
+    )
+    assert result["ok"] is True
+
+
+def test_ensure_str_list_malformed_string_errors_not_dropped() -> None:
+    """A non-JSON string yields a typed error (never a silent drop); a JSON
+    non-list (object) also fails ``list[str]`` rather than being swallowed."""
+    from pydantic import ValidationError
+
+    assert schemas.ensure_str_list(None) is None
+    assert schemas.ensure_str_list('["sha256:a"]') == ["sha256:a"]
+    assert schemas.ensure_str_list(["sha256:a"]) == ["sha256:a"]
+    with pytest.raises(ValidationError):
+        schemas.ensure_str_list("not json at all")
+    with pytest.raises(ValidationError):
+        schemas.ensure_str_list('{"not": "a list"}')
+
+
+@pytest.mark.asyncio
 async def test_remember_wrong_tag_dict_coerced_to_text(tmp_path: Path) -> None:
     """T4: a dict whose ``type`` isn't a content tag coerces to text, not rejected."""
     server = build_server(_settings_for(tmp_path))

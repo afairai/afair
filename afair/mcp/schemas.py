@@ -739,6 +739,58 @@ I1-additive: strict superset — the native object/list/None forms are unchanged
 string tolerance is added via coercion."""
 
 
+# ── stringified list tolerance for ``remember`` (parent_hashes / invalidates) ──
+# The ``list[str] | None`` params carry the same stringified-argument risk as
+# content/event/decide: a client that JSON-stringifies array arguments sends
+# ``'["sha256:..."]'`` as a bare ``str``, and pydantic rejected the WHOLE
+# ``remember`` with ``Input should be a valid list`` — silently dropping the
+# supersession (``invalidates``) or lineage (``parent_hashes``). Observed in
+# production as AFAIR-H.
+_STR_LIST_ADAPTER: TypeAdapter[list[str] | None] = TypeAdapter(list[str] | None)
+
+
+def _parse_str_list_json(v: Any) -> Any:
+    """Decode a JSON-stringified list argument before ``list[str]`` validation.
+
+    A string that parses as JSON is handed on (a JSON array validates as the
+    native list; a JSON object/scalar still fails ``list[str]`` with a clear
+    typed error). A string that does NOT parse as JSON is returned unchanged so
+    the inner validation raises a typed error rather than a silent whole-call
+    drop. Same stringified-param class fixed for content / event / decide; a
+    coercion, NOT a schema widening — the advertised ``array | null`` gains no
+    spurious string member (I1-additive, claude.ai surfacing intact).
+    """
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (ValueError, TypeError):
+            return v  # let ``list[str]`` validation produce the typed error
+    return v
+
+
+def ensure_str_list(v: Any) -> list[str] | None:
+    """Narrow a ``parent_hashes`` / ``invalidates`` argument to ``list[str] | None``.
+
+    Accepts the native list/None untouched and re-parses a JSON-stringified list
+    into the equivalent form. Defense-in-depth mirror of the ``StringListInput``
+    BeforeValidator for any code path (or future FastMCP binding) that bypasses
+    it — same rationale as ``ensure_decide`` / ``ensure_remember_content``.
+    """
+    return _STR_LIST_ADAPTER.validate_python(_parse_str_list_json(v))
+
+
+StringListInput = Annotated[list[str] | None, BeforeValidator(_parse_str_list_json)]
+"""The `remember` ``parent_hashes`` / ``invalidates`` parameter type: ``list[str]
+| None`` fronted by a write-first ``BeforeValidator`` that re-parses a
+JSON-string. The tolerance lives in a coercion, not the schema — the advertised
+``array | null`` carries no spurious string alternative, so the golden MCP
+surface is unchanged. A stringified list validates identically to the native
+list; a malformed string yields a typed error, never a silent drop.
+
+I1-additive: strict superset — the native list/None forms are unchanged; string
+tolerance is added via coercion."""
+
+
 # ── observe ─────────────────────────────────────────────────────────────────
 
 

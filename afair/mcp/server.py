@@ -217,8 +217,8 @@ def build_server(settings: Settings) -> FastMCP:
         content: schemas.RememberContentInput,
         context: str | None = None,
         type_hint: str | None = None,
-        parent_hashes: list[str] | None = None,
-        invalidates: list[str] | None = None,
+        parent_hashes: schemas.StringListInput = None,
+        invalidates: schemas.StringListInput = None,
         asserted_by: schemas.AssertedBy | None = None,
     ) -> schemas.RememberResult:
         enforce_write_scope()
@@ -226,6 +226,10 @@ def build_server(settings: Settings) -> FastMCP:
         # union for the handler (and mypy). No-op when the wrap validator already
         # produced a model; defense-in-depth if a future FastMCP bypasses it.
         content = schemas.ensure_remember_content(content)
+        # Same defense-in-depth for the stringified-list class (AFAIR-H): the
+        # BeforeValidator already coerced these, this re-narrows for any bypass.
+        parent_hashes = schemas.ensure_str_list(parent_hashes)
+        invalidates = schemas.ensure_str_list(invalidates)
         return handlers.remember(
             content=content,
             context=context,
