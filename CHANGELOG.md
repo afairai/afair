@@ -10,6 +10,20 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.18](https://github.com/afairai/afair/compare/v0.1.17...v0.1.18) (2026-07-08)
+
+
+### Bug Fixes
+
+* **mcp:** extend stringified-arg tolerance to invalidates + parent_hashes ([344f649](https://github.com/afairai/afair/commit/344f6492a45739e1a909572e670f86d1427059b0))
+
+
+### Documentation
+
+* **adr:** ADR-0006 event provenance ([9e088a6](https://github.com/afairai/afair/commit/9e088a6782b7ebe4ff8a32f7515862d5f4eeb7af))
+* **clients:** document asserted_by remember field ([485edeb](https://github.com/afairai/afair/commit/485edeb52e07d7d005cb45fcedce4a0ab3a4e638))
+* refresh CLAUDE.md state + registry for v0.1.17 ([68d7543](https://github.com/afairai/afair/commit/68d7543f3e438bb3d0e352b6e295717a3d6ac972))
+
 ## [0.1.17](https://github.com/afairai/afair/compare/v0.1.16...v0.1.17) (2026-07-06)
 
 
