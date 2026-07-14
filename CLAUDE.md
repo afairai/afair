@@ -31,9 +31,10 @@ All of this is in daily real-world use.
   canonicalizer + emergent entity graph, edge scorer (ADR-0004), schema
   evolver (emergent ontology, ADR-0003: proposes kind revisions from usage;
   the operator confirms/rejects/reverts through `recall(decide=)`), conflict
-  resolver, consolidator, pruner, expectation checker (observability), and
-  the recursive self-improvement loop (tuner + multi-vendor judge + rollback
-  monitor).
+  resolver, consolidator, living synthesis worker (ADR-0007: automatic
+  evidence clusters with cited, revisable syntheses), pruner, expectation
+  checker (observability), and the recursive self-improvement loop (tuner +
+  multi-vendor judge + rollback monitor).
 - **Hosted layer**: per-user single-tenant Fly machines (I8), provisioned and
   retired from afair-web. Each user gets a per-user vanity host
   (`<name-suffix>.mcp.afair.ai`, suffix derived from their Clerk id). There is
@@ -113,10 +114,11 @@ shipped (v0.1.10 to v0.1.17, all live on the fleet):
   asserted a fact but by construction can never raise trust
   (operator-grade trust still comes only from `recall(decide=)`).
 
-**Current focus: distribution.** Get afair in front of MCP users: the
-awesome-mcp-servers PR (#8895, blocked on a Glama listing), mcp.so, console.dev
-/ selfh.st / Changelog, the X launch article (`afair-web/marketing/`), and a
-hand-written Show HN (HN requires 100% human-written text, no AI drafting).
+**Current focus: Personal design partners.** The living-synthesis worker,
+end-to-end memory-quality gate, read-only Memory Mirror, and direct-to-vault
+import path are ready for a 15-person, six-week cohort. Broad distribution
+waits for two consecutive green weeks on the private launch gates. Show HN
+remains hand-written because HN requires human-written text.
 
 ### 0.3 Blocked
 
@@ -207,13 +209,14 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 
 | File | Purpose | Update cadence |
 |---|---|---|
-| `VISION.md` | The constitution: vision, mission, invariants, architecture, competitive landscape, research grounding | Quarterly review; treat as zeitlos, no per-phase status updates |
+| `VISION.md` | The constitution: vision, mission, invariants, architecture, durable product boundaries, research grounding | Quarterly review; treat as zeitlos, no per-phase status updates |
 | `docs/adr/ADR-0001-constitutional-invariants.md` | Why the eight invariants exist + why drawn this way: each negates a failure mode, the three reinforcing chains, the I2-erasure clarification, and the accepted bets (I8 economics, I3 projection discipline, I7 aspirational). Has re-examination triggers | When an invariant is re-examined or a bet resolves |
 | `docs/adr/ADR-0002-belief-revision-derived-layer.md` | Treat the entity graph as defeasible beliefs: entrenchment trust tiers (AGM), source-cascade retraction (JTMS/defeasible), evidence-grounding (= the relation fix), quarantine + auto-confirm policy (KG HITL), correction-on-recall (reconsolidation). Grounded in cited papers. Drove the `edge_reviews` table + `substrate/belief.py` | When the trust model / confirm-loop changes |
 | `docs/adr/ADR-0003-emergent-ontology.md` | Proposed design that discharges the I6 debt: entity kinds become an append-only registry (add/rename/merge/split/deprecate revisions), kind decouples from entity identity (v2 IDs + kind-assignment overlay + resolution views, no migration), and the VISION §6.5 Schema-Evolver ships as a propose-only cold-path worker gated by the ADR-0002 `recall(decide=)` confirm loop | When the ontology model / Schema-Evolver design changes |
 | `docs/adr/ADR-0004-edge-confidence-model.md` | Replaces the flat 0.8 edge confidence with a transparent log-odds model (write-time prior in the `confidence` column + append-only `edge_confidence_scores` overlay, latest-wins with column fallback). Wires the consumers: discriminating auto-confirm floor, per-edge served `confidence` + low-confidence caveat in recall, the `edge_review` proposal queue (first production caller of `record_edge_review`), the article-synthesizer filter, and three bounded tuner tunables with `calibration_report` as the evidence. Legacy edges never mutated (I2/I3); scored by the cold-path `edge_scorer`. Low-confidence edges served with a caveat, not suppressed | When the confidence model / its consumers change |
 | `docs/adr/ADR-0005-telemetry-retention.md` | Classifies `pipeline_events` + `observability_snapshots` as OPERATIONAL TELEMETRY (the pipeline's flight recorder), not user memory: I2 protects the memory substrate, not regenerable instrumentation. Retires the four append-only triggers on ONLY those two tables (idempotent `DROP TRIGGER IF EXISTS`; fresh vaults never create them) and lets the Pruner age rows out past `telemetry_retention_days` (default 90). Draws the memory-vs-telemetry line explicitly and durably (VISION §4 cross-ref); a one-way relaxation reversed by re-adding the triggers | When the memory/telemetry line or the retention window changes |
 | `docs/adr/ADR-0006-event-provenance.md` | Client provenance lives in an out-of-hash sidecar, not in `origin`: `origin` is part of the event content hash, so per-client refinement would break dedup and fork the hash contract. Instead every HTTP write stamps the credential-derived client into the append-only `event_provenance` table (no backfill; absence = pre-provenance or non-HTTP write); serves `RecallHit.client` + stats `by_client`, rides export (I4), Pruner never-touch. Also draws the caller-asserted boundary: `asserted_by` is content (in-payload, in-hash, advisory, can never raise trust) | When the provenance model or its consumers change |
+| `docs/adr/ADR-0007-emergent-living-syntheses.md` | Replaces the entity-only topic axis with deterministic automatic clustering over entity recurrence, strong semantic links, and explicit lineage. The model labels and summarizes selected evidence but cannot choose a fixed category or add sources. Stable cluster identity, split/merge ancestry, citations, append-only supersession, hub suppression, and bounded cycles preserve I2/I3/I6/I7. Legacy entity articles remain readable but are no longer scheduled | When cluster discovery, lineage, synthesis, or serving behavior changes |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3: the open-source core license (see VISION §12) | Only on a license change |
@@ -223,7 +226,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `CHANGELOG.md` | Keep-a-Changelog history; `[Unreleased]` until first tag | Per notable user-facing change |
 | `CITATION.cff` | How to cite afair (research-grounded project) | On release / author change |
 | `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` | Structured bug/feature/PR forms | When the contribution flow changes |
-| `.env.example` | Full env-var reference (all 34 settings, hosted vars marked optional) | When env shape changes |
+| `.env.example` | Full env-var reference, with hosted variables marked optional | When env shape changes |
 | `docs/self-hosting.md` | Self-host guide: local + prod, encryption + the vault key, backups, upgrades | When setup/encryption changes |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `.github/workflows/ci.yml` | Product CI: lint/type/test on push + PR. No deploy, no secrets | When the gate set changes |
@@ -240,6 +243,10 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `scripts/check_secrets.py` | Pre-deploy guard: verify a Fly app has the boot-required secrets (+ `--diff` parity). Run by the afair-web fleet deploy | When a new ENVIRONMENT=fly boot validator is added |
 | `afair/substrate/provenance.py` + the `event_provenance` table | The ADR-0006 sidecar implementation: `INSERT OR IGNORE` stamps one row per distinct `(event_id, client)` (a second client on a dedup'd event appends an honest second row; stamping sits fail-soft OUTSIDE the `was_inserted` branch), batch reads ordered author-first, `by_client` distinct-event counts. Append-only (I2 triggers from day one); slug is credential-derived only, never headers/args | When the provenance model changes |
 | `afair/mcp/host_canon.py` | Transport-only host canonicalization on managed vaults (v0.1.16): a vault reached on a non-canonical host gets a 308 to the canonical issuer for browser/discovery GETs and a `421 Misdirected Request` for `POST /mcp`; the token audience is never widened. No-op unless `environment=fly` with an explicit `oauth_issuer`; health + `/internal/*` pass through | When the canonical-host policy changes |
+| `afair/agents/living_syntheses.py` | Deterministic emergent cluster discovery followed by model-written, cited synthesis. Combines entity recurrence, strong Binder links, and explicit lineage; suppresses mature hubs; preserves cluster identity and split/merge ancestry; replaces entity articles in the scheduler without breaking legacy reads | When automatic cluster discovery or synthesis changes |
+| `afair/eval/memory_quality.py` + `afair/eval/fixtures/memory_quality.jsonl` | End-to-end product-quality gate over final answers and syntheses: truth, current-state recall, stale exclusion, citation coverage and validity, conflict honesty, abstention, and cross-tool consistency. Public fixture is deterministic; private vault replay emits the same shape | When the memory-quality scorecard or gates change |
+| `afair/mcp/memory_mirror_route.py` | Dashboard-authenticated read-only projection of live syntheses, sources, stale evidence, and unresolved conflicts. Reads the user's own vault, stores nothing, and exposes no new MCP tool | When the Memory Mirror projection changes |
+| `afair/mcp/import_route.py` | Dashboard-authenticated, user-initiated normalized import. Writes ordinary append-only remember events from ChatGPT, Claude, Obsidian, Notion, or files, then schedules normal extraction. Content travels directly to the single-tenant vault | When supported import shapes or limits change |
 | `afair/agents/extraction_retry.py` | Bounded cold-path retry of TRANSIENT extraction failures (`llm_timeout` / `llm_rate_limit`); deterministic failures are never retried. A retry appends a NEW interpretation row (I2; the failure stays as audit trail) and the attempt count is derived from the failed rows, not a mutable counter | When the retry policy / failure taxonomy changes |
 | `afair/substrate/watermarks.py` + the `worker_watermarks` table | Mutable per-worker re-scan cursors (P2a): a worker advances only after a fully-drained zero-failure cycle, to a LAGGED frontier so a concurrently pre-minted id can never be stranded (never-skip contract). Non-substrate, no I2 triggers (the `proposed_corrections` / `export_jobs` framing); deleting a row just re-scans once, lossless. Also hosts the `edge_serves_epoch` marker that anchors edge auto-expiry grace | When a worker's cursor contract changes |
 | the `edge_serves` table (`substrate/schema.py`; written from recall's entity overlay) | Append-only "this edge was actually served in a recall" signal (I2 triggers; on the Pruner never-touch list; a durable gate input, NOT telemetry). Gates the review queue (only served edges are proposed) and the auto-expiry of never-served low-confidence edges, whose grace anchors to the serve-tracking epoch so a deploy can't mass-retire the legacy graph | When the serve-gating / expiry policy changes |

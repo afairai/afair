@@ -5,7 +5,7 @@
 <h1 align="center">afair</h1>
 
 <p align="center">
-  <em>Your memory across every AI you use.</em>
+  <em>The memory that keeps itself current, across every AI you use.</em>
 </p>
 
 <p align="center">
@@ -18,23 +18,23 @@
 
 ---
 
-You use more than one AI, and each of them remembers you separately. What you
-build up in one tool doesn't exist in the next, so you keep re-explaining
-yourself: your decisions, the people in your life, the preferences and the
-history you're tired of repeating at the start of every session.
+Every AI you use remembers a different version of you. What one learns is gone
+when you open the next, so you repeat the same decisions, relationships,
+preferences, and history at the start of another session.
 
-afair is one memory that all of them share. It runs as your own vault and
-connects to each tool through the [Model Context
-Protocol](https://modelcontextprotocol.io) (MCP), so the same memory follows you
-from Claude to your coding agent to whatever you pick up next.
+afair gives them one shared vault. It connects through the [Model Context
+Protocol](https://modelcontextprotocol.io) (MCP), so the same memory is available
+in Claude, your coding agent, and whatever you use next.
 
-Capturing a thought is cheap. Keeping it structured, the people, the projects,
-what changed, what still matters, is the expensive part, and it stays expensive
-because your life keeps moving. That work is interpretation: reasoning, not
-filing, and it's exactly what these models have gotten good at. So afair does it
-for you. An AI layer reads what you've told it and keeps the structure current on
-its own, so you never file or maintain anything. You can see what it has learned
-about you, and correct it when it's wrong.
+A growing memory usually becomes another thing to maintain. afair takes that
+work away. Background agents read what your tools record, discover what belongs
+together, keep the useful understanding current, and let old noise fade from
+attention. The structure follows your life instead of a fixed template. You do
+not file, tag, or curate it.
+
+The result stays visible. You can read what afair believes, follow it back to the
+source, and correct it when it gets you wrong. Corrections become part of the
+history instead of silently replacing it.
 
 What goes in is your whole life: your work, the people you love, and the
 personal things you'd rather an AI just knew.
@@ -134,8 +134,9 @@ Four layers, one source of truth:
   without touching a single stored event.
 - **MCP surface.** Versioned and additive. A signature that has shipped keeps
   working.
-- **Agents.** Background workers that extract, link entities, and synthesize, all
-  reading the same substrate.
+- **Agents.** Background workers extract evidence, discover what belongs
+  together, and maintain cited living syntheses. Cluster names and boundaries
+  can change as the evidence changes. The user never defines a category.
 
 The complete design, and the eight invariants that hold it together, live in
 [VISION.md](VISION.md). Start there if you want the why.

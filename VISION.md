@@ -34,11 +34,10 @@ Four non-negotiable principles:
 Several converging conditions make this the right moment.
 
 - **MCP has become the universal protocol.** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/mcp), [Cursor](https://docs.cursor.com/context/mcp), Copilot, Windsurf, Cline: all speak MCP. The cross-vendor surface exists for the first time; a single server reaches everything.
-- **Per-user dedicated infrastructure is economically feasible.** [Fly.io](https://fly.io) puts single-tenant deployment at $3–8/month per user instance for typical workloads. Combined with Fly's automatic volume snapshots (and optional continuous SQLite replication via LiteFS Cloud or Litestream when sub-second RPO matters), the architecture that used to be reserved for premium tools (Fastmail, 1Password) is now viable for individual products.
-- **Memory is a recognized infrastructure category, and structurally locked in.** [Mem0 raised $24M](https://mem0.ai/series-a) (Oct 2025), Letta $10M, Supermemory $2.6M, Zep growing. All US-centric, vendor-leaning, multi-tenant SaaS, all built around imposed schemas.
-- **The newest bet locks memory in even harder.** A wave of well-funded labs is moving memory out of a store and into the model itself, training your context directly into the weights (Engram raised $98M in June 2026 to do exactly this). It buys speed, but the memory becomes unreadable, non-portable, and impossible to correct, bound to a single model. That is the structural opposite of user ownership, and it makes a vendor-neutral, inspectable, correctable substrate more valuable, not less.
+- **Per-user dedicated infrastructure is economically feasible.** Small virtual machines, durable volumes, encrypted SQLite, and automated snapshots make one isolated instance per user practical at consumer prices. A shared control plane can operate the fleet without holding any user substrate.
+- **Model-native memory makes ownership more urgent.** Memory stored inside an application or trained into model weights can be fast and deeply integrated, but it is difficult to inspect, move, or correct. Better native memory increases the value of a portable substrate instead of removing it.
 - **EU regulatory tailwind.** GDPR's right-to-be-forgotten and the AI Act (fully applicable August 2026, 10-year audit-trail requirement for high-risk systems) create a structural advantage for EU-native, user-owned architectures. Per-user dedicated instances make compliance physically obvious rather than legally complex.
-- **The field knows memory is unsolved.** [Mem0's State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) names what is still open: cross-session identity resolution, memory staleness in high-relevance memories, the noise floor problem.
+- **The technical problem remains open.** Long-term memory still has to resolve identity across sessions, replace stale high-confidence beliefs, control the noise floor, preserve evidence, and know when it lacks enough support to answer.
 
 ---
 
@@ -52,7 +51,7 @@ External tool signatures are versioned and additive. New tools may be added. Exi
 ### I2. Substrate Immutability
 The raw event log is append-only and content-addressed. Nothing is ever overwritten or deleted (except via explicit user-invoked right-to-erasure paths, which are themselves logged). The substrate is git-like: history is the truth.
 
-I2 protects the user's **memory** — the events, interpretations, entities, edges, and temporal/belief metadata that constitute what the vault remembers. It does **not** cover purely operational tables: a regenerable suggestion queue (`proposed_corrections`), an ephemeral job record (`export_jobs`), or the pipeline's operational flight recorder (`pipeline_events`, `observability_snapshots`). Those carry no user memory, are never recalled, and are deliberately non-substrate: no append-only triggers, and the Pruner ages the telemetry out past a retention window. Pruning the flight recorder is no more an I2 erasure than rotating a log file is. See ADR-0005.
+I2 protects the user's **memory**: the events, interpretations, entities, edges, and temporal/belief metadata that constitute what the vault remembers. It does **not** cover purely operational tables: a regenerable suggestion queue (`proposed_corrections`), an ephemeral job record (`export_jobs`), or the pipeline's operational flight recorder (`pipeline_events`, `observability_snapshots`). Those carry no user memory, are never recalled, and are deliberately non-substrate: no append-only triggers, and the Pruner ages the telemetry out past a retention window. Pruning the flight recorder is no more an I2 erasure than rotating a log file is. See ADR-0005.
 
 ### I3. Backward-Compatible Evolution
 Any data written by an earlier version must remain readable, queryable, and re-interpretable by every later version, forever. Schema migrations are not migrations, they are new materialized views over unchanged substrate.
@@ -67,7 +66,7 @@ No code path may privilege one AI provider. The architecture must function with 
 No fixed ontology of memory types ships with the system. A minimal bootstrap scaffold is acceptable; the system must be able to revise, merge, split, and discard categories based on usage. Forever.
 
 ### I7. Recursive Self-Modification with Rollback
-The system may revise its own extraction rules, retrieval strategies, and agent compositions at runtime. Every modification is recorded in the substrate. Every modification is reversible. Invariants I1–I6 are exempt, they are the irreducible kernel.
+The system may revise its own extraction rules, retrieval strategies, and agent compositions at runtime. Every modification is recorded in the substrate. Every modification is reversible. Invariants I1-I6 are exempt, they are the irreducible kernel.
 
 ### I8. Single-Tenant by Design
 Every deployed instance, self-hosted or managed, belongs to exactly one user. No shared database, no shared application server, no row-level user separation. The hosted offering provisions a dedicated machine per paying user. Multi-tenancy is forbidden architecturally, not just practically. The orchestration layer that manages billing and provisioning may be shared; user data and application state never are.
@@ -80,15 +79,15 @@ Every deployed instance, self-hosted or managed, belongs to exactly one user. No
 
 ### 5.1 What is actually unsolved
 
-Despite mature frameworks ([Mem0](https://github.com/mem0ai/mem0), [Letta](https://github.com/letta-ai/letta), [Zep/Graphiti](https://github.com/getzep/graphiti), [Cognee](https://github.com/topoteretes/cognee), [Supermemory](https://github.com/supermemoryai/supermemory)), the field's own state-of-the-art summaries name these as genuinely open:
+Long-term memory systems still leave several problems genuinely open:
 
 - **Memory staleness in high-relevance memories.** A user changes jobs; the system "knows" the old employer with high confidence and surfaces it. Decay handles low-relevance memories; this is unsolved for high-relevance ones.
 - **Cross-session identity resolution.** Anonymous sessions, multi-device, mixed auth flows break the stable-user-id assumption.
 - **The noise floor.** Agents accumulate so much "important" information that memory search becomes slower than processing full context.
 - **Schema lock-in.** Every framework imposes a categorization (episodic/semantic/procedural, or flat key-value). User cognition does not fit that schema.
-- **Vendor lock-in.** Every framework is structurally tied to its host ecosystem.
+- **Vendor lock-in.** Memory inside one host ecosystem does not become a portable user asset.
 
-Sources: [Mem0 ECAI 2025 (arXiv:2504.19413)](https://arxiv.org/abs/2504.19413), [State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026), [Best AI Agent Memory Systems 2026](https://vectorize.io/articles/best-ai-agent-memory-systems).
+Sources: [Mem0 ECAI 2025 (arXiv:2504.19413)](https://arxiv.org/abs/2504.19413), [Zep temporal knowledge graph architecture (arXiv:2501.13956)](https://arxiv.org/abs/2501.13956), [Rethinking Memory Mechanisms of Foundation Agents (arXiv:2602.06052)](https://arxiv.org/abs/2602.06052).
 
 ### 5.2 Memory phenotypes: cognitive diversity as design space
 
@@ -100,7 +99,7 @@ This is not metaphor. Each variant maps to a computational pattern that solves s
 
 **Autism / weak central coherence.** Detail-focused, local processing prioritized over global gestalt. Verbatim recall over gist. Pattern recognition over context integration. ([Happé & Frith, 2006](https://link.springer.com/article/10.1007/s10803-005-0039-0)). Maps to: an extractor that preserves raw form and retrieves via pattern matching rather than embedding similarity. Wins on code, legal text, anywhere exact form matters.
 
-**Asperger / high-functioning systematizing.** Strong systems thinking, narrow deep specialization, exceptional pattern recognition within domains of interest. ([Baron-Cohen, empathizing–systemizing theory](https://www.cambridge.org/core/journals/the-british-journal-of-psychiatry/article/empathizingsystemizing-theory-an-update/)). Maps to: domain-specialized agents with deep retrieval, narrow lateral spread. The "expert mode" of a personal vault.
+**Asperger / high-functioning systematizing.** Strong systems thinking, narrow deep specialization, exceptional pattern recognition within domains of interest. ([Baron-Cohen, empathizing-systemizing theory](https://www.cambridge.org/core/journals/the-british-journal-of-psychiatry/article/empathizingsystemizing-theory-an-update/)). Maps to: domain-specialized agents with deep retrieval, narrow lateral spread. The "expert mode" of a personal vault.
 
 **Synesthesia.** Cross-modal binding. One type of input triggers another, often correlated with strong memory through multi-channel encoding. Maps to: an indexing agent that cross-references modalities (text + time + author + project + emotional valence), enabling retrieval through any dimension.
 
@@ -259,7 +258,7 @@ This is what makes recursive self-improvement safe: the substrate is invariant, 
 
 **Warm path (async, seconds).** A new observation arrives: from a user `remember` call, or from a Salience-routed `sense` event. Observer logs to substrate. Extractor processes async. By the time the user calls back, the new info is integrated. Caller never waits.
 
-**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. Consolidator re-clusters. Schema-Evolver revises ontology: it mines observed kind usage, drafts revision proposals, and the operator confirms or rejects each one before it takes effect. Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
+**Cold path (background, minutes to hours).** The sleep swarm. Runs during idle time. The Living-Synthesis worker discovers recurring evidence through entities, semantic proximity, and explicit lineage. It names no permanent category and maintains the current synthesis with complete source lineage. Schema-Evolver revises ontology: it mines observed kind usage, drafts revision proposals, and the operator confirms or rejects each one before it takes effect. Conflict-Resolver handles contradictions. Pruner ages out unused interpretations. Queued low-priority ingestion events get integrated here: the system dreams over the day's accumulated input. Heavy thinking happens here; premium models earn their keep here.
 
 Each agent runs on a different model class (cheap for Observer, premium for Schema-Evolver). Each agent's model is independently configurable: all default to a shared model, and per-agent overrides run premium models where they earn their keep. The judge panel is multi-vendor by default. Each agent A/B-tested independently. Each agent has its own memory phenotype (Extractor, autism-like verbatim; Salience-Detector, ADHD-like surprise-driven; Consolidator, hippocampal-replay-like).
 
@@ -306,7 +305,7 @@ The thin shared layer for managed hosting holds only orchestration metadata, whi
 
 ## 7. Backward Compatibility Doctrine
 
-Three rules, derived from Invariants I1–I3.
+Three rules, derived from Invariants I1-I3.
 
 **Rule 1: MCP is forever.** A tool signature that ships in v1 must still work in v∞. New tools may be added. New optional parameters may be added. Semantics of existing tools may not change; existing tools may not be removed.
 
@@ -324,7 +323,7 @@ What the system may modify about itself at runtime, without manual intervention.
 
 **Modifiable at runtime.** Extraction prompts; retrieval strategies (weights, fusion functions); agent compositions (which agents run for which task); emergent categories (split, merge, rename, discard); cache and index structures; schedule of cold-path operations.
 
-**Modifiable only with manual approval.** Changes to invariants I1–I7 (theoretically possible, practically forbidden); changes to substrate event schema (must be versioned and additive); addition or removal of agent roles; changes to the salience switcher's mode-decision logic.
+**Modifiable only with manual approval.** Changes to invariants I1-I7 (theoretically possible, practically forbidden); changes to substrate event schema (must be versioned and additive); addition or removal of agent roles; changes to the salience switcher's mode-decision logic.
 
 **Never modifiable.** The append-only nature of the substrate; the principle that the user owns the data; the MCP surface contract for tools that have shipped.
 
@@ -332,108 +331,46 @@ Every self-modification is itself an event in the substrate. The full history of
 
 ---
 
-## 9. Competitive Landscape
+## 9. Product Boundaries
 
-For each competitor: what they have, what they don't, and the **structural reason** they cannot or will not close the gap.
+The market changes faster than a constitutional document should. Named competitors, funding, pricing, benchmarks, and feature comparisons belong in private, dated strategy notes. This section records only the durable product boundaries that remain useful when the market changes.
 
-### 9.1 Direct memory frameworks
+### 9.1 Portable memory, not vendor memory
 
-**[Mem0](https://mem0.ai)**: Production memory infra, three-line integration, broad framework support, model-agnostic.
-- **Doesn't have:** cross-vendor user-owned positioning, emergent ontology, swarm architecture, EU-native compliance.
-- **Structural limit:** US-based, VC-backed, hosted-first. Revenue model rewards integration into their cloud, which contradicts user-owned primacy. They will optimize toward platform, not sovereignty.
+Memory inside one model or one application can be deeply integrated, but it cannot follow the user without weakening that product's lock-in. afair treats memory as a portable asset owned by the person, reachable from any compatible client.
 
-**[Letta (ex-MemGPT)](https://www.letta.com)**: UC Berkeley spinout, OS-inspired tiered memory (core/recall/archival), self-editing agent memory.
-- **Doesn't have:** cross-vendor MCP-first positioning, emergent ontology, multi-agent swarm, EU compliance focus.
-- **Structural limit:** research-led, complex to deploy, oriented toward developers building stateful agents, not users owning context. The tiered architecture is imposed, not emergent. ([Letta docs](https://docs.letta.com)).
+### 9.2 A product for the person, not infrastructure for a builder
 
-**[Zep / Graphiti](https://www.getzep.com)**: Temporal knowledge graph with bi-temporal model.
-- **Has:** best-in-class temporal reasoning, conflict-as-data via t_valid/t_invalid edges, knowledge graph richness. [Zep paper (arXiv:2501.13956)](https://arxiv.org/abs/2501.13956).
-- **Doesn't have:** multi-agent cognition, emergent ontology, user-owned local-first deployment, MCP-as-primary surface.
-- **Structural limit:** enterprise SaaS positioning. Excellent technology; the business model demands managed deployment. Self-hosting allowed; not first-class.
+Memory frameworks usually give developers primitives for storage, retrieval, or agent state. afair gives the person using AI a working memory. Connecting tools should be the last organizational task the user performs.
 
-**[Cognee](https://www.cognee.ai)**: Open-source memory + knowledge graph layer.
-- **Has:** full local deployment, graph + vector hybrid, multi-source ingestion, GDPR-compatible.
-- **Doesn't have:** emergent ontology, multi-agent swarm, MCP-first cross-vendor surface, opinionated memory phenotypes.
-- **Structural limit:** library framing, not product. Lacks the consumer-facing thesis. Closest in spirit; furthest from execution polish.
+### 9.3 Self-organizing, not manually curated
 
-**[Supermemory](https://supermemory.ai)**: MIT-licensed ([22.7K stars](https://github.com/supermemoryai/supermemory)), #1 on LongMemEval, LoCoMo, and ConvoMem. Aggressive multi-modal extraction (PDFs, OCR, transcription, AST-aware chunking). Adapters for Vercel AI SDK, LangChain, LangGraph, OpenAI Agents SDK, Mastra. Sub-300ms hybrid, ~50ms one-call profile retrieval. Explicit auto-forgetting / temporal-update handling.
-- **Doesn't have:** user-owned positioning (they sell API/SDK to developers, not "your digital brain"), single-tenant-per-user, emergent ontology, swarm architecture, EU-native default.
-- **Structural limit:** VC-backed multi-tenant economics. They architecturally cannot pivot to single-tenant-per-user without abandoning the growth thesis. Positioning is developer-tool, not user-product. **The closest direct competitor and the one to study: especially their benchmark and multi-modal execution. Differentiation is positioning + architecture, not memory-engine quality.**
+Local-first notebooks and knowledge bases provide ownership, but they still ask the user to create folders, tags, links, pages, and summaries. afair derives structure from the event stream. It decides what deserves a living synthesis, keeps that synthesis current, and lets the user correct the result without becoming its librarian.
 
-**[GBrain](https://github.com/garrytan/gbrain)**: MIT, ~22.7K stars, built by Garry Tan (YC President). Single-developer "agent brain", viral on author profile + YC's company-brain RFS tailwind. Synthesis **with gap analysis** (`think`, tells you what the brain doesn't know yet, staleness, contradictions), **self-wiring typed knowledge graph** (zero-LLM edge extraction, benchmarked), 24/7 "dream cycle" overnight enrich/consolidate, multi-source ingestion (meetings/email/tweets/voice), 30+ MCP tools (OAuth 2.1/PKCE/DCR, scope tiers), broad client support incl. Perplexity + ChatGPT. Both single-tenant local (PGLite) **and** multi-tenant company-brain with fuzz-tested per-login isolation.
-- **Has that we don't (yet):** gap-analysis, benchmarked zero-LLM graph, multi-source ingestion daemon, multi-tenant company-brain. In raw memory-engine terms it currently leads.
-- **Doesn't have:** hosted product (DIY daemon: "your hardware, your DB, your keys"), EU/jurisdictional posture, durability/forever-API contract, emergent ontology (its typed `works_at`/`invested_in`/`founded` edges are an **imposed VC/CRM schema**, VISION §9.D applies directly), build-nothing end-user onramp (assumes you run OpenClaw/Hermes or wire a daemon yourself).
-- **Structural limit:** it is an open-source tool you operate, not a product someone operates for you; opinionated to its author's stack; no jurisdiction, no managed isolation, no durability guarantee. afair's separation is **product-form + EU jurisdiction + emergent ontology + durability, not memory-engine quality, where GBrain leads today.** **Track as a first-class competitor.**
+### 9.4 Emergent structure, not a fixed worldview
 
-**[LangMem](https://github.com/langchain-ai/langmem)** / **[LlamaIndex Memory](https://www.llamaindex.ai)**: Framework-bound memory primitives. Outside their host frameworks, no value. Structural limit: tied to LangGraph / LlamaIndex.
+A permanent taxonomy forces every life into the same set of people, companies, projects, or memory types. afair may use temporary bootstrap guesses, but the durable structure must emerge from recurrence, relationships, time, retrieval demand, contradictions, and user corrections. Clusters may split, merge, rename, fade, and return as the evidence changes.
 
-### 9.2 Memory inside another product
+### 9.5 Verifiable understanding, not opaque personalization
 
-**Anthropic / Claude (memory + [Auto Dream](https://dev.to/max_quimby/ai-agent-memory-in-2026-auto-dream-context-files-and-what-actually-works-39m8))**: Best-in-class consolidation, deep integration with their own agents. Claude-only by design. **Structural limit:** Anthropic's incentive is Claude lock-in. Cross-vendor memory would erode their primary moat. This is the structural opening.
+Useful memory must do more than retrieve a similar passage. It must preserve provenance, distinguish fact from inference, surface uncertainty and conflict, and show why a synthesis changed. Derived understanding stays readable, correctable, and regenerable from the immutable substrate.
 
-**OpenAI / ChatGPT memory**: Same dynamic. Memory is lock-in, not portable asset.
+### 9.6 Ownership expressed in architecture
 
-**Cursor project context** (`.cursorrules` + RAG): Project-scoped, IDE-bound. Same structural limit.
-
-**[LinkedIn CMA](https://www.infoq.com/news/2026/04/linkedin-cognitive-memory-agent/)**: April 2026 internal infrastructure. Multi-agent shared memory substrate. Not a product. Reference architecture for what is possible when a team with resources builds this properly.
-
-### 9.3 Adjacent
-
-**1Password / Bitwarden.** The cross-platform user-owned model for credentials. The strategic blueprint: vendor-neutral, user-owned, works everywhere: as a successful category.
-
-**Obsidian / Logseq.** User-owned local-first knowledge bases. No agent layer. Strong philosophical alignment. Adjacent customer base.
-
-**Notion / Roam.** Hosted, schema-imposing. Opposite positioning.
-
-### 9.4 Business model references: per-user single-tenant hosting
-
-Not memory products, but the business model is the reference: self-hostable + managed single-tenant hosting.
-
-- **[Fastmail](https://www.fastmail.com)**: Per-account isolated email infrastructure since 1999. Profitable, durable, trusted. Proof that single-tenant scales economically when you charge enough per user.
-- **[Plausible Analytics](https://plausible.io)**: Open-source self-hostable + managed hosting. EU-based. Direct philosophical analog.
-- **[PostHog](https://posthog.com)**: Open-source self-hostable + cloud. More complex product, similar dual-track.
-- **[Ghost](https://ghost.org)**: Open-source publishing + managed hosting where each blog is its own instance. Non-profit foundation governance, interesting structural reference.
-- **[Tailscale](https://tailscale.com)**: Mesh architecture, no central data infrastructure. Coordination server only handles metadata; user devices hold their own state. Closest structural analog to our orchestration model.
-- **[Supabase](https://supabase.com)**: Open-source Firebase alternative, self-hostable + managed. Enterprise plans offer dedicated infrastructure per customer.
-
-The common pattern: **the architecture is the promise**. They do not claim privacy or ownership, they structurally provide it. Result: high customer trust, low churn, defensible against larger competitors who cannot match the architecture without rebuilding their stack.
-
-### 9.5 Theoretical depth as one axis of differentiation
-
-Mem0, Letta, Graphiti, Cognee, LangMem, Supermemory all operate at the storage-extraction layer: better chunking, better graph topology, better retrieval ranking. None publicly grounds the architecture in a coherent theory of cognition. Not a knock, that is how the market matured around benchmark performance. But it leaves an axis open: ask "why is your system shaped this way?" and most competitors' honest answer today is "because it benchmarks well."
-
-Ours can be: append-only-with-consolidation is CLS; tiered latency is hippocampus-neocortex; salience is prediction-error. That is the foundation for the recursive self-improvement story (I7), you cannot recursively improve what you cannot theoretically justify.
-
-Theory is a complement to benchmarks, not a substitute. Mem0 wins LongMemEval today. "We measured AND we can explain why this shape" becomes a stronger combined position than either alone. Theoretical depth is a brand pillar that quietly raises the bar competitors have to meet.
-
-### 9.6 Why none of them wins this
-
-Five facts close the field.
-
-**A. Lock-in incentive trap.** Every major AI lab profits from owning user context. Anthropic, OpenAI, Google, Cursor cannot ship cross-vendor memory without cannibalizing their primary moat. They will ship better *internal* memory; they will not ship portable memory.
-
-**B. US-first regulatory blindness.** Mem0, Letta, Zep, Supermemory all built for US developers first. EU AI Act 2026 enforcement and GDPR's mature jurisprudence create requirements they will need years to retrofit. EU-native architecture is a multi-year head start, not a feature toggle.
-
-**C. Monolith vs. swarm.** All current frameworks ship monolithic memory pipelines. The swarm pattern (multi-agent, role-specialized, mode-switching) is research and internal infrastructure only. LinkedIn proves it works at scale; nobody has productized it.
-
-**D. Imposed vs. emergent schema.** Every framework ships with a taxonomy (episodic/semantic/procedural, or tier-based, or flat KV). Each forces user cognition into a pre-built shape. The emergent-ontology approach is unbuilt; it is genuinely hard, which is why everyone has avoided it.
-
-**E. Multi-tenant vs. single-tenant.** Every venture-funded memory startup is multi-tenant by necessity (margins demand it). Single-tenant per-user infrastructure is structurally incompatible with their unit economics. They cannot pivot without abandoning the growth thesis.
-
-A new entrant holding all five positions simultaneously, cross-vendor, EU-native, swarm-based, emergent, single-tenant, exists in an empty quadrant.
+Export buttons and privacy language are insufficient on their own. The same open core runs self-hosted or as one isolated managed instance per user. The shared control plane never stores the user's substrate. Moving between hosted and self-hosted deployment moves the vault, not a lossy representation of it.
 
 ---
 
-## 10. Why This Wins
+## 10. Why This Can Endure
 
-Six points, each correspondingly hard to replicate.
+Six properties reinforce one another.
 
-1. **Cross-vendor by structural design.** MCP-first. Works with every agent that speaks MCP. Cannot be matched by labs whose business model is lock-in.
-2. **Single-tenant by design.** Every user instance is physically isolated: own machine, own SQLite, own state. Cannot be matched by venture-funded competitors whose margins depend on multi-tenancy.
-3. **EU-native compliance.** Designed for GDPR + AI Act from day one. Data residency, audit trails, right-to-erasure built into the substrate model and deployment topology (destroy a machine = full deletion). US-first players retrofit; this starts there.
-4. **Emergent ontology.** No two users' vaults look alike after a few months. The system becomes a cognitive fingerprint. Generic "memory layers" cannot compete on personalization because they are statically schemaed.
-5. **Society-of-Mind swarm.** Each memory operation is handled by the right specialist at the right cost. Heterogeneous models per agent (each worker's model independently configurable; the judge panel multi-vendor by default). Independent A/B testing. Orchestration is the IP; models are commoditized.
-6. **User-owned as political position.** Not just architecture: a stance: *your cognition belongs to you, not to your AI provider*. That position becomes a brand, a community, and a long-term moat. The same logic that made 1Password and Fastmail durable.
+1. **Portable by structural design.** MCP gives every compatible client the same stable surface. The memory remains useful when the user changes models or tools.
+2. **Self-organizing by default.** The system discovers its own useful structure and maintains living syntheses. More history should create more value without creating more filing work.
+3. **Verifiable and correctable.** Provenance, confidence, conflicts, and corrections remain data. Useful personalization does not require opaque belief.
+4. **Single-tenant and movable.** Every user instance has its own machine, SQLite database, keys, and state. Hosted and self-hosted operation use the same vault.
+5. **Able to improve without rewriting history.** The substrate remains stable while extractors, retrieval, categories, and agent compositions evolve. Better interpretation applies to old events as well as new ones.
+6. **User-owned as a product position.** The architecture, license, export path, and EU operation all support one claim: *your cognition belongs to you, not to your AI provider*.
 
 ---
 
@@ -449,7 +386,7 @@ What this is explicitly not.
 - **Not vector-only retrieval.** Vector similarity is necessary but radically insufficient. Hybrid (semantic + keyword + entity + graph) from the start.
 - **Not a fixed schema as default.** Bootstrap scaffold yes; permanent ontology no. A fixed schema fails Invariant I6.
 - **Not a memory framework "for developers."** Developers are the first users because they have the tool stack. The product is for users.
-- **Not VC-funded if it forces multi-tenancy.** The unit economics of single-tenant + self-hostable + managed-hosting support a sustainable business, probably not a billion-dollar exit. If raising capital requires abandoning Invariant I8, do not raise.
+- **Not economically dependent on multi-tenancy.** Pricing, infrastructure, and growth choices must preserve one isolated instance per user. A business model that requires abandoning Invariant I8 is the wrong business model.
 
 ---
 
@@ -480,17 +417,17 @@ Why AGPLv3 over the alternatives that were on the table:
 
 | Option | Why not chosen |
 |---|---|
-| **Apache2 core** (Supabase / Mem0) | Maximises adoption but lets a cloud provider run a closed fork. The copyleft is the point here. |
-| **BSL / source-available** (Sentry / Cockroach) | Restricts forks but is not OSI-open; weaker trust signal for the EU/regulated audience. |
-| **Closed source** (1Password / Fastmail) | Contradicts the user-ownership ethos and I4's self-hosting-first stance. |
+| **Permissive core** | Maximises adoption but lets a cloud provider run a closed fork. The copyleft is the point here. |
+| **Source-available license** | Restricts forks but is not OSI-open; weaker trust signal for the EU/regulated audience. |
+| **Closed source** | Contradicts the user-ownership ethos and I4's self-hosting-first stance. |
 
 ---
 
 ## 13. Source Material
 
 ### Papers
-- McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). [Why there are complementary learning systems in the hippocampus and neocortex](https://stanford.edu/~jlmcc/papers/McClellandMcNaughtonOReilly95.pdf). *Psychological Review*, 102(3), 419–457.
-- Kumaran, D., Hassabis, D., & McClelland, J. L. (2016). [What learning systems do intelligent agents need? Complementary Learning Systems Theory updated](https://www.cell.com/trends/cognitive-sciences/fulltext/S1364-6613(16)30043-2). *Trends in Cognitive Sciences*, 20(7), 512–534.
+- McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). [Why there are complementary learning systems in the hippocampus and neocortex](https://stanford.edu/~jlmcc/papers/McClellandMcNaughtonOReilly95.pdf). *Psychological Review*, 102(3), 419-457.
+- Kumaran, D., Hassabis, D., & McClelland, J. L. (2016). [What learning systems do intelligent agents need? Complementary Learning Systems Theory updated](https://www.cell.com/trends/cognitive-sciences/fulltext/S1364-6613(16)30043-2). *Trends in Cognitive Sciences*, 20(7), 512-534.
 - [Mem0: ECAI 2025 (arXiv:2504.19413)](https://arxiv.org/abs/2504.19413)
 - [Zep: A Temporal Knowledge Graph Architecture for Agent Memory (arXiv:2501.13956)](https://arxiv.org/abs/2501.13956)
 - [H-MEM: Hierarchical Memory for High-Efficiency Long-Term Reasoning (arXiv:2507.22925)](https://arxiv.org/abs/2507.22925)

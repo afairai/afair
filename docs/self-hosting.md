@@ -462,3 +462,44 @@ Pull, re-sync, redeploy. The substrate is append-only and forward-compatible by
 design (Invariant I3): a newer build reads an older vault and re-interprets it;
 it never migrates or rewrites stored events. The three MCP verbs are frozen
 (I1), so your clients keep working across upgrades.
+## Memory Mirror and manual import
+
+The hosted account uses two read/write-management endpoints on the user's own
+vault. Self-hosters can use the same endpoints with the master bearer. Neither
+adds an MCP tool, and neither changes the frozen three-verb surface.
+
+Read the current Memory Mirror:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $AFAIR_AUTH_TOKEN" \
+  http://127.0.0.1:8765/internal/memory-mirror
+```
+
+The response contains current living syntheses, source previews, evidence
+counts, open questions, stale-source markers, unresolved conflicts, and version
+lineage. It is a read-only projection. The source events remain the only truth.
+
+Import normalized material:
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $AFAIR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://127.0.0.1:8765/internal/import \
+  --data '{
+    "source": "obsidian",
+    "items": [{
+      "title": "Project Atlas",
+      "path": "Projects/Atlas.md",
+      "text": "Atlas moved into prototyping."
+    }]
+  }'
+```
+
+`source` accepts `chatgpt`, `claude`, `obsidian`, `notion`, or `files`. One
+request accepts at most 500 items, 100 KB per item, and 8 MB of text in total.
+The hosted browser importer sends bounded batches directly to the user's own
+machine. Identical normalized items deduplicate through the normal content-hash
+contract. A fresh event enters the same extraction and synthesis pipeline as an
+ordinary `remember` call.
