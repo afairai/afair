@@ -24,8 +24,20 @@ Plus a tiny `escape_for_log` helper for safe logging of attacker text
 
 from __future__ import annotations
 
+import re
+
 UNTRUSTED_OPEN = "<event_content>"
 UNTRUSTED_CLOSE = "</event_content>"
+
+# Matches any CLOSING delimiter variant an attacker might use to break out of
+# the tagged region: case-insensitive, and tolerant of whitespace around the
+# slash and inside the angle brackets (``</event_content >``, ``</EVENT_CONTENT>``,
+# ``< / event_content >`` all match). LLMs do not parse XML strictly, so a fuzzy
+# closing tag can still read as "end of data" to the model — matching only the
+# exact byte string would leave that gap open. Deliberately CLOSE-only (requires
+# the slash) so re-wrapping already-wrapped content never escapes an inner
+# opening tag (idempotency contract; see tests).
+_UNTRUSTED_CLOSE_RE = re.compile(r"<\s*/\s*event_content\s*>", re.IGNORECASE)
 
 UNTRUSTED_CONTENT_DIRECTIVE = (
     "User-supplied event content appears in this prompt between "
@@ -42,11 +54,18 @@ UNTRUSTED_CONTENT_DIRECTIVE = (
 def wrap_untrusted(content: str) -> str:
     """Wrap user-controlled text in the agreed delimiter tags.
 
-    The closing tag is HTML-escaped inside the content so an attacker
-    cannot inject a fake ``</event_content>`` mid-text and then write
-    "instructions" that appear outside the tag boundary to the LLM.
+    Every closing-tag variant inside the content is HTML-escaped (angle
+    brackets → ``&lt;``/``&gt;``) so an attacker cannot inject a fake
+    ``</event_content>`` mid-text and then write "instructions" that appear
+    outside the tag boundary to the LLM. Matching is case-insensitive and
+    whitespace-tolerant (``</event_content >``, ``</EVENT_CONTENT>``,
+    ``< / event_content >`` are all neutralized), because the LLM reading the
+    prompt does not parse XML strictly — a fuzzy closing tag would otherwise
+    still read as the delimiter's end.
     """
-    escaped = content.replace(UNTRUSTED_CLOSE, "&lt;/event_content&gt;")
+    escaped = _UNTRUSTED_CLOSE_RE.sub(
+        lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"), content
+    )
     return f"{UNTRUSTED_OPEN}\n{escaped}\n{UNTRUSTED_CLOSE}"
 
 
