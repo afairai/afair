@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     conflict_resolver_model: str = ""
     consolidator_model: str = ""
     entity_articles_model: str = ""
+    living_syntheses_model: str = ""
     temporal_model: str = ""
     # Schema-Evolver (ADR-0003 Phase 4). VISION §6.5 earmarks this worker
     # for a premium model — a Sonnet-class override is recommended once
@@ -381,6 +382,7 @@ class Settings(BaseSettings):
             "conflict_resolver_model",
             "consolidator_model",
             "entity_articles_model",
+            "living_syntheses_model",
             "temporal_model",
             "schema_evolver_model",
         )

@@ -160,6 +160,7 @@ _PER_AGENT_MODEL_FIELDS = (
     "conflict_resolver_model",
     "consolidator_model",
     "entity_articles_model",
+    "living_syntheses_model",
     "temporal_model",
     "schema_evolver_model",
 )
@@ -238,6 +239,7 @@ def test_extractor_model_override_cascades_to_agents(
 
     assert s.temporal_model == "ollama/qwen2.5:7b"
     assert s.entity_articles_model == "ollama/qwen2.5:7b"
+    assert s.living_syntheses_model == "ollama/qwen2.5:7b"
 
 
 # ── judge panel configuration ─────────────────────────────────────────────────

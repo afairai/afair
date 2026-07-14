@@ -12,7 +12,7 @@ distributed abstractions; daily cadence is the replay schedule.
 The ``open_threads`` field is a proto-instance of Active Inference
 prediction-error signaling — unresolved predictions handed forward
 for a future consumer-agent to pick up (Phase 3+ work; see
-VISION.md §9).
+VISION.md §6).
 
 Pattern: at most once per UTC day, pick all the events for that day,
 ask the LLM to write a coherent narrative + extract themes, write the
