@@ -36,12 +36,12 @@ from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
 from ..agents.edge_scorer import EdgeConfidenceScorer
 from ..agents.embedding import embed_text
-from ..agents.entity_articles import EntityArticleWorker
 from ..agents.entity_audit import EntityAuditWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.expectation_checker import ExpectationChecker
 from ..agents.extraction_retry import ExtractionRetryWorker
+from ..agents.living_syntheses import LivingSynthesisWorker
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
 from ..agents.rollback_monitor import RollbackMonitor
@@ -65,6 +65,8 @@ from .export_async_routes import (
 )
 from .export_route import export_endpoint
 from .host_canon import HostCanonicalizationMiddleware
+from .import_route import import_endpoint
+from .memory_mirror_route import memory_mirror_endpoint
 from .oauth import routes as oauth_routes
 from .rate_limit import (
     InternalPathRateLimitMiddleware,
@@ -159,7 +161,7 @@ def build_server(settings: Settings) -> FastMCP:
                 EntityCanonicalizer(),
                 EntityDeduplicator(),
                 EdgeConfidenceScorer(),
-                EntityArticleWorker(),
+                LivingSynthesisWorker(),
                 TemporalWorker(),
                 SalienceWorker(),
                 # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
@@ -442,6 +444,8 @@ def build_app(settings: Settings) -> Starlette:
         # them from the main middleware avoids a chicken-and-egg with
         # the JWT/auth-rate-limit stack.
         "/internal/tokens",
+        "/internal/memory-mirror",
+        "/internal/import",
     }
     # Prefix-exempt: the token sub-routes (/internal/tokens/<id>) and the
     # async-export sub-routes (/internal/export/{request,status,download}),
@@ -469,6 +473,8 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/signup",
         "/internal/export",
         "/internal/tokens",
+        "/internal/memory-mirror",
+        "/internal/import",
     )
 
     middleware = [
@@ -595,6 +601,14 @@ def build_app(settings: Settings) -> Starlette:
         # minted sub-tokens cannot self-escalate). See tokens_route.py.
         Route("/internal/tokens", tokens_list_endpoint, methods=["GET"]),
         Route("/internal/tokens", tokens_mint_endpoint, methods=["POST"]),
+        Route("/internal/memory-mirror", memory_mirror_endpoint, methods=["GET"]),
+        Route(
+            "/internal/memory-mirror",
+            tokens_preflight_endpoint,
+            methods=["OPTIONS"],
+        ),
+        Route("/internal/import", import_endpoint, methods=["POST"]),
+        Route("/internal/import", tokens_preflight_endpoint, methods=["OPTIONS"]),
         Route(
             "/internal/tokens",
             tokens_preflight_endpoint,
