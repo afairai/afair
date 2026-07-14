@@ -667,9 +667,13 @@ def _resolve_key_points(raw: Any, events: list[Event]) -> list[dict[str, Any]]:
         mode = item.get("mode")
         if mode not in {"fact", "inference", "uncertain"}:
             mode = "fact"
-        # A factual point without a valid source is not a synthesis claim. A
-        # useful inference may remain, but it is labelled explicitly.
-        if not citations and mode == "fact":
+        # Every key point must resolve to at least one supporting source
+        # (ADR-0007: "resolve each key point to its supporting records").
+        # An uncited claim is not grounded in the cluster regardless of mode;
+        # keeping uncited inference/uncertain points would let an injected
+        # instruction in remembered content steer the model into a claim that
+        # reaches recall and the mirror with no traceable source. Drop it.
+        if not citations:
             continue
         out.append({"point": point, "mode": mode, "citations": citations})
     return out

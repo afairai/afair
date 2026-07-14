@@ -373,3 +373,19 @@ def test_split_and_merge_lineage_is_explicit() -> None:
     assert right.cluster_id != "cluster:old"
     assert right.ancestor_cluster_ids == ["cluster:old"]
     assert right.previous_synthesis_hashes == ["sha256:prior"]
+
+
+def test_uncited_key_points_are_dropped_regardless_of_mode(conn) -> None:
+    """Every key point must resolve to a source (ADR-0007 hardening). An uncited
+    claim, even an inference/uncertain one, could be an injected instruction and
+    must never reach recall or the mirror ungrounded."""
+    events = [_event(conn, "Atlas note A"), _event(conn, "Atlas note B")]
+    raw = [
+        {"point": "Cited fact.", "mode": "fact", "sources": [1]},
+        {"point": "Uncited inference.", "mode": "inference", "sources": []},
+        {"point": "Uncited uncertain.", "mode": "uncertain"},
+        {"point": "Cited inference.", "mode": "inference", "sources": [2]},
+    ]
+    resolved = ls._resolve_key_points(raw, events)
+    assert {p["point"] for p in resolved} == {"Cited fact.", "Cited inference."}
+    assert all(p["citations"] for p in resolved)
