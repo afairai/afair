@@ -121,3 +121,20 @@ def test_import_rejects_oversized_or_malformed_batches(vault_dir: Path) -> None:
     assert unsupported.status_code == 400
     assert empty.status_code == 400
     assert too_large.status_code == 413
+
+
+def test_future_created_at_is_clamped_to_now() -> None:
+    """A user-supplied future created_at is clamped to now so it can't pin the
+    newest-events discovery window; genuine past dates are preserved."""
+    from datetime import UTC, datetime
+
+    from afair.mcp.import_route import _valid_created_at
+
+    clamped = _valid_created_at("2999-01-01T00:00:00Z")
+    assert clamped is not None
+    assert datetime.fromisoformat(clamped) <= datetime.now(UTC)
+
+    past = _valid_created_at("2020-01-01T00:00:00Z")
+    assert past is not None and past.startswith("2020-01-01T00:00:00")
+
+    assert _valid_created_at("not a date") is None

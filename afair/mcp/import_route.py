@@ -169,4 +169,12 @@ def _valid_created_at(value: Any) -> str | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).isoformat()
+    normalized = parsed.astimezone(UTC)
+    # Clamp a future-dated import to now: a user-supplied created_at in the
+    # future would otherwise pin the newest-events discovery window and daily
+    # consolidation on a timestamp that never arrives. Past dates are kept
+    # verbatim (genuine historical imports).
+    now = datetime.now(UTC)
+    if normalized > now:
+        normalized = now
+    return normalized.isoformat()
