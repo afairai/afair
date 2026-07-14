@@ -10,6 +10,13 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.21](https://github.com/afairai/afair/compare/v0.1.20...v0.1.21) (2026-07-14)
+
+
+### Bug Fixes
+
+* **synthesis:** reconcile crash-duplicate syntheses on the unchanged path ([f880554](https://github.com/afairai/afair/commit/f8805545995b298991efa096a4679b7f48dae8de))
+
 ## [0.1.20](https://github.com/afairai/afair/compare/v0.1.19...v0.1.20) (2026-07-14)
 
 
