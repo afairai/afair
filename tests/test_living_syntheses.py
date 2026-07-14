@@ -389,3 +389,39 @@ def test_uncited_key_points_are_dropped_regardless_of_mode(conn) -> None:
     resolved = ls._resolve_key_points(raw, events)
     assert {p["point"] for p in resolved} == {"Cited fact.", "Cited inference."}
     assert all(p["citations"] for p in resolved)
+
+
+def test_skip_path_reconciles_crash_created_duplicate(conn, monkeypatch) -> None:
+    """A crash between a write and its supersession can leave two live syntheses
+    for one cluster. On the unchanged path the worker reconciles: keep the
+    current synthesis, supersede the stale same-cluster duplicate."""
+    sources = [_event(conn, f"Atlas note {index}") for index in range(3)]
+    for source in sources:
+        _mention(conn, source, "Atlas")
+    _stub_llm(monkeypatch)
+
+    ls.LivingSynthesisWorker().run(conn, Settings())
+    priors = ls._live_priors(conn)
+    assert len(priors) == 1
+    cluster_id = priors[0].cluster_id
+    members = list(priors[0].member_hashes)
+
+    # Simulate the crash duplicate: a second live synthesis, same cluster and
+    # members, never superseded.
+    write_event(
+        conn,
+        origin="agent",
+        kind=ls.LIVING_SYNTHESIS_KIND,
+        payload={
+            "cluster_id": cluster_id,
+            "member_hashes": members,
+            "citations": members,
+            "title": "duplicate",
+        },
+    )
+    assert len(ls._live_priors(conn)) == 2
+
+    stats = ls.LivingSynthesisWorker().run(conn, Settings())
+    assert stats["skipped_unchanged"] == 1
+    assert stats["reconciled"] == 1
+    assert len(ls._live_priors(conn)) == 1

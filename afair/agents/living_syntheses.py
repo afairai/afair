@@ -68,6 +68,13 @@ RECIPROCAL_SEMANTIC_DISTANCE = 0.32
 CANDIDATE_MERGE_JACCARD = 0.65
 PRIOR_MATCH_SCORE = 0.25
 
+# Invalidation reasons for a retired living synthesis. Distinct so the audit
+# trail says why a prior went away: replaced by a fresher synthesis, reconciled
+# as a crash-created duplicate, or retired because its evidence no longer holds.
+_UPDATED_REASON = "superseded by updated living synthesis"
+_RECONCILED_REASON = "superseded by concurrent synthesis for the same cluster"
+_RETIRED_REASON = "retired: current evidence no longer qualifies"
+
 _DERIVED_KINDS = {
     INVALIDATE_KIND,
     "consolidation",
@@ -209,6 +216,7 @@ class LivingSynthesisWorker(ColdPathWorker):
             "skipped_unchanged": 0,
             "llm_errors": 0,
             "retired": 0,
+            "reconciled": 0,
             "capped": False,
         }
         events = _eligible_events(conn)
@@ -229,6 +237,22 @@ class LivingSynthesisWorker(ColdPathWorker):
             prior = _matching_prior(candidate, priors)
             if prior is not None and candidate.member_hashes == set(prior.member_hashes):
                 stats["skipped_unchanged"] += 1
+                # A crash between a prior cycle's write and its supersession can
+                # leave more than one live synthesis for this cluster_id. The
+                # unchanged path would never clean that up until the evidence
+                # next changes, so reconcile here: keep the current synthesis
+                # and supersede any stale same-cluster duplicates.
+                same_cluster = [
+                    p.event_hash for p in priors if p.cluster_id == candidate.cluster_id
+                ]
+                if len(same_cluster) > 1:
+                    reconciled = _supersede_priors(
+                        conn,
+                        same_cluster,
+                        keep_hash=prior.event_hash,
+                        reason=_RECONCILED_REASON,
+                    )
+                    stats["reconciled"] += len(reconciled)
                 continue
 
             source_events = _candidate_events(events, candidate)
@@ -253,6 +277,7 @@ class LivingSynthesisWorker(ColdPathWorker):
                 conn,
                 candidate.previous_synthesis_hashes,
                 keep_hash=written.content_hash,
+                reason=_UPDATED_REASON,
             )
             stats["written"] += 1
             log.info(
@@ -271,7 +296,8 @@ class LivingSynthesisWorker(ColdPathWorker):
             detail=(
                 f"candidates={stats['candidates']} written={stats['written']} "
                 f"unchanged={stats['skipped_unchanged']} errors={stats['llm_errors']} "
-                f"retired={stats['retired']} capped={stats['capped']}"
+                f"retired={stats['retired']} reconciled={stats['reconciled']} "
+                f"capped={stats['capped']}"
             ),
         )
         return stats
@@ -751,6 +777,7 @@ def _supersede_priors(
     prior_hashes: list[str],
     *,
     keep_hash: str,
+    reason: str,
 ) -> list[str]:
     superseded: list[str] = []
     for prior_hash in dict.fromkeys(prior_hashes):
@@ -773,7 +800,7 @@ def _supersede_priors(
         write_invalidation(
             conn,
             target_hash=prior_hash,
-            reason="superseded by updated living synthesis",
+            reason=reason,
             origin="agent",
         )
         with conn:
@@ -808,7 +835,7 @@ def _retire_stale_priors(
         fully_in_window = set(prior.member_hashes) <= set(eligible_events)
         if current_count >= MIN_CLUSTER_EVENTS and not fully_in_window:
             continue
-        _supersede_priors(conn, [prior.event_hash], keep_hash="")
+        _supersede_priors(conn, [prior.event_hash], keep_hash="", reason=_RETIRED_REASON)
         retired += 1
     return retired
 
