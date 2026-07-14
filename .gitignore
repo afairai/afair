@@ -91,3 +91,6 @@ analysis/2026-06-13-gbrain-competitive-analysis.md
 analysis/2026-06-13-feature-response-to-gbrain.md
 analysis/2026-05-27-dashboard-concept.md
 requirements.audit.txt
+
+# Codex/other-harness vendored skills (mirror of the gitignored .claude/skills/)
+.agents/skills/
