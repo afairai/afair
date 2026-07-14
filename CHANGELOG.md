@@ -10,6 +10,22 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.19](https://github.com/afairai/afair/compare/v0.1.18...v0.1.19) (2026-07-14)
+
+
+### Features
+
+* **dashboard:** add read-only Memory Mirror projection ([004b64f](https://github.com/afairai/afair/commit/004b64f49ac7b0cfc0cbc7e1c98e1ef071b9d52a))
+* **import:** accept user-initiated vault imports ([bd1f660](https://github.com/afairai/afair/commit/bd1f660631a9ed188f4c7ef259216a3f5de97175))
+* **recall:** prefer current living syntheses over legacy entity articles ([f79eb48](https://github.com/afairai/afair/commit/f79eb483de4bd21c9a88da71eea9c97a988ba740))
+* **server:** wire living-synthesis worker and import/mirror routes ([8213788](https://github.com/afairai/afair/commit/8213788ac6ca0cd4559ed73e3c6173cd7826315a))
+* **synthesis:** discover and maintain cited living syntheses (ADR-0007) ([076625d](https://github.com/afairai/afair/commit/076625d3b02c0920bba81af15e4d9742e69c9e9d))
+
+
+### Documentation
+
+* living syntheses, product boundaries, import and dashboard ([4c4fb0f](https://github.com/afairai/afair/commit/4c4fb0f0fdaa8eeb608f3c81cfe138e4e530a929))
+
 ## [0.1.18](https://github.com/afairai/afair/compare/v0.1.17...v0.1.18) (2026-07-08)
 
 
