@@ -56,6 +56,7 @@ from ..agents.invalidation import (
     read_invalidations_batch,
     write_invalidation,
 )
+from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
 from ..agents.verdicts import is_unresolved_conflict
 from ..agents.verdicts import meta as _verdict_meta
 from ..substrate import (
@@ -1600,33 +1601,32 @@ def _compute_coverage(
 
 
 def _article_first_order(events: list[Event], invalidated: set[str] | None = None) -> list[Event]:
-    """Stable-partition entity_article hits to the front of a query result.
+    """Put living syntheses, then legacy entity articles, before raw hits.
 
-    An article only appears in a query's results when it matched (FTS / vec
-    / entity-name), and an article is a dense synthesis of exactly that
-    entity — so when one is relevant the caller should read it before the
-    raw events it summarizes. This is the recall side of the Karpathy
-    LLM-Wiki / RAG-bypass: prefer the synthesis. Order within each partition
-    (and thus the underlying fused ranking) is preserved.
+    A synthesis only appears when it matched the query. It is denser than
+    the raw events behind it, so recall presents it first while preserving
+    the underlying ranking inside each partition. The automatic living
+    synthesis takes precedence over the older per-entity article format.
 
-    Superseded articles are dropped entirely. The article worker now
-    deletes the old FTS row on re-synthesis, but pre-fix stale rows and the
-    re-synthesis race window can still surface a dead version. A stale
-    article must never lead — let alone fill — recall, so any article whose
-    content_hash is invalidated is removed here. The current version also
-    matched and stays. Non-article invalidated events are not the concern
-    of this function; they remain (annotated) for history.
+    Superseded synthesis events are dropped entirely. Their raw source
+    events remain available and retain the usual invalidation annotation.
     """
     invalidated = invalidated or set()
-    articles = [
-        e for e in events if e.kind == ENTITY_ARTICLE_KIND and e.content_hash not in invalidated
+    synthesis_kinds = {LIVING_SYNTHESIS_KIND, ENTITY_ARTICLE_KIND}
+    living = [
+        event
+        for event in events
+        if event.kind == LIVING_SYNTHESIS_KIND and event.content_hash not in invalidated
     ]
-    rest = [e for e in events if e.kind != ENTITY_ARTICLE_KIND]
-    # Drop invalidated articles from the result set as well (they are in
-    # neither partition above) — fall through to rest-only when none remain.
-    if not articles:
-        return rest if any(e.kind == ENTITY_ARTICLE_KIND for e in events) else events
-    return articles + rest
+    legacy = [
+        event
+        for event in events
+        if event.kind == ENTITY_ARTICLE_KIND and event.content_hash not in invalidated
+    ]
+    rest = [event for event in events if event.kind not in synthesis_kinds]
+    if living or legacy:
+        return living + legacy + rest
+    return rest if any(event.kind in synthesis_kinds for event in events) else events
 
 
 def recall(

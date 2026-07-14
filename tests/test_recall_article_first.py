@@ -4,6 +4,7 @@ raw events they summarize (Karpathy LLM-Wiki / RAG-bypass)."""
 from __future__ import annotations
 
 from afair.agents.entity_articles import ENTITY_ARTICLE_KIND
+from afair.agents.living_syntheses import LIVING_SYNTHESIS_KIND
 from afair.mcp.handlers import _article_first_order
 from afair.substrate.events import Event
 
@@ -29,6 +30,17 @@ def test_articles_move_to_front_preserving_order() -> None:
     ]
     out = _article_first_order(events)
     assert [e.id for e in out] == ["e2", "e4", "e1", "e3"]
+
+
+def test_living_synthesis_precedes_legacy_article() -> None:
+    events = [
+        _ev(ENTITY_ARTICLE_KIND, 1),
+        _ev("remember", 2),
+        _ev(LIVING_SYNTHESIS_KIND, 3),
+        _ev(ENTITY_ARTICLE_KIND, 4),
+    ]
+    out = _article_first_order(events)
+    assert [event.id for event in out] == ["e3", "e1", "e4", "e2"]
 
 
 def test_no_articles_is_identity() -> None:
