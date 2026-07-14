@@ -10,6 +10,14 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.20](https://github.com/afairai/afair/compare/v0.1.19...v0.1.20) (2026-07-14)
+
+
+### Bug Fixes
+
+* **import:** clamp a future-dated created_at to now ([e1912d0](https://github.com/afairai/afair/commit/e1912d0129201ea09681573bc5ba99327c856fb9))
+* **synthesis:** require a citation on every key point, not just facts ([f621af8](https://github.com/afairai/afair/commit/f621af8f56f034c21ff71e505c916f731c76d592))
+
 ## [0.1.19](https://github.com/afairai/afair/compare/v0.1.18...v0.1.19) (2026-07-14)
 
 
