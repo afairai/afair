@@ -401,3 +401,92 @@ def test_decide_stamps_dashboard_provenance(vault_dir: Path) -> None:
     finally:
         conn.close()
     assert row["decided_by"] == "operator:dashboard"
+
+
+# ── Phase 2: conflict proposals surface + decide through the same routes ──────
+
+
+def _seed_conflict(vault_dir: Path) -> str:
+    """Enqueue one conflict proposal (ADR-0008) directly into the vault."""
+    from afair.substrate import enqueue_conflict_proposal
+
+    conn = open_db(vault_dir)
+    try:
+        a = write_event(
+            conn,
+            origin="user",
+            kind="remember",
+            payload={"content_type": "text", "text": "Sajinth is CEO"},
+            created_at="2025-01-01T00:00:00+00:00",
+        )
+        b = write_event(
+            conn,
+            origin="user",
+            kind="remember",
+            payload={"content_type": "text", "text": "Sajinth is CTO"},
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        pid = enqueue_conflict_proposal(
+            conn,
+            event_a_id=a.id,
+            event_a_hash=a.content_hash,
+            event_b_id=b.id,
+            event_b_hash=b.content_hash,
+            newer_hash=b.content_hash,
+            flag_verdict="conflicts",
+            reason="role changed; dates don't explain it",
+            confidence=0.9,
+            detected_by="conflict_resolver:v0",
+        )
+    finally:
+        conn.close()
+    assert pid is not None
+    return pid
+
+
+def test_list_surfaces_conflict_with_directional_detail(vault_dir: Path) -> None:
+    pid = _seed_conflict(vault_dir)
+    response = TestClient(_app(vault_dir)).get("/internal/corrections", headers=_headers())
+    body = response.json()
+    item = next(i for i in body["pending"] if i["id"] == pid)
+    assert item["kind"] == "conflict"
+    assert item["id"].startswith("cfl_")
+    detail = item["detail"]
+    assert detail["queue"] == "conflict"
+    assert detail["newer_hash"]
+    assert detail["flag_verdict"] == "conflicts"
+    assert detail["event_a"]["preview"]
+    assert detail["event_b"]["preview"]
+
+
+def test_decide_conflict_confirm_through_route(vault_dir: Path) -> None:
+    pid = _seed_conflict(vault_dir)
+    client = TestClient(_app(vault_dir))
+    response = client.post(
+        "/internal/decide", headers=_headers(), json={"proposal_id": pid, "verdict": "confirm"}
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "applied"
+    # It drops from the queue.
+    after = client.get("/internal/corrections", headers=_headers()).json()
+    assert all(item["id"] != pid for item in after["pending"])
+
+
+def test_decide_conflict_revert_is_invalid_decision_400(vault_dir: Path) -> None:
+    pid = _seed_conflict(vault_dir)
+    response = TestClient(_app(vault_dir)).post(
+        "/internal/decide", headers=_headers(), json={"proposal_id": pid, "verdict": "revert"}
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_decision"
+
+
+def test_decide_conflict_with_to_kind_is_invalid_decision_400(vault_dir: Path) -> None:
+    pid = _seed_conflict(vault_dir)
+    response = TestClient(_app(vault_dir)).post(
+        "/internal/decide",
+        headers=_headers(),
+        json={"proposal_id": pid, "verdict": "confirm", "to_kind": "person"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_decision"

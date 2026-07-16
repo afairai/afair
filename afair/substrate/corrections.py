@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from .conflict_resolutions import CONFLICT_PROPOSAL_ID_PREFIX
 from .entities import (
     assign_entity_kind,
     record_edge_review,
@@ -474,6 +475,24 @@ def decide_correction(
         )
         return CorrectionOutcome(
             proposal_id=outcome.proposal_id, status=outcome.status, note=outcome.note
+        )
+    if proposal_id.startswith(CONFLICT_PROPOSAL_ID_PREFIX):
+        # Conflict-resolution queue (ADR-0008) — symmetric with the ontology
+        # dispatch above. Directional confirm/reject/retract map onto the frozen
+        # verdict enum (no widening, I1); revert / to_kind are meaningless for an
+        # event pair, so decide_conflict_proposal raises ValueError on them.
+        from .conflict_resolutions import decide_conflict_proposal
+
+        if to_kind is not None:
+            msg = "to_kind is not valid for a conflict-resolution proposal"
+            raise ValueError(msg)
+        conflict_outcome = decide_conflict_proposal(
+            conn, proposal_id=proposal_id, verdict=verdict, decided_by=decided_by
+        )
+        return CorrectionOutcome(
+            proposal_id=conflict_outcome.proposal_id,
+            status=conflict_outcome.status,
+            note=conflict_outcome.note,
         )
     if verdict not in ("confirm", "reject", "retract"):
         msg = f"verdict must be 'confirm', 'reject' or 'retract', got {verdict!r}"

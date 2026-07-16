@@ -13,6 +13,14 @@ from __future__ import annotations
 
 from . import observability, pipeline_events
 from .checkpoint import start_checkpoint_loop
+from .conflict_resolutions import (
+    ConflictResolutionOutcome,
+    PendingConflictProposal,
+    count_pending_conflict_proposals,
+    decide_conflict_proposal,
+    enqueue_conflict_proposal,
+    read_pending_conflict_proposals,
+)
 from .corrections import (
     CorrectionOutcome,
     PendingCorrection,
@@ -143,6 +151,7 @@ __all__ = [
     "ONTOLOGY_PROPOSAL_ID_PREFIX",
     "SCHEMA_VERSION",
     "TEMPORAL_CLASSES",
+    "ConflictResolutionOutcome",
     "CorrectionOutcome",
     "EdgeConfidenceScore",
     "EdgeInvalidation",
@@ -156,6 +165,7 @@ __all__ = [
     "EventTemporal",
     "KindRow",
     "OntologyDecisionOutcome",
+    "PendingConflictProposal",
     "PendingCorrection",
     "PendingOntologyProposal",
     "ProvenanceRow",
@@ -170,11 +180,14 @@ __all__ = [
     "count_corroborating_sources",
     "count_corroborating_sources_batch",
     "count_events_by_client",
+    "count_pending_conflict_proposals",
     "count_pending_corrections",
     "count_pending_ontology_proposals",
+    "decide_conflict_proposal",
     "decide_correction",
     "decide_ontology_proposal",
     "derive_searchable_text",
+    "enqueue_conflict_proposal",
     "entity_id",
     "entity_id_v2",
     "find_edges_for_source_event",
@@ -211,6 +224,7 @@ __all__ = [
     "read_event_temporal_batch",
     "read_mentions_batch",
     "read_object",
+    "read_pending_conflict_proposals",
     "read_pending_corrections",
     "read_pending_ontology_proposals",
     "record_edge_review",

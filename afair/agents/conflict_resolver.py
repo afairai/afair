@@ -72,6 +72,19 @@ spacing, a cycle runs ~25s and the LLM-token-per-minute usage stays
 roughly half of the cap, leaving headroom for the warm-path Extractor."""
 
 
+def flag_is_unresolved(flag: dict[str, Any]) -> bool:
+    """True when a conflict flag is BOTH an unresolved-conflict verdict AND the
+    operator has not decided it (ADR-0008).
+
+    The verdict-level ``is_unresolved_conflict`` says the pair is in live tension;
+    a non-null ``resolution`` says the operator has since decided it, so it must
+    not keep counting toward the unresolved-conflict caveats/counts (though the
+    flag is still SERVED with its resolution — ADR-0004 caveat-not-suppress). A
+    flag with no ``resolution`` key (e.g. a legacy/pre-attach caller) is treated
+    as undecided, so the count is unchanged where resolutions aren't attached."""
+    return is_unresolved_conflict(str(flag.get("verdict", ""))) and flag.get("resolution") is None
+
+
 def read_conflicts_batch(
     conn: sqlite3.Connection, event_hashes: list[str]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -150,7 +163,81 @@ def read_conflicts_batch(
         data = json.loads(row["extraction"])
         result.setdefault(the_other, []).append(_flag_for_anchor(data, the_other))
 
+    # ADR-0008: attach the operator's resolution (or None) to every flag, so a
+    # consumer can EXCLUDE a resolved pair from unresolved counts while still
+    # SERVING it with the resolution shown (ADR-0004 caveat-not-suppress). Keyed
+    # by pair identity (both hashes), latest-wins.
+    _attach_resolutions(conn, result)
+
     return result
+
+
+def _attach_resolutions(
+    conn: sqlite3.Connection, flags_by_hash: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Set each flag's ``resolution`` to the operator's decision or None.
+
+    A resolution interpretation (``conflict_resolution:v1:<event_b_hash>``) is
+    filed once per pair, anchored on event B. A flag surfaces on EITHER side of
+    the pair, so we resolve by the pair identity — the flag's own hash plus its
+    ``with_content_hash`` (the other side). One batched query over every pair-
+    hash present; absent → None."""
+    pair_hashes: set[str] = set()
+    for anchor, flags in flags_by_hash.items():
+        for flag in flags:
+            pair_hashes.add(anchor)
+            other = str(flag.get("with_content_hash", ""))
+            if other:
+                pair_hashes.add(other)
+    resolutions = read_conflict_resolutions_batch(conn, sorted(pair_hashes))
+    for anchor, flags in flags_by_hash.items():
+        for flag in flags:
+            other = str(flag.get("with_content_hash", ""))
+            # The resolution is keyed on event B (the pair's newer-anchor by the
+            # producer convention). It is reachable under either side's hash in
+            # the batch map, so look up by anchor first, then the other side.
+            flag["resolution"] = resolutions.get(anchor) or resolutions.get(other)
+
+
+def read_conflict_resolutions_batch(
+    conn: sqlite3.Connection, event_hashes: list[str]
+) -> dict[str, str]:
+    """Map event_hash → the operator's resolution string for any pair whose
+    ``conflict_resolution:v1`` interpretation is anchored on that hash.
+
+    The resolution is stored once per pair (anchored on event B); this returns it
+    keyed by BOTH the anchor hash (event B) and event A, so a flag surfaced on
+    either side finds it. Latest-wins on produced_at. Empty input short-circuits.
+    """
+    if not event_hashes:
+        return {}
+    placeholders = ",".join("?" * len(event_hashes))
+    producers = [f"conflict_resolution:v1:{h}" for h in event_hashes]
+    p_placeholders = ",".join("?" * len(producers))
+    rows = conn.execute(
+        f"""
+        SELECT event_hash, produced_by, extraction FROM interpretations
+        WHERE (event_hash IN ({placeholders}) OR produced_by IN ({p_placeholders}))
+          AND produced_by LIKE 'conflict_resolution:v1:%'
+        ORDER BY produced_at DESC
+        """,
+        [*event_hashes, *producers],
+    ).fetchall()
+    asked = set(event_hashes)
+    out: dict[str, str] = {}
+    for row in rows:
+        try:
+            data = json.loads(row["extraction"])
+        except (TypeError, ValueError):
+            continue
+        resolution = data.get("resolution")
+        if not isinstance(resolution, str):
+            continue
+        # Key it under both sides of the pair that are in the asked set.
+        for side in (str(data.get("event_a_hash", "")), str(data.get("event_b_hash", ""))):
+            if side in asked and side not in out:
+                out[side] = resolution
+    return out
 
 
 _TOOL_NAME = "record_relation_verdict"
@@ -278,9 +365,25 @@ class ConflictResolver(ColdPathWorker):
             # Per-verdict tally (dynamic keys across the taxonomy) plus a
             # rolled-up unresolved-conflict count the caveats layer cares about.
             stats[verdict.verdict] = stats.get(verdict.verdict, 0) + 1
+            _write_verdict(conn, event_a=event_a, pair=verdict)
             if is_unresolved_conflict(verdict.verdict):
                 stats["unresolved_conflicts"] += 1
-            _write_verdict(conn, event_a=event_a, pair=verdict)
+                # ADR-0008: an unresolved conflict is decidable by the operator.
+                # Enqueue one proposal per pair (anti-re-nagged on pair_key) so
+                # the Memory Mirror can offer confirm/reject/retract. Detection
+                # is unchanged — the resolver still NEVER auto-invalidates.
+                if _enqueue_conflict(conn, event_a=event_a, event_b=event_b, pair=verdict):
+                    stats["conflict_proposals_enqueued"] = (
+                        stats.get("conflict_proposals_enqueued", 0) + 1
+                    )
+
+        # Backfill: make EXISTING unresolved conflict_flag rows decidable too, so
+        # a vault that accrued flags before ADR-0008 shipped isn't stuck with a
+        # read-only Mirror. Bounded per cycle; skips pairs already enqueued or
+        # already resolved.
+        stats["conflict_proposals_backfilled"] = _backfill_conflict_proposals(
+            conn, max_pairs=MAX_BACKFILL_PER_CYCLE
+        )
 
         pe.record(
             conn,
@@ -452,3 +555,125 @@ def _write_verdict(conn: sqlite3.Connection, *, event_a: Event, pair: ConflictPa
         produced_by=producer,
         extraction=extraction,
     )
+
+
+MAX_BACKFILL_PER_CYCLE = 50
+"""Cap on historical unresolved conflict_flag rows converted to decidable
+proposals per cycle (ADR-0008 backfill). Bounds the per-run work so a vault with
+a large conflict backlog drains gradually rather than in one giant transaction."""
+
+CONFLICT_RESOLUTION_LIKE = "conflict_resolution:v1:%"
+"""Producer LIKE-pattern for the operator's resolution interpretation. A pair
+with such a row is already decided and must not be re-enqueued (anti-re-nag)."""
+
+
+def _newer_hash(*, a_hash: str, a_created: str, b_hash: str, b_created: str) -> str:
+    """Which side is chronologically newer (ties → B, the resolver's anchor-B
+    convention). Used to give a directional decision its meaning without any
+    enum widening (ADR-0008)."""
+    return a_hash if a_created > b_created else b_hash
+
+
+def _enqueue_conflict(
+    conn: sqlite3.Connection, *, event_a: Event, event_b: Event, pair: ConflictPair
+) -> bool:
+    """Enqueue one decidable conflict proposal for this unresolved pair.
+
+    Returns True when a fresh proposal was inserted, False when the pair was
+    already enqueued/decided (anti-re-nag) — mirrors the queue's own contract.
+    """
+    from ..substrate.conflict_resolutions import enqueue_conflict_proposal
+
+    newer = _newer_hash(
+        a_hash=event_a.content_hash,
+        a_created=event_a.created_at,
+        b_hash=event_b.content_hash,
+        b_created=event_b.created_at,
+    )
+    proposal_id = enqueue_conflict_proposal(
+        conn,
+        event_a_id=event_a.id,
+        event_a_hash=event_a.content_hash,
+        event_b_id=event_b.id,
+        event_b_hash=event_b.content_hash,
+        newer_hash=newer,
+        flag_verdict=pair.verdict,
+        reason=pair.reason,
+        confidence=pair.confidence,
+        detected_by=CONFLICT_RESOLVER_PRODUCED_BY,
+    )
+    return proposal_id is not None
+
+
+def _backfill_conflict_proposals(conn: sqlite3.Connection, *, max_pairs: int) -> int:
+    """Convert historical unresolved conflict_flag rows into decidable proposals.
+
+    Walks recent conflict_flag interpretation rows, skips any whose verdict is
+    not an unresolved conflict, and enqueues the rest (the enqueue's own
+    anti-re-nag on pair_key handles already-enqueued/decided pairs). Also skips a
+    pair that already carries an operator resolution interpretation, so a decided
+    pair is never re-surfaced even if its queue row was pruned. Bounded to
+    ``max_pairs`` enqueues per cycle. Returns the number of NEW proposals.
+    """
+    from ..substrate.conflict_resolutions import pair_key_for
+
+    rows = conn.execute(
+        """
+        SELECT event_hash, extraction FROM interpretations
+        WHERE produced_by LIKE 'conflict_resolver:v0:%'
+        ORDER BY produced_at DESC
+        LIMIT ?
+        """,
+        (max_pairs * 8,),  # over-fetch; most are resolved / already enqueued
+    ).fetchall()
+
+    enqueued = 0
+    for row in rows:
+        if enqueued >= max_pairs:
+            break
+        try:
+            data = json.loads(row["extraction"])
+        except (TypeError, ValueError):
+            continue
+        verdict = normalize_verdict(str(data.get("verdict", "unsure")))
+        if not is_unresolved_conflict(verdict):
+            continue
+        a_hash = str(data.get("event_a_hash", ""))
+        b_hash = str(data.get("event_b_hash", ""))
+        if not a_hash or not b_hash:
+            continue
+        # Skip a pair that already carries an operator resolution (decided even
+        # if its queue row was pruned) — the resolution is anchored on event B.
+        if _has_resolution(conn, b_hash):
+            continue
+        _ = pair_key_for(a_hash, b_hash)  # queue enforces the anti-re-nag itself
+        event_a = read_event_by_hash(conn, a_hash)
+        event_b = read_event_by_hash(conn, b_hash)
+        if event_a is None or event_b is None:
+            continue
+        flag = ConflictPair(
+            event_a_hash=a_hash,
+            event_b_hash=b_hash,
+            event_a_id=event_a.id,
+            event_b_id=event_b.id,
+            verdict=verdict,
+            reason=str(data.get("reason", "")),
+            confidence=float(data.get("confidence", 0.0)),
+        )
+        if _enqueue_conflict(conn, event_a=event_a, event_b=event_b, pair=flag):
+            enqueued += 1
+    return enqueued
+
+
+def _has_resolution(conn: sqlite3.Connection, event_b_hash: str) -> bool:
+    """True when an operator resolution interpretation already exists for the
+    pair anchored on ``event_b_hash`` (produced_by conflict_resolution:v1:<B>)."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM interpretations
+        WHERE event_hash = ? AND produced_by = ?
+        LIMIT 1
+        """,
+        (event_b_hash, f"conflict_resolution:v1:{event_b_hash}"),
+    ).fetchone()
+    return row is not None

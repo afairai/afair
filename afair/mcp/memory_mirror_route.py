@@ -14,11 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
-from ..agents.conflict_resolver import read_conflicts_batch
+from ..agents.conflict_resolver import flag_is_unresolved, read_conflicts_batch
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.invalidation import INVALIDATE_KIND, read_invalidations_batch
 from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
-from ..agents.verdicts import is_unresolved_conflict
 from ..substrate import open_db, read_event_by_hash
 from .cors import cors_headers
 from .internal_auth import authorize_internal
@@ -128,12 +127,12 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
                     }
                 )
                 continue
-            source_conflicts = [
-                flag
-                for flag in conflicts.get(source_hash, [])
-                if is_unresolved_conflict(str(flag.get("verdict", "")))
-            ]
-            unresolved_count += len(source_conflicts)
+            # Serve ALL conflict flags (resolved ones carry their resolution, so
+            # the dashboard can show a "resolved by you" badge — ADR-0004
+            # caveat-not-suppress), but only count the still-unresolved ones
+            # toward the tension total (ADR-0008).
+            all_conflicts = conflicts.get(source_hash, [])
+            unresolved_count += sum(1 for flag in all_conflicts if flag_is_unresolved(flag))
             sources.append(
                 {
                     "event_id": source.id,
@@ -143,7 +142,7 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
                     "preview": _source_preview(source.payload),
                     "current": source_hash not in source_invalidations,
                     "missing": False,
-                    "conflicts": source_conflicts,
+                    "conflicts": all_conflicts,
                 }
             )
 

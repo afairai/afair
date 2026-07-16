@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
-from ..agents.conflict_resolver import read_conflicts_batch
+from ..agents.conflict_resolver import flag_is_unresolved, read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.interpretation import (
@@ -65,6 +65,7 @@ from ..substrate import (
     build_compound_payload,
     build_text_payload,
     count_events_by_client,
+    count_pending_conflict_proposals,
     count_pending_corrections,
     count_pending_ontology_proposals,
     iter_events,
@@ -79,6 +80,7 @@ from ..substrate import (
     read_event_provenance_batch,
     read_mentions_batch,
     read_object,
+    read_pending_conflict_proposals,
     read_pending_corrections,
     read_pending_ontology_proposals,
     record_edge_serves,
@@ -1560,7 +1562,12 @@ def _compute_coverage(
         hit_has_unresolved = False
         for c in flags:
             verdict = str(c.get("verdict", ""))
-            if is_unresolved_conflict(verdict):
+            # ADR-0008: a pair the operator resolved no longer counts toward the
+            # unresolved-tension caveat (flag_is_unresolved gates on both the
+            # verdict AND a null resolution), but its verdict-level caveat
+            # template (e.g. "a newer record supersedes an older one") is still
+            # surfaced for context.
+            if flag_is_unresolved(c):
                 hit_has_unresolved = True
             cav = _verdict_meta(verdict).caveat
             if cav:
@@ -1782,7 +1789,11 @@ def recall(
     # The cheap universal nudge: the TRUE open-queue total on every recall,
     # so a client can prompt "you have N memories to review" without the
     # operator ever calling stats=True. The heavy list stays gated above.
-    pending_count = count_pending_corrections(db) + count_pending_ontology_proposals(db)
+    pending_count = (
+        count_pending_corrections(db)
+        + count_pending_ontology_proposals(db)
+        + count_pending_conflict_proposals(db)
+    )
 
     # ── Single-event lookup mode ───────────────────────────────────────────
     if by_id is not None or by_content_hash is not None:
@@ -2083,7 +2094,28 @@ def _pending_correction_views(
         )
         for p in read_pending_ontology_proposals(db, limit=fetch)
     ]
+    views += [
+        ProposedCorrectionView(
+            id=p.id,
+            kind="conflict",
+            prompt=_conflict_prompt(p.reason),
+            evidence=p.reason,
+            confidence=p.confidence,
+        )
+        for p in read_pending_conflict_proposals(db, limit=fetch)
+    ]
     return views[offset : offset + limit]
+
+
+def _conflict_prompt(reason: str) -> str:
+    """A directional yes/no prompt for one unresolved conflict pair (ADR-0008),
+    safe to show the operator verbatim."""
+    base = (
+        "Two of your memories are in unresolved tension. Is the newer one "
+        "current (supersedes the older), is the newer one wrong (keep the "
+        "older), or is this not a real conflict?"
+    )
+    return f"{base} ({reason})" if reason else base
 
 
 def _pending_correction_details(db: Any, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -2110,13 +2142,52 @@ def _pending_correction_details(db: Any, *, limit: int = 20, offset: int = 0) ->
                 "queue": "ontology",
                 "action": p.action,
                 "subject_slug": p.subject_slug,
-                **{"detail": p.detail},
+                "detail": p.detail,
             },
         )
         for p in read_pending_ontology_proposals(db, limit=fetch)
     ]
+    ordered += [
+        (p.id, _conflict_detail(db, p)) for p in read_pending_conflict_proposals(db, limit=fetch)
+    ]
     window = ordered[offset : offset + limit]
     return dict(window)
+
+
+_CONFLICT_PREVIEW_CHARS = 320
+
+
+def _conflict_detail(db: Any, proposal: Any) -> dict[str, Any]:
+    """The structured conflict payload for the dashboard's 3-way controls: both
+    sides' hashes/ids/previews/created_ats, which side is newer, the flag verdict
+    and reason. Read-only — never mutates a source event or a conflict_flag row
+    (I2)."""
+
+    def _side(event_hash: str) -> dict[str, Any]:
+        ev = read_event_by_hash(db, event_hash)
+        if ev is None:
+            return {"content_hash": event_hash, "missing": True}
+        text = ev.payload.get("text") or ev.payload.get("context") or ev.payload.get("result") or ""
+        if not isinstance(text, str):
+            text = ""
+        preview = " ".join(text.split())[:_CONFLICT_PREVIEW_CHARS]
+        return {
+            "event_id": ev.id,
+            "content_hash": ev.content_hash,
+            "created_at": ev.created_at,
+            "preview": preview,
+            "missing": False,
+        }
+
+    return {
+        "queue": "conflict",
+        "pair_key": proposal.pair_key,
+        "newer_hash": proposal.newer_hash,
+        "flag_verdict": proposal.flag_verdict,
+        "reason": proposal.reason,
+        "event_a": _side(proposal.event_a_hash),
+        "event_b": _side(proposal.event_b_hash),
+    }
 
 
 # ── observe ─────────────────────────────────────────────────────────────────

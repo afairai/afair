@@ -373,6 +373,14 @@ class ConflictFlag(BaseModel):
     reason: str = ""
     confidence: float = 0.0
 
+    resolution: str | None = None
+    """The operator's resolution of this conflict pair, when they've decided it
+    through the review queue (ADR-0008): ``superseded_older`` (the newer memory
+    is current), ``superseded_newer`` (the newer was wrong, keep the older), or
+    ``no_conflict`` (not a real clash). Null while the pair is still open. A
+    resolved flag is STILL served (ADR-0004 caveat-not-suppress) but no longer
+    counts toward the unresolved-conflict caveats. Additive per I1."""
+
 
 class InvalidationSummary(BaseModel):
     """Surfacing of a fact's bi-temporal invalidation status.
@@ -529,7 +537,9 @@ class ProposedCorrectionView(BaseModel):
     kind: str
     """'retype' | 'merge' | 'merge_review' for entity proposals;
     'ontology_add' | 'ontology_rename' | 'ontology_merge' | 'ontology_split'
-    | 'ontology_deprecate' for ontology proposals."""
+    | 'ontology_deprecate' for ontology proposals; 'conflict' for an unresolved
+    conflict pair the operator can resolve (ADR-0008) — its ``prompt`` is
+    directional and the decision routes to the conflict queue on a ``cfl_`` id."""
     entity_id: str = ""
     entity_name: str = ""
     prompt: str

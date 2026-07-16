@@ -15,6 +15,12 @@ Scope (v0):
     deleted. Safe because a decided edge's durable never-re-review guard
     is the append-only ``edge_reviews`` substrate table, not the queue
     row (proposed_corrections is non-substrate, no I2 triggers).
+  - Decided conflict-resolution queue hygiene (ADR-0008): decided rows
+    in ``proposed_conflict_resolutions`` older than the retention window
+    are deleted. Safe because a decided conflict's durable anti-re-nag
+    guard is the append-only ``conflict_resolution`` interpretation, not
+    the queue row (the queue is non-substrate, no I2 triggers). OPEN
+    proposals are never touched.
   - Telemetry retention (ADR-0005): ``pipeline_events`` +
     ``observability_snapshots`` rows older than
     ``settings.telemetry_retention_days`` are deleted. Those tables are
@@ -80,6 +86,13 @@ graph every cycle and would otherwise re-file the identical closed question).
 proposed_corrections is non-substrate (no I2 triggers) so this deletion is
 I2-honest — same footing as the OAuth-row GC above."""
 
+DECIDED_CONFLICT_RETENTION_DAYS = 30
+"""Decided (status != 'proposed') proposed_conflict_resolutions rows older than
+this are deleted (ADR-0008). Safe: a decided conflict's durable never-re-nag
+guard is the append-only conflict_resolution interpretation (the resolver's
+backfill checks NOT EXISTS on it), not the queue row. OPEN proposals are never
+touched. Non-substrate (no I2 triggers) so this is I2-honest."""
+
 TELEMETRY_TABLES = ("pipeline_events", "observability_snapshots")
 """Operational-telemetry tables the Pruner ages out (ADR-0005). Both are the
 pipeline's flight recorder, never recalled; their append-only triggers were
@@ -104,6 +117,7 @@ class Pruner(ColdPathWorker):
             "oauth_login_state_deleted": 0,
             "stale_failed_extractions_deleted": 0,
             "decided_edge_reviews_deleted": 0,
+            "decided_conflicts_deleted": 0,
             "telemetry_rows_deleted": 0,
         }
         now_iso = datetime.now(UTC).isoformat()
@@ -131,6 +145,22 @@ class Pruner(ColdPathWorker):
                 (er_cutoff,),
             )
         stats["decided_edge_reviews_deleted"] = cursor.rowcount or 0
+
+        # Decided conflict-resolution queue hygiene (ADR-0008). Only decided
+        # rows, only past the retention window — never OPEN proposals. A decided
+        # conflict's durable anti-re-nag guard is the append-only
+        # conflict_resolution interpretation, not the queue row.
+        conflict_cutoff = (
+            datetime.now(UTC) - timedelta(days=DECIDED_CONFLICT_RETENTION_DAYS)
+        ).isoformat()
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM proposed_conflict_resolutions "
+                "WHERE status != 'proposed' "
+                "AND decided_at IS NOT NULL AND decided_at < ?",
+                (conflict_cutoff,),
+            )
+        stats["decided_conflicts_deleted"] = cursor.rowcount or 0
 
         # Telemetry retention (ADR-0005). Age pipeline_events +
         # observability_snapshots out past the configured window. Both are

@@ -1015,6 +1015,56 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS proposed_ontology_revisions_status_idx "
     "ON proposed_ontology_revisions(status, detected_at DESC)",
+    # ── proposed_conflict_resolutions: the operator conflict queue (ADR-0008) ─
+    # MUTABLE derived state, not substrate — the conflict_resolver enqueues one
+    # row per unresolved conflict pair, a decision flips its status, the pruner
+    # ages out DECIDED rows past retention (open rows are never touched). Same
+    # framing as proposed_corrections / proposed_ontology_revisions above and
+    # export_jobs below: no append-only triggers on purpose (deciding mutates
+    # ``status``), so it is deliberately NON-substrate (I2 protects the user's
+    # MEMORY — events, interpretations, invalidations — not a regenerable
+    # suggestion queue; see ADR-0005's memory-vs-telemetry line). The APPLIED
+    # resolution is the append-only part: an invalidation event + a
+    # conflict_resolution interpretation + an observe event (I2/I7), each of
+    # which rides the export. This queue is REGENERABLE from the unresolved
+    # conflict_flag rows, so it is EXCLUDED from the export (export_route.py).
+    #
+    # The subject of a conflict is an event PAIR, not an entity — that is why
+    # this is its OWN queue and not a proposed_corrections row (which requires an
+    # entity_id FK). ``pair_key`` is the deterministic ``min:max`` of the two
+    # content hashes so the same unordered pair maps to one key; the partial
+    # unique index on OPEN rows is the anti-re-nag guard. ``newer_hash`` records
+    # which side is chronologically newer, so a directional decision maps onto
+    # the frozen verdict enum without widening it (ADR-0008 / I1).
+    """
+    CREATE TABLE IF NOT EXISTS proposed_conflict_resolutions (
+        id            TEXT PRIMARY KEY,
+        pair_key      TEXT NOT NULL,
+        event_a_id    TEXT NOT NULL,
+        event_a_hash  TEXT NOT NULL,
+        event_b_id    TEXT NOT NULL,
+        event_b_hash  TEXT NOT NULL,
+        newer_hash    TEXT NOT NULL,
+        flag_verdict  TEXT NOT NULL,
+        reason        TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'applied', 'rejected')),
+        resolution    TEXT
+                      CHECK (resolution IS NULL OR resolution IN
+                          ('superseded_older', 'superseded_newer', 'no_conflict')),
+        decided_at    TEXT,
+        decided_by    TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS proposed_conflict_resolutions_status_idx "
+    "ON proposed_conflict_resolutions(status, detected_at DESC)",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS proposed_conflict_resolutions_open_unique
+    ON proposed_conflict_resolutions(pair_key) WHERE status = 'proposed'
+    """,
     # ── worker_watermarks: cold-path re-scan cursors (P2a, added 2026-07) ────
     # MUTABLE derived state, not substrate (Invariant I2 exception, same
     # framing as proposed_corrections above and export_jobs below). A cold-path

@@ -235,7 +235,16 @@ def _iter_export(
         #   oauth_* / api_tokens / export_jobs — host-local credential and
         #     job state: exporting token hashes into a plaintext dump would
         #     widen the credential blast radius, and they mean nothing on
-        #     the machine an export is restored to.
+        #     the machine an export is restored to;
+        #   proposed_conflict_resolutions (ADR-0008) — REGENERABLE from the
+        #     unresolved conflict_flag interpretation rows by the resolver's
+        #     backfill pass, so the queue itself carries no data of record. The
+        #     operator's DECISION is NOT lost by omitting it: unlike
+        #     proposed_corrections (below), a decided conflict writes its verdict
+        #     into the SUBSTRATE — an append-only invalidation event plus a
+        #     conflict_resolution interpretation — both of which ARE exported, so
+        #     the round-trip preserves every resolution while the suggestion
+        #     queue regenerates.
         #
         # proposed_corrections / proposed_ontology_revisions ARE included
         # even though they are mutable suggestion queues: their DECIDED rows

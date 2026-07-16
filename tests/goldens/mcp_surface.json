@@ -457,6 +457,18 @@
                         "title": "Reason",
                         "type": "string"
                       },
+                      "resolution": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Resolution"
+                      },
                       "verdict": {
                         "title": "Verdict",
                         "type": "string"
