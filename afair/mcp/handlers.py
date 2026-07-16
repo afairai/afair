@@ -2086,6 +2086,39 @@ def _pending_correction_views(
     return views[offset : offset + limit]
 
 
+def _pending_correction_details(db: Any, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+    """The structured ``detail`` blob per open proposal, keyed by proposal id.
+
+    Companion to :func:`_pending_correction_views` for the /internal/corrections
+    dashboard route: the wire view intentionally drops the raw ``detail`` (the
+    recall client only needs the ready-to-ask ``prompt``), but the dashboard's
+    decision controls need the underlying kind/target/action data. This mirrors
+    the exact fetch-window-slice of ``_pending_correction_views`` so a detail
+    lines up with its view by id, and it reuses the same read helpers — the
+    route never runs its own proposal SQL (ADR-0002 single-mutation-point; the
+    write path is ``decide_correction`` only, and even this read stays out of
+    the route)."""
+    fetch = offset + limit
+    ordered: list[tuple[str, dict[str, Any]]] = [
+        (p.id, {"queue": "entity_audit", "kind": p.kind, "detail": p.detail})
+        for p in read_pending_corrections(db, limit=fetch)
+    ]
+    ordered += [
+        (
+            p.id,
+            {
+                "queue": "ontology",
+                "action": p.action,
+                "subject_slug": p.subject_slug,
+                **{"detail": p.detail},
+            },
+        )
+        for p in read_pending_ontology_proposals(db, limit=fetch)
+    ]
+    window = ordered[offset : offset + limit]
+    return dict(window)
+
+
 # ── observe ─────────────────────────────────────────────────────────────────
 
 

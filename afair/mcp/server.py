@@ -56,6 +56,7 @@ from .auth import BearerTokenMiddleware, enforce_write_scope
 from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
+from .corrections_route import corrections_list_endpoint, decide_endpoint
 from .correlation import CorrelationIdMiddleware
 from .cors import preflight_endpoint as tokens_preflight_endpoint
 from .export_async_routes import (
@@ -446,6 +447,12 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/tokens",
         "/internal/memory-mirror",
         "/internal/import",
+        # Correction review queue + operator decide (Phase 1). Both self-auth
+        # with authorize_internal (master bearer OR sub-pinned dashboard JWT),
+        # so they're exempt from the main MCP bearer middleware just like the
+        # other /internal management routes.
+        "/internal/corrections",
+        "/internal/decide",
     }
     # Prefix-exempt: the token sub-routes (/internal/tokens/<id>) and the
     # async-export sub-routes (/internal/export/{request,status,download}),
@@ -475,6 +482,8 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/tokens",
         "/internal/memory-mirror",
         "/internal/import",
+        "/internal/corrections",
+        "/internal/decide",
     )
 
     middleware = [
@@ -609,6 +618,13 @@ def build_app(settings: Settings) -> Starlette:
         ),
         Route("/internal/import", import_endpoint, methods=["POST"]),
         Route("/internal/import", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        # Correction review queue (GET) + operator decision (POST). Phase 1:
+        # makes the Memory Mirror actionable. GET reuses the recall pending
+        # view; POST routes through decide_correction (ADR-0002).
+        Route("/internal/corrections", corrections_list_endpoint, methods=["GET"]),
+        Route("/internal/corrections", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        Route("/internal/decide", decide_endpoint, methods=["POST"]),
+        Route("/internal/decide", tokens_preflight_endpoint, methods=["OPTIONS"]),
         Route(
             "/internal/tokens",
             tokens_preflight_endpoint,
