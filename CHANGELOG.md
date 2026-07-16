@@ -10,6 +10,24 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.22](https://github.com/afairai/afair/compare/v0.1.21...v0.1.22) (2026-07-16)
+
+
+### Features
+
+* **conflicts:** operator-resolvable synthesis conflicts (Phase 2, ADR-0008) ([4743c36](https://github.com/afairai/afair/commit/4743c36d59e18c84a773b049ff64f58ce53f226e))
+* **mcp:** operator decide surface over the correction queue (Phase 1) ([de61b1c](https://github.com/afairai/afair/commit/de61b1c854b04f80024330349328e01d3b5d94cc))
+
+
+### Bug Fixes
+
+* **conflicts:** pair-scoped resolution identity + claim-first decide race ([72f2ca8](https://github.com/afairai/afair/commit/72f2ca87ed3bbed645c202687967bca13dac567f))
+
+
+### Documentation
+
+* **adr:** ADR-0008 operator conflict resolution ([f5c44b7](https://github.com/afairai/afair/commit/f5c44b7d64c46e7ba829e5eb384f3582d5d33df1))
+
 ## [0.1.21](https://github.com/afairai/afair/compare/v0.1.20...v0.1.21) (2026-07-14)
 
 
