@@ -116,7 +116,10 @@ shipped (v0.1.10 to v0.1.17, all live on the fleet):
 
 **Current focus: Personal design partners.** The living-synthesis worker,
 end-to-end memory-quality gate, read-only Memory Mirror, and direct-to-vault
-import path are ready for a 15-person, six-week cohort. Broad distribution
+import path are ready for a 15-person, six-week cohort. The Mirror is
+becoming actionable: pending corrections and conflict flags are decidable
+from the dashboard through the same `decide_correction` entry that serves
+`recall(decide=)` (operator conflict resolution: ADR-0008). Broad distribution
 waits for two consecutive green weeks on the private launch gates. Show HN
 remains hand-written because HN requires human-written text.
 
@@ -217,6 +220,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/adr/ADR-0005-telemetry-retention.md` | Classifies `pipeline_events` + `observability_snapshots` as OPERATIONAL TELEMETRY (the pipeline's flight recorder), not user memory: I2 protects the memory substrate, not regenerable instrumentation. Retires the four append-only triggers on ONLY those two tables (idempotent `DROP TRIGGER IF EXISTS`; fresh vaults never create them) and lets the Pruner age rows out past `telemetry_retention_days` (default 90). Draws the memory-vs-telemetry line explicitly and durably (VISION §4 cross-ref); a one-way relaxation reversed by re-adding the triggers | When the memory/telemetry line or the retention window changes |
 | `docs/adr/ADR-0006-event-provenance.md` | Client provenance lives in an out-of-hash sidecar, not in `origin`: `origin` is part of the event content hash, so per-client refinement would break dedup and fork the hash contract. Instead every HTTP write stamps the credential-derived client into the append-only `event_provenance` table (no backfill; absence = pre-provenance or non-HTTP write); serves `RecallHit.client` + stats `by_client`, rides export (I4), Pruner never-touch. Also draws the caller-asserted boundary: `asserted_by` is content (in-payload, in-hash, advisory, can never raise trust) | When the provenance model or its consumers change |
 | `docs/adr/ADR-0007-emergent-living-syntheses.md` | Replaces the entity-only topic axis with deterministic automatic clustering over entity recurrence, strong semantic links, and explicit lineage. The model labels and summarizes selected evidence but cannot choose a fixed category or add sources. Stable cluster identity, split/merge ancestry, citations, append-only supersession, hub suppression, and bounded cycles preserve I2/I3/I6/I7. Legacy entity articles remain readable but are no longer scheduled | When cluster discovery, lineage, synthesis, or serving behavior changes |
+| `docs/adr/ADR-0008-operator-conflict-resolution.md` | Makes conflict flags decidable: unresolved `conflict_flag`s become proposals in the non-substrate `proposed_conflict_resolutions` queue (enqueued by the resolver + a bounded backfill over historical flags), decided ONLY through `decide_correction` via `cfl_` prefix dispatch (the ADR-0003 `ont_` precedent), reachable from both `recall(decide=)` and the dashboard decide route. Three operator intents (keep newer / not a conflict / keep older) map onto the frozen confirm/reject/retract enum via directional framing, no wire change; resolution is append-only (resolution interpretation + `invalidate` event + observe; sources and flags never mutated, I2); resolved flags are served WITH their resolution (ADR-0004 posture) but excluded from unresolved counts | When the conflict-resolution loop or its serving changes |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3: the open-source core license (see VISION §12) | Only on a license change |
