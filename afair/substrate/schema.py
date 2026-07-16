@@ -65,28 +65,28 @@ SCHEMA_DDL: tuple[str, ...] = (
     # Multiple versions may coexist. The substrate row is invariant; this
     # table is regenerable. Populated by the Extractor agent in task #4.
     #
-    # Append-only in practice, but WITHOUT no_update/no_delete triggers — a
-    # deliberate carve-out, not an oversight. write_interpretation only ever
-    # INSERTs (a re-interpretation is a NEW version/producer row, never an
-    # UPDATE), so nothing rewrites a row in place. There is exactly ONE DELETE
-    # path in the whole codebase — the Pruner's stale-failed-extraction GC
-    # (agents/pruner.py) — and it is tightly scoped to
-    # ``produced_by LIKE 'extractor:%' AND status='failed'`` rows that already
-    # have a SUCCESS sibling: it deletes regenerable failure diagnostics, never
-    # a memory-of-record row. A blanket append-only trigger would break that GC
-    # (verified: the full suite fails with one added), so it is intentionally
-    # absent.
+    # Append-only, enforced by triggers with a SINGLE scoped exception. The
+    # write path (write_interpretation) only ever INSERTs — a re-interpretation
+    # is a NEW version/producer row, never an in-place UPDATE — so there are
+    # ZERO legitimate UPDATEs (``interpretations_no_update`` is unconditional).
+    # There is exactly ONE legitimate DELETE path in the whole codebase: the
+    # Pruner's stale-failed-extraction GC (agents/pruner.py), tightly scoped to
+    # ``produced_by LIKE 'extractor:%'`` rows with ``status='failed'`` that
+    # already have a SUCCESS sibling — it drops regenerable failure diagnostics,
+    # never a memory-of-record row. ``interpretations_no_delete`` therefore
+    # blocks every DELETE EXCEPT those on ``extractor:%`` producers, which is the
+    # exact (and only) shape the Pruner GC emits.
     #
-    # ADR-0008 caveat: the operator's conflict-resolution decision now lives here
-    # as a ``conflict_resolution:v1:<pair_key>`` interpretation — a NON-
-    # regenerable decision-of-record, unlike the extractor views this table was
-    # built for. It is safe: the Pruner's DELETE filter (``extractor:%`` +
-    # ``failed``) can never match a ``conflict_resolution:v1:`` row, and no code
-    # path UPDATEs interpretations, so the decision is durable. The precise
-    # append-only claim for THIS table is "insert-only, with a single scoped
-    # failure-GC delete"; CLAUDE.md's I2 summary lists interpretations under the
-    # protected memory — that summary is reconciled separately (the operator owns
-    # that doc).
+    # ADR-0008: the operator's conflict-resolution decision lives here as a
+    # ``conflict_resolution:v1:<pair_key>`` interpretation — a NON-regenerable
+    # decision-of-record, unlike the extractor views this table was built for.
+    # The ``no_delete`` trigger's ``NOT LIKE 'extractor:%'`` guard now PHYSICALLY
+    # protects it: a stray DELETE of a ``conflict_resolution:v1:`` row aborts,
+    # and no code path UPDATEs interpretations at all. The Fable adversarial
+    # review flagged that this decision-of-record was un-triggered while framed
+    # as a "regenerable I3 view"; the triggers below close that gap. Existing
+    # fleet vaults gain the triggers idempotently on next open
+    # (CREATE TRIGGER IF NOT EXISTS).
     """
     CREATE TABLE IF NOT EXISTS interpretations (
         id              TEXT PRIMARY KEY,
@@ -100,6 +100,26 @@ SCHEMA_DDL: tuple[str, ...] = (
     ) STRICT
     """,
     "CREATE INDEX IF NOT EXISTS interpretations_event_idx ON interpretations(event_id)",
+    # ── interpretations append-only enforcement (I2), one scoped exception ──
+    # No UPDATE is ever legitimate (write_interpretation is insert-only).
+    """
+    CREATE TRIGGER IF NOT EXISTS interpretations_no_update
+    BEFORE UPDATE ON interpretations
+    BEGIN
+        SELECT RAISE(ABORT, 'interpretations is append-only (I2)');
+    END
+    """,
+    # DELETE is allowed ONLY for the Pruner's extractor stale-failed GC
+    # (produced_by LIKE 'extractor:%'); everything else — including the
+    # ADR-0008 conflict_resolution:v1: decision-of-record — is blocked.
+    """
+    CREATE TRIGGER IF NOT EXISTS interpretations_no_delete
+    BEFORE DELETE ON interpretations
+    WHEN OLD.produced_by NOT LIKE 'extractor:%'
+    BEGIN
+        SELECT RAISE(ABORT, 'interpretations is append-only (I2); only the extractor failure-GC may delete');
+    END
+    """,
     # ── OAuth state (Phase 1) — pluggable identity + JWT issuance ──────────
     # These tables are MUTABLE (codes are short-lived, tokens get revoked).
     # The events-table append-only triggers do NOT apply here. They live in

@@ -548,3 +548,190 @@ def test_concurrent_confirm_and_retract_yields_exactly_one_resolution(
     finally:
         conn_a.close()
         conn_b.close()
+
+
+# ── Fix 1: interpretations append-only triggers (Fable review) ───────────────
+
+
+def _decide_and_get_resolution_producer(db: sqlite3.Connection) -> str:
+    """Confirm a fresh conflict pair and return the producer of the written
+    ``conflict_resolution:v1:<pair_key>`` decision-of-record interpretation."""
+    a = _pair(db)
+    _a_id, a_hash, _b_id, b_hash = a
+    pid = _enqueue(db, a)
+    out = decide_correction(db, proposal_id=pid, verdict="confirm")
+    assert out.status == "applied"
+    return _res_producer(a_hash, b_hash)
+
+
+def test_deleting_conflict_resolution_interpretation_is_blocked(
+    db: sqlite3.Connection,
+) -> None:
+    """The operator's conflict_resolution:v1: decision-of-record is a
+    NON-regenerable memory row; the interpretations_no_delete trigger aborts any
+    attempt to delete it (I2). Only the extractor failure-GC may delete."""
+    import sqlite3 as sqlite
+
+    producer = _decide_and_get_resolution_producer(db)
+    with pytest.raises(sqlite.IntegrityError, match="append-only"):
+        db.execute("DELETE FROM interpretations WHERE produced_by = ?", (producer,))
+    # The decision survives the aborted delete.
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM interpretations WHERE produced_by = ?", (producer,)
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_updating_conflict_resolution_interpretation_is_blocked(
+    db: sqlite3.Connection,
+) -> None:
+    """No code path UPDATEs interpretations; the interpretations_no_update trigger
+    is unconditional and aborts any attempt (I2)."""
+    import sqlite3 as sqlite
+
+    producer = _decide_and_get_resolution_producer(db)
+    with pytest.raises(sqlite.IntegrityError, match="append-only"):
+        db.execute(
+            "UPDATE interpretations SET extraction = ? WHERE produced_by = ?",
+            (json.dumps({"tampered": True}), producer),
+        )
+
+
+def test_extractor_interpretation_delete_is_still_allowed(
+    db: sqlite3.Connection,
+) -> None:
+    """The single scoped exception: an ``extractor:%`` row IS deletable, so the
+    Pruner's stale-failed-extraction GC keeps working (the ``WHEN OLD.produced_by
+    NOT LIKE 'extractor:%'`` guard lets it through)."""
+    ev = write_event(db, origin="u", kind="remember", payload={"content_type": "text", "text": "x"})
+    from ulid import ULID
+
+    with db:
+        db.execute(
+            "INSERT INTO interpretations (id, event_id, event_hash, version, produced_at, "
+            "produced_by, extraction) VALUES (?, ?, ?, 1, ?, 'extractor:m', ?)",
+            (
+                str(ULID()),
+                ev.id,
+                ev.content_hash,
+                "2020-01-01T00:00:00+00:00",
+                json.dumps({"status": "failed"}),
+            ),
+        )
+    # Not blocked by the trigger — the extractor GC shape is the one allowed delete.
+    with db:
+        cur = db.execute(
+            "DELETE FROM interpretations WHERE produced_by = 'extractor:m' AND event_hash = ?",
+            (ev.content_hash,),
+        )
+    assert (cur.rowcount or 0) == 1
+
+
+# ── Fix 2: orphaned-proposal self-heal (Fable review) ────────────────────────
+
+
+def test_orphaned_applied_proposal_is_re_enqueueable(db: sqlite3.Connection) -> None:
+    """A crash between the claim-commit (queue row → 'applied') and the substrate
+    resolution write leaves an ``applied`` queue row with NO resolution
+    interpretation. The old ANY-status anti-re-nag permanently blocked the pair;
+    the new SUBSTRATE-anchored guard lets it self-heal — the next enqueue (and the
+    backfill) re-surfaces it."""
+    a = _pair(db)
+    a_id, a_hash, b_id, b_hash = a
+    key = pair_key_for(a_hash, b_hash)
+
+    # Simulate the orphan: an 'applied' queue row, but NO conflict_resolution:v1:
+    # interpretation was ever written (the crash window).
+    from ulid import ULID
+
+    with db:
+        db.execute(
+            """
+            INSERT INTO proposed_conflict_resolutions (
+                id, pair_key, event_a_id, event_a_hash, event_b_id, event_b_hash,
+                newer_hash, flag_verdict, reason, confidence, detected_by,
+                detected_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'conflicts', 'r', 0.9,
+                      'conflict_resolver:v0', '2026-01-01T00:00:00+00:00', 'applied')
+            """,
+            (f"cfl_{ULID()}", key, a_id, a_hash, b_id, b_hash, b_hash),
+        )
+    # No resolution interpretation exists for the pair — it's a genuine orphan.
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM interpretations WHERE produced_by = ?",
+            (_res_producer(a_hash, b_hash),),
+        ).fetchone()[0]
+        == 0
+    )
+
+    # A live enqueue re-surfaces the pair (returns a fresh proposal id, not None).
+    new_pid = enqueue_conflict_proposal(
+        db,
+        event_a_id=a_id,
+        event_a_hash=a_hash,
+        event_b_id=b_id,
+        event_b_hash=b_hash,
+        newer_hash=b_hash,
+        flag_verdict="conflicts",
+        reason="r",
+        confidence=0.9,
+        detected_by="conflict_resolver:v0",
+    )
+    assert new_pid is not None
+    assert count_pending_conflict_proposals(db) == 1
+
+
+def test_orphaned_applied_proposal_resurfaces_via_backfill(db: sqlite3.Connection) -> None:
+    """Same orphan, reached through the backfill path: a flag exists, the queue
+    row is orphaned 'applied' with no resolution — backfill re-enqueues it."""
+    a = _pair(db)
+    a_id, a_hash, b_id, b_hash = a
+    _write_flag_verdict(db, a, "conflicts")
+    key = pair_key_for(a_hash, b_hash)
+    from ulid import ULID
+
+    with db:
+        db.execute(
+            """
+            INSERT INTO proposed_conflict_resolutions (
+                id, pair_key, event_a_id, event_a_hash, event_b_id, event_b_hash,
+                newer_hash, flag_verdict, reason, confidence, detected_by,
+                detected_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'conflicts', 'r', 0.9,
+                      'conflict_resolver:v0', '2026-01-01T00:00:00+00:00', 'applied')
+            """,
+            (f"cfl_{ULID()}", key, a_id, a_hash, b_id, b_hash, b_hash),
+        )
+    made = _backfill_conflict_proposals(db, max_pairs=50)
+    assert made == 1
+    assert count_pending_conflict_proposals(db) == 1
+
+
+def test_genuinely_decided_pair_is_not_re_enqueued(db: sqlite3.Connection) -> None:
+    """The guard still blocks a REAL decision: a pair with a resolution
+    interpretation (the operator genuinely decided it) is NOT re-enqueued, even
+    though its queue row is 'applied'. Self-heal is scoped to the orphan case."""
+    a = _pair(db)
+    a_id, a_hash, b_id, b_hash = a
+    pid = _enqueue(db, a)
+    decide_correction(db, proposal_id=pid, verdict="confirm")  # writes the resolution
+    assert count_pending_conflict_proposals(db) == 0
+
+    # A second enqueue for the decided pair stays blocked (resolution present).
+    again = enqueue_conflict_proposal(
+        db,
+        event_a_id=a_id,
+        event_a_hash=a_hash,
+        event_b_id=b_id,
+        event_b_hash=b_hash,
+        newer_hash=b_hash,
+        flag_verdict="conflicts",
+        reason="r",
+        confidence=0.9,
+        detected_by="conflict_resolver:v0",
+    )
+    assert again is None
+    assert count_pending_conflict_proposals(db) == 0

@@ -109,6 +109,43 @@ class ConflictResolutionOutcome(BaseModel):
     note: str
 
 
+def pair_is_settled(conn: sqlite3.Connection, pair_key: str) -> bool:
+    """True when the pair identified by ``pair_key`` must NOT be re-enqueued.
+
+    A pair is settled when EITHER:
+
+    - an OPEN proposal (``status='proposed'``) already exists for it — the
+      operator hasn't decided yet, so a second nag would be a duplicate; OR
+    - a resolution interpretation (``conflict_resolution:v1:<pair_key>``) exists —
+      the operator genuinely decided it, and that decision-of-record is the
+      durable proof (it survives even if the queue row is pruned).
+
+    Deliberately NOT gated on a merely-``applied``/``rejected`` QUEUE row. The
+    decide path claims the queue row (status → applied/rejected) FIRST, then
+    writes the substrate resolution in a following statement (correct claim-first
+    ordering for a destructive op). A crash BETWEEN the claim-commit and the
+    resolution write leaves an ``applied``/``rejected`` queue row with NO
+    resolution interpretation — a genuine orphan. The old ANY-status guard treated
+    that orphan as "decided" and permanently blocked re-enqueue, so the pair could
+    never be re-surfaced or re-decided (Fable adversarial-review finding). Anchoring
+    the "already decided" test on the SUBSTRATE resolution (not the queue row's
+    status) lets an orphaned pair self-heal: the next enqueue/backfill re-surfaces
+    it, while a genuinely-decided pair (resolution present) stays blocked.
+    """
+    open_row = conn.execute(
+        "SELECT 1 FROM proposed_conflict_resolutions "
+        "WHERE pair_key = ? AND status = 'proposed' LIMIT 1",
+        (pair_key,),
+    ).fetchone()
+    if open_row is not None:
+        return True
+    resolved = conn.execute(
+        "SELECT 1 FROM interpretations WHERE produced_by = ? LIMIT 1",
+        (f"{CONFLICT_RESOLUTION_PRODUCED_BY_PREFIX}:{pair_key}",),
+    ).fetchone()
+    return resolved is not None
+
+
 def enqueue_conflict_proposal(
     conn: sqlite3.Connection,
     *,
@@ -124,17 +161,15 @@ def enqueue_conflict_proposal(
 ) -> str | None:
     """Enqueue one open conflict proposal, anti-re-nagged on ``pair_key``.
 
-    Returns the new proposal id, or None when a proposal for this pair already
-    exists in ANY status (an operator who already decided this pair — or a still-
-    open proposal — is never re-nagged). Append-only from the queue's point of
-    view: it only ever INSERTs a fresh 'proposed' row.
+    Returns the new proposal id, or None when the pair is already settled
+    (:func:`pair_is_settled` — an open proposal OR a substrate resolution exists).
+    A pair whose queue row was claimed (status ``applied``/``rejected``) but whose
+    resolution write never landed (a crash between the two) is NOT settled, so it
+    self-heals: this enqueue re-surfaces it. Append-only from the queue's point of
+    view — it only ever INSERTs a fresh 'proposed' row.
     """
     key = pair_key_for(event_a_hash, event_b_hash)
-    existing = conn.execute(
-        "SELECT 1 FROM proposed_conflict_resolutions WHERE pair_key = ? LIMIT 1",
-        (key,),
-    ).fetchone()
-    if existing is not None:
+    if pair_is_settled(conn, key):
         return None
 
     proposal_id = f"{CONFLICT_PROPOSAL_ID_PREFIX}{ULID()}"
