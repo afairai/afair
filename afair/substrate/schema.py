@@ -64,6 +64,29 @@ SCHEMA_DDL: tuple[str, ...] = (
     # ── interpretations: materialized views over substrate (Invariant I3) ──
     # Multiple versions may coexist. The substrate row is invariant; this
     # table is regenerable. Populated by the Extractor agent in task #4.
+    #
+    # Append-only in practice, but WITHOUT no_update/no_delete triggers — a
+    # deliberate carve-out, not an oversight. write_interpretation only ever
+    # INSERTs (a re-interpretation is a NEW version/producer row, never an
+    # UPDATE), so nothing rewrites a row in place. There is exactly ONE DELETE
+    # path in the whole codebase — the Pruner's stale-failed-extraction GC
+    # (agents/pruner.py) — and it is tightly scoped to
+    # ``produced_by LIKE 'extractor:%' AND status='failed'`` rows that already
+    # have a SUCCESS sibling: it deletes regenerable failure diagnostics, never
+    # a memory-of-record row. A blanket append-only trigger would break that GC
+    # (verified: the full suite fails with one added), so it is intentionally
+    # absent.
+    #
+    # ADR-0008 caveat: the operator's conflict-resolution decision now lives here
+    # as a ``conflict_resolution:v1:<pair_key>`` interpretation — a NON-
+    # regenerable decision-of-record, unlike the extractor views this table was
+    # built for. It is safe: the Pruner's DELETE filter (``extractor:%`` +
+    # ``failed``) can never match a ``conflict_resolution:v1:`` row, and no code
+    # path UPDATEs interpretations, so the decision is durable. The precise
+    # append-only claim for THIS table is "insert-only, with a single scoped
+    # failure-GC delete"; CLAUDE.md's I2 summary lists interpretations under the
+    # protected memory — that summary is reconciled separately (the operator owns
+    # that doc).
     """
     CREATE TABLE IF NOT EXISTS interpretations (
         id              TEXT PRIMARY KEY,

@@ -49,9 +49,15 @@ with the ``ont_`` ontology-queue prefix (ADR-0003 Phase 5 / ADR-0008)."""
 
 CONFLICT_RESOLUTION_PRODUCED_BY_PREFIX = "conflict_resolution:v1"
 """Producer namespace for the append-only resolution interpretation. The full
-producer encodes the pair — ``conflict_resolution:v1:<event_b_hash>`` — so two
-resolutions on the same anchor coexist under the UNIQUE(event_hash, version,
-produced_by) constraint, the same trick the resolver uses for conflict_flag."""
+producer encodes the PAIR — ``conflict_resolution:v1:<pair_key>`` where
+``pair_key = min:max`` of the two content hashes (order-independent) — so a
+resolution's identity spans the pair, not just the anchor event. This matters
+because the SAME event can be event B in multiple pairs (the resolver's
+anchor x linked-candidates loop): keying only on ``event_b_hash`` would collide
+under the UNIQUE(event_hash, version, produced_by) constraint, so deciding one
+pair would silently swallow another pair's decision and bleed its resolution
+across. Encoding the pair key mirrors what the conflict_flag identity already
+achieves (anchor on A, producer encodes B → the flag spans the pair)."""
 
 CONFLICT_RESOLUTION_VERSION = 1
 CONFLICT_RESOLUTION_KIND = "conflict_resolution"
@@ -226,9 +232,15 @@ def decide_conflict_proposal(
     a conflict pair. Idempotent: a second decision on a decided row reports
     ``already_decided``. If the losing side is ALREADY invalidated, the duplicate
     invalidation is skipped (the resolution interpretation is still written, with
-    ``invalidation_event_id`` null and a note). Write order: the append-only
-    substrate records FIRST, the queue status LAST — a half-commit leaves the
-    substrate MORE-resolved or equal, never the queue ahead of the truth.
+    ``invalidation_event_id`` null and a note).
+
+    Concurrency: the decision CLAIMS the queue row first with an atomic
+    ``UPDATE ... WHERE status='proposed'`` (``_claim``). Exactly one of two
+    concurrent decides (a dashboard double-POST + a simultaneous
+    ``recall(decide=)``) wins the claim; the loser writes NO substrate and
+    returns ``already_decided`` — so a confirm-vs-retract race can never
+    invalidate BOTH sides. The append-only records are written only after the
+    claim wins.
     """
     if verdict not in ("confirm", "reject", "retract"):
         msg = (
@@ -261,36 +273,43 @@ def decide_conflict_proposal(
     older_hash = a_hash if newer_hash == b_hash else b_hash
 
     if verdict == "reject":
-        note = _apply_resolution(
-            conn,
-            row=row,
-            proposal_id=proposal_id,
-            resolution=RESOLUTION_NO_CONFLICT,
-            invalidate_target=None,
-            decided_by=decided_by,
+        new_status, resolution, invalidate_target = "rejected", RESOLUTION_NO_CONFLICT, None
+    elif verdict == "confirm":  # newer is current → invalidate older
+        new_status, resolution, invalidate_target = (
+            "applied",
+            RESOLUTION_SUPERSEDED_OLDER,
+            older_hash,
         )
-        _set_status(
-            conn, proposal_id, "rejected", resolution=RESOLUTION_NO_CONFLICT, decided_by=decided_by
+    else:  # retract → newer is wrong → invalidate newer
+        new_status, resolution, invalidate_target = (
+            "applied",
+            RESOLUTION_SUPERSEDED_NEWER,
+            newer_hash,
         )
-        return ConflictResolutionOutcome(proposal_id=proposal_id, status="rejected", note=note)
 
-    # confirm → invalidate older; retract → invalidate newer.
-    if verdict == "confirm":
-        target = older_hash
-        resolution = RESOLUTION_SUPERSEDED_OLDER
-    else:  # retract
-        target = newer_hash
-        resolution = RESOLUTION_SUPERSEDED_NEWER
+    # CLAIM FIRST (race guard): atomically flip status proposed → <target> with a
+    # WHERE status='proposed' predicate, so exactly one of two concurrent decides
+    # (a dashboard double-POST + a simultaneous recall(decide=)) wins. A claim
+    # that updates 0 rows means another decide already won — return
+    # already_decided and write NO substrate (no double invalidation). Only AFTER
+    # winning the claim do we append the invalidation/resolution/observe records.
+    if not _claim(conn, proposal_id, new_status, resolution=resolution, decided_by=decided_by):
+        return ConflictResolutionOutcome(
+            proposal_id=proposal_id,
+            status="already_decided",
+            note="proposal already decided by a concurrent decision",
+        )
 
     note = _apply_resolution(
         conn,
         row=row,
         proposal_id=proposal_id,
         resolution=resolution,
-        invalidate_target=target,
+        invalidate_target=invalidate_target,
         decided_by=decided_by,
     )
-    _set_status(conn, proposal_id, "applied", resolution=resolution, decided_by=decided_by)
+    if verdict == "reject":
+        return ConflictResolutionOutcome(proposal_id=proposal_id, status="rejected", note=note)
     return ConflictResolutionOutcome(proposal_id=proposal_id, status="applied", note=note)
 
 
@@ -303,12 +322,14 @@ def _apply_resolution(
     invalidate_target: str | None,
     decided_by: str,
 ) -> str:
-    """Write the append-only records for one resolution, substrate FIRST.
+    """Write the append-only records for one resolution, AFTER the queue claim.
 
-    Order: (1) invalidation event (skipped when the loser is already invalidated
-    or on a no-conflict), (2) the conflict_resolution interpretation on event B,
-    (3) an observe event marking the operator action (I7). Returns a note.
-    """
+    Called only once the caller has won the atomic ``_claim`` (so a lost
+    concurrent decide never reaches here). Order: (1) invalidation event (skipped
+    when the loser is already invalidated or on a no-conflict), (2) the
+    conflict_resolution interpretation (producer encodes the pair_key, so pairs
+    sharing an event don't collide), (3) an observe event marking the operator
+    action (I7). Returns a note."""
     # Function-level imports keep the substrate → agents edge lazy (mirrors the
     # ontology dispatch in corrections.py).
     from ..agents.interpretation import write_interpretation
@@ -335,18 +356,22 @@ def _apply_resolution(
             )
             invalidation_event_id = inv.id
 
-    # The resolution interpretation is anchored on event B (the resolver's
-    # convention: the flag was filed under event_a with a producer encoding B).
+    # The resolution interpretation is anchored on event B, but its PRODUCER
+    # encodes the pair key (min:max of both hashes) so its identity spans the
+    # pair — two pairs sharing event B get two distinct rows instead of
+    # colliding on the UNIQUE(event_hash, version, produced_by) constraint.
     event_b = read_event_by_hash(conn, row["event_b_hash"])
     if event_b is None:
         # Extremely defensive — the pair was enqueued from live events. If B
         # vanished we still recorded any invalidation above; report it honestly.
         return f"resolution {resolution}: event B missing, interpretation skipped{skipped_note}"
 
+    key = pair_key_for(row["event_a_hash"], row["event_b_hash"])
     extraction: dict[str, Any] = {
         "content_type": CONFLICT_RESOLUTION_KIND,
         "status": "success",
         "resolution": resolution,
+        "pair_key": key,
         "event_a_hash": row["event_a_hash"],
         "event_a_id": row["event_a_id"],
         "event_b_hash": row["event_b_hash"],
@@ -356,7 +381,7 @@ def _apply_resolution(
         "decided_by": decided_by,
         "decided_at": now,
     }
-    producer = f"{CONFLICT_RESOLUTION_PRODUCED_BY_PREFIX}:{row['event_b_hash']}"
+    producer = f"{CONFLICT_RESOLUTION_PRODUCED_BY_PREFIX}:{key}"
     write_interpretation(
         conn,
         event=event_b,
@@ -384,20 +409,28 @@ def _apply_resolution(
     return f"resolution {resolution}{skipped_note}"
 
 
-def _set_status(
+def _claim(
     conn: sqlite3.Connection,
     proposal_id: str,
     status: str,
     *,
     resolution: str,
     decided_by: str,
-) -> None:
-    """Flip a proposal's status + stamp the resolution/who/when. The ONLY
-    mutation of this non-substrate queue (deciding). Substrate records are
-    written first, so a half-commit never leaves the queue ahead of the truth."""
+) -> bool:
+    """Atomically claim an OPEN proposal for this decision — the ONLY mutation of
+    this non-substrate queue.
+
+    Guarded by ``WHERE status='proposed'`` so exactly one of two concurrent
+    decides wins (the row is the lock). Returns True when this call claimed the
+    row (rowcount == 1), False when it was already decided (rowcount == 0). The
+    caller writes the append-only substrate records only after a True — so a
+    lost race writes nothing, and a won claim precedes the invalidation/
+    resolution so a same-transaction reader never sees the row still open."""
     with conn:
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE proposed_conflict_resolutions "
-            "SET status = ?, resolution = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+            "SET status = ?, resolution = ?, decided_at = ?, decided_by = ? "
+            "WHERE id = ? AND status = 'proposed'",
             (status, resolution, _now_iso(), decided_by, proposal_id),
         )
+    return (cursor.rowcount or 0) == 1

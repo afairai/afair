@@ -177,66 +177,67 @@ def _attach_resolutions(
 ) -> None:
     """Set each flag's ``resolution`` to the operator's decision or None.
 
-    A resolution interpretation (``conflict_resolution:v1:<event_b_hash>``) is
-    filed once per pair, anchored on event B. A flag surfaces on EITHER side of
-    the pair, so we resolve by the pair identity — the flag's own hash plus its
-    ``with_content_hash`` (the other side). One batched query over every pair-
-    hash present; absent → None."""
-    pair_hashes: set[str] = set()
+    A resolution interpretation is filed once per PAIR (producer encodes
+    ``pair_key = min:max`` of the two hashes), so it must be matched to a flag by
+    the pair the flag belongs to — the flag's own anchor hash PLUS its
+    ``with_content_hash`` (the other side) — not by either hash alone. Matching
+    by a single side would bleed a resolved pair's decision onto a DIFFERENT,
+    undecided pair that happens to share one event. One batched query keyed by
+    pair_key; absent → None."""
+    from ..substrate.conflict_resolutions import pair_key_for
+
+    pair_keys: set[str] = set()
     for anchor, flags in flags_by_hash.items():
         for flag in flags:
-            pair_hashes.add(anchor)
             other = str(flag.get("with_content_hash", ""))
             if other:
-                pair_hashes.add(other)
-    resolutions = read_conflict_resolutions_batch(conn, sorted(pair_hashes))
+                pair_keys.add(pair_key_for(anchor, other))
+    resolutions = read_conflict_resolutions_batch(conn, sorted(pair_keys))
     for anchor, flags in flags_by_hash.items():
         for flag in flags:
             other = str(flag.get("with_content_hash", ""))
-            # The resolution is keyed on event B (the pair's newer-anchor by the
-            # producer convention). It is reachable under either side's hash in
-            # the batch map, so look up by anchor first, then the other side.
-            flag["resolution"] = resolutions.get(anchor) or resolutions.get(other)
+            key = pair_key_for(anchor, other) if other else None
+            flag["resolution"] = resolutions.get(key) if key is not None else None
 
 
 def read_conflict_resolutions_batch(
-    conn: sqlite3.Connection, event_hashes: list[str]
+    conn: sqlite3.Connection, pair_keys: list[str]
 ) -> dict[str, str]:
-    """Map event_hash → the operator's resolution string for any pair whose
-    ``conflict_resolution:v1`` interpretation is anchored on that hash.
+    """Map ``pair_key`` → the operator's resolution string for that pair.
 
-    The resolution is stored once per pair (anchored on event B); this returns it
-    keyed by BOTH the anchor hash (event B) and event A, so a flag surfaced on
-    either side finds it. Latest-wins on produced_at. Empty input short-circuits.
-    """
-    if not event_hashes:
+    A resolution interpretation is filed once per pair under producer
+    ``conflict_resolution:v1:<pair_key>``; this returns each asked pair's
+    resolution keyed by its pair_key. Latest-wins on produced_at. Empty input
+    short-circuits. Keying on the PAIR (not a single event hash) is what keeps a
+    resolved pair from bleeding onto a different pair that shares one event."""
+    if not pair_keys:
         return {}
-    placeholders = ",".join("?" * len(event_hashes))
-    producers = [f"conflict_resolution:v1:{h}" for h in event_hashes]
+    producers = [f"conflict_resolution:v1:{k}" for k in pair_keys]
     p_placeholders = ",".join("?" * len(producers))
     rows = conn.execute(
         f"""
-        SELECT event_hash, produced_by, extraction FROM interpretations
-        WHERE (event_hash IN ({placeholders}) OR produced_by IN ({p_placeholders}))
-          AND produced_by LIKE 'conflict_resolution:v1:%'
+        SELECT produced_by, extraction FROM interpretations
+        WHERE produced_by IN ({p_placeholders})
         ORDER BY produced_at DESC
         """,
-        [*event_hashes, *producers],
+        producers,
     ).fetchall()
-    asked = set(event_hashes)
+    prefix = "conflict_resolution:v1:"
     out: dict[str, str] = {}
     for row in rows:
+        producer = row["produced_by"]
+        if not producer.startswith(prefix):
+            continue
+        key = producer[len(prefix) :]
+        if key in out:
+            continue  # latest-wins (rows ordered produced_at DESC)
         try:
             data = json.loads(row["extraction"])
         except (TypeError, ValueError):
             continue
         resolution = data.get("resolution")
-        if not isinstance(resolution, str):
-            continue
-        # Key it under both sides of the pair that are in the asked set.
-        for side in (str(data.get("event_a_hash", "")), str(data.get("event_b_hash", ""))):
-            if side in asked and side not in out:
-                out[side] = resolution
+        if isinstance(resolution, str):
+            out[key] = resolution
     return out
 
 
@@ -643,10 +644,10 @@ def _backfill_conflict_proposals(conn: sqlite3.Connection, *, max_pairs: int) ->
         if not a_hash or not b_hash:
             continue
         # Skip a pair that already carries an operator resolution (decided even
-        # if its queue row was pruned) — the resolution is anchored on event B.
-        if _has_resolution(conn, b_hash):
+        # if its queue row was pruned). Scoped to THIS pair (pair_key), so a
+        # decided (A1,B) never suppresses re-surfacing an undecided (A2,B).
+        if _has_resolution(conn, pair_key_for(a_hash, b_hash)):
             continue
-        _ = pair_key_for(a_hash, b_hash)  # queue enforces the anti-re-nag itself
         event_a = read_event_by_hash(conn, a_hash)
         event_b = read_event_by_hash(conn, b_hash)
         if event_a is None or event_b is None:
@@ -665,15 +666,13 @@ def _backfill_conflict_proposals(conn: sqlite3.Connection, *, max_pairs: int) ->
     return enqueued
 
 
-def _has_resolution(conn: sqlite3.Connection, event_b_hash: str) -> bool:
+def _has_resolution(conn: sqlite3.Connection, pair_key: str) -> bool:
     """True when an operator resolution interpretation already exists for the
-    pair anchored on ``event_b_hash`` (produced_by conflict_resolution:v1:<B>)."""
+    pair identified by ``pair_key`` (producer ``conflict_resolution:v1:<pair_key>``).
+    Pair-scoped: a decided pair sharing one event with an undecided pair does NOT
+    match the undecided one."""
     row = conn.execute(
-        """
-        SELECT 1 FROM interpretations
-        WHERE event_hash = ? AND produced_by = ?
-        LIMIT 1
-        """,
-        (event_b_hash, f"conflict_resolution:v1:{event_b_hash}"),
+        "SELECT 1 FROM interpretations WHERE produced_by = ? LIMIT 1",
+        (f"conflict_resolution:v1:{pair_key}",),
     ).fetchone()
     return row is not None
