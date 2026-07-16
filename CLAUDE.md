@@ -263,7 +263,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 (Full text in VISION.md §4, these are summaries for lookup, not authoritative.)
 
 - **I1**: MCP tools are versioned and additive. Shipped signatures never break.
-- **I2**: Substrate is append-only, content-addressed. Protects the user's *memory* (events, interpretations, entities, edges, temporal/belief metadata), NOT purely operational tables (`proposed_corrections`, `export_jobs`, `worker_watermarks`, and the telemetry flight recorder `pipeline_events` / `observability_snapshots`), which are non-substrate, carry no I2 triggers, and are prunable or mutable (ADR-0005).
+- **I2**: Substrate is append-only, content-addressed. Protects the user's *memory* (events, interpretations, entities, edges, temporal/belief metadata). `interpretations` is trigger-enforced: no updates ever, and no deletes except rows produced by `extractor:%` (the Pruner's GC of regenerable stale-failed extractions), so an ADR-0008 `conflict_resolution:v1:` decision-of-record can never be deleted. NOT protected: purely operational tables (`proposed_corrections`, `proposed_conflict_resolutions`, `export_jobs`, `worker_watermarks`, and the telemetry flight recorder `pipeline_events` / `observability_snapshots`), which are non-substrate, carry no I2 triggers, and are prunable or mutable (ADR-0005).
 - **I3**: Old data must remain readable, queryable, re-interpretable. Migrations are forbidden; new views over unchanged substrate are required.
 - **I4**: User owns the substrate. Self-hosting is first-class.
 - **I5**: No code path privileges one AI provider. litellm wrapper, env-driven model selection.
