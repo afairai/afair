@@ -10,6 +10,18 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.23](https://github.com/afairai/afair/compare/v0.1.22...v0.1.23) (2026-07-16)
+
+
+### Bug Fixes
+
+* **conflicts:** protect the resolution record + self-heal orphaned proposals ([95942a2](https://github.com/afairai/afair/commit/95942a2d37af4a69d9f30a20a3b22142ac942fdc))
+
+
+### Documentation
+
+* reconcile I2 wording with the interpretations append-only triggers ([384de23](https://github.com/afairai/afair/commit/384de23e0269b9f6a23cea4f58fcd9a9c8448a20))
+
 ## [0.1.22](https://github.com/afairai/afair/compare/v0.1.21...v0.1.22) (2026-07-16)
 
 
