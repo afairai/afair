@@ -56,6 +56,7 @@ from .auth import BearerTokenMiddleware, enforce_write_scope
 from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
+from .correct_route import correct_endpoint
 from .corrections_route import corrections_list_endpoint, decide_endpoint
 from .correlation import CorrelationIdMiddleware
 from .cors import preflight_endpoint as tokens_preflight_endpoint
@@ -453,6 +454,11 @@ def build_app(settings: Settings) -> Starlette:
         # other /internal management routes.
         "/internal/corrections",
         "/internal/decide",
+        # Operator-initiated content correction (ADR-0009). Self-auths with
+        # authorize_internal (master bearer OR sub-pinned dashboard JWT), so
+        # it's exempt from the main MCP bearer middleware like the other
+        # /internal management routes.
+        "/internal/correct",
     }
     # Prefix-exempt: the token sub-routes (/internal/tokens/<id>) and the
     # async-export sub-routes (/internal/export/{request,status,download}),
@@ -484,6 +490,7 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/import",
         "/internal/corrections",
         "/internal/decide",
+        "/internal/correct",
     )
 
     middleware = [
@@ -625,6 +632,12 @@ def build_app(settings: Settings) -> Starlette:
         Route("/internal/corrections", tokens_preflight_endpoint, methods=["OPTIONS"]),
         Route("/internal/decide", decide_endpoint, methods=["POST"]),
         Route("/internal/decide", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        # Operator-initiated content correction (ADR-0009): supersede a source
+        # or synthesis (kind:"event"), or suppress/restore a key point
+        # (kind:"key_point"). Composes append-only substrate primitives; zero
+        # SQL in the route; never routes through decide_correction.
+        Route("/internal/correct", correct_endpoint, methods=["POST"]),
+        Route("/internal/correct", tokens_preflight_endpoint, methods=["OPTIONS"]),
         Route(
             "/internal/tokens",
             tokens_preflight_endpoint,
