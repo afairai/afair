@@ -46,13 +46,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+from ulid import ULID
 
 from ..agents.extractor import schedule_extraction
-from ..agents.interpretation import Interpretation, write_interpretation
+from ..agents.interpretation import Interpretation
 from ..agents.invalidation import INVALIDATE_KIND, read_invalidation, write_invalidation
 from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
 from . import pipeline_events as pe
 from .events import read_event_by_hash, write_event, write_event_with_status
+from .payload import canonical_json
 
 if TYPE_CHECKING:
     import sqlite3
@@ -135,7 +137,6 @@ def point_digest(text: str) -> str:
 
 def correct_event(
     conn: sqlite3.Connection,
-    vault_dir: Any,  # accepted for signature parity; the write path is DB-only
     *,
     target_hash: str,
     correction_text: str | None,
@@ -148,10 +149,18 @@ def correct_event(
     order:
 
       1. IF ``correction_text``: write a NEW ``remember`` event stating what is
-         actually true, parent-linked to the target so a future re-synthesis
-         sees the correction in-cluster. On a true insert, record the pipeline
+         actually true, ``parent_hashes=[target]`` so the supersession is
+         explicit in the lineage view. On a true insert, record the pipeline
          event + schedule extraction (``suppress(RuntimeError)`` for isolated
          route tests without a ServerContext, exactly like ``import_route``).
+         NOTE on re-clustering: the correction reaches the re-derived cluster via
+         entity/semantic recall signals after extraction — NOT via synthesis
+         lineage. ``living_syntheses._lineage_candidates`` needs the parent to be
+         in ``_eligible_events``, but the parent (the target) was just
+         invalidated and is therefore excluded, and the sibling bridge needs ≥2
+         children. So a substantive correction re-clusters through the
+         entity/semantic path; a terse one may not surface until the operator
+         also corrects the source content directly.
       2. Write a NEW ``invalidate`` event marking the target no longer current
          — UNLESS the target is already invalidated (idempotent no-op).
       3. IF the target is a living synthesis: delete its ``events_fts`` row so
@@ -190,6 +199,11 @@ def correct_event(
             "corrects": target_hash,
             "corrected_by": corrected_by,
         }
+        # parent_hashes=[target] records the supersession explicitly in the
+        # lineage view. It does NOT by itself pull the correction into the
+        # re-derived cluster (the target is invalidated → excluded from
+        # _eligible_events → _lineage_candidates can't bridge on it); the
+        # correction re-clusters via entity/semantic signals after extraction.
         event, was_inserted = write_event_with_status(
             conn,
             origin="user",
@@ -307,9 +321,31 @@ def review_key_point(
     digest = point_digest(point_text)
     producer = f"{KEY_POINT_REVIEW_PRODUCED_BY_PREFIX}:{digest}"
 
-    latest = _read_latest_review(conn, synthesis_hash, producer)
-    if latest is not None and latest.extraction.get("verdict") == verdict:
-        # Already in the requested state — idempotent no-op, no new row.
+    # Serialize the whole read-latest → compute-next-version → insert against
+    # any concurrent decide on this same lane. ``BEGIN IMMEDIATE`` takes the
+    # write lock BEFORE the read, so two concurrent suppress-vs-restore
+    # POSTs (plausible with the optimistic Undo double-click) cannot both read
+    # the same ``latest`` and compute the same ``version`` — the loser waits on
+    # the lock (busy_timeout), then re-reads and computes a fresh version. We do
+    # a direct INSERT here rather than ``write_interpretation`` so a prior
+    # success row in THIS namespace does not trigger its idempotent no-op (which
+    # would return a stale row and let us report a verdict that never landed).
+    interp = _append_review_row(
+        conn,
+        synthesis=synthesis,
+        producer=producer,
+        digest=digest,
+        point_text=point_text,
+        verdict=verdict,
+        cluster_id=cluster_id,
+        note=note,
+        decided_by=decided_by,
+    )
+    if interp is None:
+        # No row written: the latest persisted verdict already equals the
+        # requested one (idempotent no-op). Re-read to report the true state.
+        latest = _read_latest_review(conn, synthesis_hash, producer)
+        assert latest is not None  # a no-op only happens when a row already exists
         status = f"already_{'suppressed' if verdict == VERDICT_SUPPRESS else 'restored'}"
         return KeyPointReviewResult(
             ok=True,
@@ -321,28 +357,36 @@ def review_key_point(
             version=latest.version,
         )
 
-    next_version = (latest.version + 1) if latest is not None else 1
-    now = _now_iso()
-    extraction: dict[str, Any] = {
-        "content_type": KEY_POINT_REVIEW_KIND,
-        "status": "success",
-        "point_digest": digest,
-        "point_text": point_text,
-        "verdict": verdict,
-        "cluster_id": cluster_id,
-        "note": note,
-        "decided_by": decided_by,
-        "decided_at": now,
-    }
-    interp = write_interpretation(
-        conn,
-        event=synthesis,
-        version=next_version,
-        produced_by=producer,
-        extraction=extraction,
-    )
+    # Verify-persisted: confirm the row we just wrote is the CURRENT latest and
+    # actually carries the requested verdict before recording the audit event.
+    # A same-lane writer that committed between our BEGIN and INSERT is
+    # impossible (we hold the write lock through the commit), but this guards
+    # the invariant explicitly so a future refactor can't silently regress into
+    # a false observe event. Only emit the observe (I7) for a decision that
+    # genuinely landed as current.
+    persisted = _read_latest_review(conn, synthesis_hash, producer)
+    if persisted is None or persisted.extraction.get("verdict") != verdict:
+        # Defensive: our write is not the current latest. Report the true
+        # current state and write NO observe event (never audit a verdict that
+        # is not the served truth).
+        true_verdict = persisted.extraction.get("verdict") if persisted is not None else None
+        status = (
+            f"already_{'suppressed' if true_verdict == VERDICT_SUPPRESS else 'restored'}"
+            if true_verdict in (VERDICT_SUPPRESS, VERDICT_RESTORE)
+            else "superseded"
+        )
+        return KeyPointReviewResult(
+            ok=True,
+            synthesis_hash=synthesis_hash,
+            point_digest=digest,
+            verdict=true_verdict if isinstance(true_verdict, str) else verdict,
+            status=status,
+            interpretation_id=persisted.id if persisted is not None else interp.id,
+            version=persisted.version if persisted is not None else interp.version,
+        )
 
     # observe (I7) — the operator action is recorded + auditable + reversible.
+    # Written only after verify-persisted confirms this verdict is current.
     write_event(
         conn,
         origin="user",
@@ -369,49 +413,176 @@ def review_key_point(
     )
 
 
-def read_key_point_reviews(
-    conn: sqlite3.Connection, synthesis_hashes: list[str]
-) -> dict[str, dict[str, dict[str, Any]]]:
-    """Latest key-point verdict per (synthesis_hash, point_digest).
+def _append_review_row(
+    conn: sqlite3.Connection,
+    *,
+    synthesis: Any,
+    producer: str,
+    digest: str,
+    point_text: str,
+    verdict: str,
+    cluster_id: str | None,
+    note: str | None,
+    decided_by: str,
+) -> Interpretation | None:
+    """Atomically append one key-point-review row (latest-wins by ``version``).
 
-    Read-path helper for the Memory Mirror: one query for many syntheses,
-    returning ``{synthesis_hash: {point_digest: {verdict, note, decided_at,
-    cluster_id}}}`` keeping only the newest row per
-    ``(event_hash, produced_by)`` (highest ``version``, newest
-    ``produced_at``). The mirror uses this to annotate served key points
-    (projection-only — the synthesis payload is never rewritten, I2).
+    Wraps read-latest → next-version → INSERT in a single ``BEGIN IMMEDIATE``
+    transaction so concurrent decides on the same lane can't interleave version
+    computation (the loser blocks on the write lock, then this function is
+    re-entered by the caller's serialized flow with the committed row visible).
+    Returns the new :class:`Interpretation`, or ``None`` when the latest row
+    already carries the requested verdict (idempotent no-op — no row written).
     """
-    if not synthesis_hashes:
+    now = _now_iso()
+    extraction: dict[str, Any] = {
+        "content_type": KEY_POINT_REVIEW_KIND,
+        "status": "success",
+        "point_digest": digest,
+        "point_text": point_text,
+        "verdict": verdict,
+        "cluster_id": cluster_id,
+        "note": note,
+        "decided_by": decided_by,
+        "decided_at": now,
+    }
+    interp_id = str(ULID())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        latest = _read_latest_review(conn, synthesis.content_hash, producer)
+        if latest is not None and latest.extraction.get("verdict") == verdict:
+            conn.execute("ROLLBACK")
+            return None
+        next_version = (latest.version + 1) if latest is not None else 1
+        conn.execute(
+            """
+            INSERT INTO interpretations (
+                id, event_id, event_hash, version, produced_at,
+                produced_by, extraction
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                interp_id,
+                synthesis.id,
+                synthesis.content_hash,
+                next_version,
+                now,
+                producer,
+                canonical_json(extraction),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return Interpretation(
+        id=interp_id,
+        event_id=synthesis.id,
+        event_hash=synthesis.content_hash,
+        version=next_version,
+        produced_at=now,
+        produced_by=producer,
+        extraction=extraction,
+    )
+
+
+def read_key_point_reviews(
+    conn: sqlite3.Connection,
+    synthesis_clusters: dict[str, str | None],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Resolve the effective key-point verdict per (served synthesis, point_digest).
+
+    Read-path helper for the Memory Mirror. ``synthesis_clusters`` maps each
+    served synthesis ``content_hash`` to its ``cluster_id`` (or ``None``). The
+    result is ``{synthesis_hash: {point_digest: {verdict, note, decided_at,
+    cluster_id, matched_by}}}``.
+
+    TWO lanes, because a re-derived synthesis is a NEW event with a NEW
+    ``content_hash`` (``living_syntheses``: re-synthesis writes a fresh event and
+    supersedes the prior), so a review keyed to the OLD synthesis hash would be
+    lost the moment its synthesis re-forms:
+
+      - **exact lane** — a review whose ``event_hash`` equals the served
+        synthesis. A per-synthesis decision.
+      - **cluster-fallback lane** — a review whose recorded ``cluster_id`` equals
+        the served synthesis's cluster. Carries a suppression FORWARD to any
+        later synthesis of the SAME cluster whose (verbatim) key point matches
+        the digest. A reworded point produces a different digest and does NOT
+        match (documented b3 limitation).
+
+    Precedence: the exact lane wins over the cluster-fallback lane, so a decision
+    made specifically on the re-derived synthesis overrides a carried-forward
+    one. Latest-wins WITHIN each lane (highest ``version``, newest
+    ``produced_at``). Projection-only — the synthesis payload is never rewritten
+    (I2).
+    """
+    if not synthesis_clusters:
         return {}
-    placeholders = ",".join("?" * len(synthesis_hashes))
+
+    hashes = list(synthesis_clusters.keys())
+    clusters = sorted({c for c in synthesis_clusters.values() if isinstance(c, str)})
+
+    # One query for both lanes: rows keyed to a served synthesis hash OR carrying
+    # a served cluster_id. Newest-first per lane so the first row seen per
+    # (event_hash|cluster_id, point_digest) is the latest verdict.
+    hash_ph = ",".join("?" * len(hashes))
+    params: list[Any] = [KEY_POINT_REVIEW_PRODUCED_BY_PREFIX, *hashes]
+    cluster_clause = ""
+    if clusters:
+        cluster_ph = ",".join("?" * len(clusters))
+        cluster_clause = f" OR json_extract(extraction, '$.cluster_id') IN ({cluster_ph})"
+        params.extend(clusters)
     rows = conn.execute(
         f"""
-        SELECT event_hash, produced_by, version, produced_at, extraction
+        SELECT event_hash, produced_by, version, produced_at, extraction,
+               json_extract(extraction, '$.cluster_id') AS cluster_id
         FROM interpretations
-        WHERE event_hash IN ({placeholders})
-          AND produced_by LIKE ? || ':%'
-        ORDER BY event_hash, produced_by, version DESC, produced_at DESC
+        WHERE produced_by LIKE ? || ':%'
+          AND (event_hash IN ({hash_ph}){cluster_clause})
+        ORDER BY produced_by, version DESC, produced_at DESC
         """,
-        (*synthesis_hashes, KEY_POINT_REVIEW_PRODUCED_BY_PREFIX),
+        params,
     ).fetchall()
 
-    out: dict[str, dict[str, dict[str, Any]]] = {}
-    seen: set[tuple[str, str]] = set()
+    # Collapse to the latest verdict per exact (event_hash, produced_by) lane and
+    # per (cluster_id, produced_by) lane separately.
+    exact: dict[tuple[str, str], dict[str, Any]] = {}
+    by_cluster: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (row["event_hash"], row["produced_by"])
-        if key in seen:
-            continue  # already kept the newest (version DESC) for this lane
-        seen.add(key)
         extraction = json.loads(row["extraction"])
         digest = extraction.get("point_digest")
         if not isinstance(digest, str):
             continue
-        out.setdefault(row["event_hash"], {})[digest] = {
+        entry = {
             "verdict": extraction.get("verdict"),
             "note": extraction.get("note"),
             "decided_at": extraction.get("decided_at"),
             "cluster_id": extraction.get("cluster_id"),
         }
+        exact_key = (row["event_hash"], digest)
+        if exact_key not in exact:
+            exact[exact_key] = entry  # newest-first ORDER BY → first wins
+        cluster_id = row["cluster_id"]
+        if isinstance(cluster_id, str):
+            cluster_key = (cluster_id, digest)
+            if cluster_key not in by_cluster:
+                by_cluster[cluster_key] = entry
+
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for synthesis_hash, cluster_id in synthesis_clusters.items():
+        resolved: dict[str, dict[str, Any]] = {}
+        # Cluster-fallback first, exact overrides — so an exact per-synthesis
+        # decision wins over a carried-forward one for the same digest.
+        if isinstance(cluster_id, str):
+            for (c_id, digest), entry in by_cluster.items():
+                if c_id == cluster_id:
+                    resolved[digest] = {**entry, "matched_by": "cluster"}
+        for (e_hash, digest), entry in exact.items():
+            if e_hash == synthesis_hash:
+                resolved[digest] = {**entry, "matched_by": "exact"}
+        if resolved:
+            out[synthesis_hash] = resolved
     return out
 
 

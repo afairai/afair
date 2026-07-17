@@ -164,7 +164,6 @@ async def _handle_event(request: Request, body: dict[str, Any]) -> Response:
         try:
             result = correct_event(
                 conn,
-                request.app.state.settings.vault_dir,
                 target_hash=normalized,
                 correction_text=correction_text,
                 reason=reason,

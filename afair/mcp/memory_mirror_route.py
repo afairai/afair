@@ -106,12 +106,24 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         ),
     ).fetchall()
 
-    # Batch-read the latest key-point suppression verdict per served synthesis
-    # (Flavor B-b2). Projection-only: the synthesis payload is NEVER rewritten
+    # Batch-read the effective key-point suppression verdict per served
+    # synthesis (Flavor B-b2), resolved across both the exact-hash lane and the
+    # cluster-fallback lane so a suppression carries forward to a re-derived
+    # synthesis of the same cluster (a re-synthesis is a NEW event with a NEW
+    # content_hash). Projection-only: the synthesis payload is NEVER rewritten
     # (I2); we annotate served key points with suppressed:true + a caveat so a
     # marked-wrong point is served WITH a marker, not dropped (ADR-0004).
-    synthesis_hashes = [row["content_hash"] for row in rows if row["kind"] == LIVING_SYNTHESIS_KIND]
-    reviews_by_synthesis = read_key_point_reviews(conn, synthesis_hashes)
+    synthesis_clusters: dict[str, str | None] = {}
+    for row in rows:
+        if row["kind"] != LIVING_SYNTHESIS_KIND:
+            continue
+        try:
+            row_payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            row_payload = {}
+        cluster = row_payload.get("cluster_id")
+        synthesis_clusters[row["content_hash"]] = cluster if isinstance(cluster, str) else None
+    reviews_by_synthesis = read_key_point_reviews(conn, synthesis_clusters)
 
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -197,11 +209,15 @@ def _annotate_key_points(
     """Annotate served key points with the operator's suppression verdict.
 
     Projection-only (I2): the synthesis payload is untouched; each served point
-    gains ``suppressed`` + (when suppressed) a ``suppression`` block. Matched by
-    ``point_digest`` of the served text — so a verbatim key point that re-forms
-    on a future re-synthesis of the same cluster carries the verdict forward
-    (a reworded point misses; documented b3 limitation). A ``restore`` verdict
-    is served as ``suppressed: false`` (the latest-wins row already reflects it).
+    gains ``suppressed`` + (when suppressed) a ``suppression`` block. ``reviews``
+    is the already-resolved ``{point_digest: {verdict, note, decided_at, ...}}``
+    for THIS synthesis from :func:`read_key_point_reviews`, which has already
+    applied the exact-over-cluster precedence and the cluster-fallback carry
+    across re-synthesis. Matched by ``point_digest`` of the served text, so a
+    verbatim key point that re-forms on a re-synthesis of the same cluster
+    carries the verdict forward (a reworded point produces a different digest and
+    misses — documented b3 limitation). A ``restore`` verdict is served as
+    ``suppressed: false`` (the latest-wins row already reflects it).
     """
     annotated: list[dict[str, Any]] = []
     for item in key_points:

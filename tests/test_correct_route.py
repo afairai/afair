@@ -610,3 +610,230 @@ def test_key_point_typed_validation_errors(vault_dir: Path) -> None:
         ).json()["error"]
         == "point_required"
     )
+
+
+# ── Flavor B-b2: carry-forward across re-synthesis (cluster fallback) ────────
+def _seed_second_synthesis(vault_dir: Path, *, cluster_id: str, point_text: str) -> str:
+    """A NEW synthesis event (new content_hash) of the given cluster carrying the
+    given key point verbatim — simulating the cold path re-deriving the cluster."""
+    conn = open_db(vault_dir)
+    try:
+        source = write_event(
+            conn,
+            origin="agent",
+            kind="remember",
+            payload={"content_type": "text", "text": "A later source about the same cluster."},
+        )
+        synthesis = write_event(
+            conn,
+            origin="agent",
+            kind=LIVING_SYNTHESIS_KIND,
+            payload={
+                "content_type": "text",
+                "text": "Re-derived synthesis of the same cluster.",
+                "title": "Project Atlas (re-derived)",
+                "cluster_id": cluster_id,
+                "citations": [source.content_hash],
+                "member_hashes": [source.content_hash],
+                "key_points": [
+                    {"point": point_text, "mode": "fact", "citations": [source.content_hash]}
+                ],
+                "previous_synthesis_hashes": [],
+            },
+            parent_hashes=[source.content_hash],
+        )
+        return synthesis.content_hash
+    finally:
+        conn.close()
+
+
+def test_suppression_carries_forward_to_re_derived_synthesis(vault_dir: Path) -> None:
+    """A suppression on S1(cluster C) still marks the verbatim point on a later
+    re-derived S2(cluster C) with a NEW content_hash (the cluster-fallback lane).
+    A reworded point on S2 is NOT suppressed (documented digest limitation)."""
+    from afair.mcp.memory_mirror_route import _read_syntheses
+    from afair.substrate.content_corrections import review_key_point
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)  # cluster:atlas
+    # Suppress the key point on S1.
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note="Wrong claim.",
+        )
+    finally:
+        conn.close()
+
+    # A later re-derived synthesis of the SAME cluster carrying the verbatim
+    # point (new content_hash) — this is what the cold path produces.
+    s2_verbatim = _seed_second_synthesis(vault_dir, cluster_id="cluster:atlas", point_text=kp)
+    # And a DIFFERENT cluster's synthesis with the verbatim point — must NOT match.
+    s_other = _seed_second_synthesis(vault_dir, cluster_id="cluster:other", point_text=kp)
+    # And a reworded point on the same cluster — must NOT match (digest differs).
+    s_reworded = _seed_second_synthesis(
+        vault_dir, cluster_id="cluster:atlas", point_text="A working prototype now exists"
+    )
+
+    conn = open_db(vault_dir)
+    try:
+        served = {item["content_hash"]: item for item in _read_syntheses(conn, limit=50)}
+    finally:
+        conn.close()
+
+    def _point(h: str) -> dict:
+        return served[h]["key_points"][0]
+
+    # S1 (exact) suppressed; S2 verbatim same-cluster carried forward.
+    assert _point(s1_hash)["suppressed"] is True
+    assert _point(s2_verbatim)["suppressed"] is True
+    assert _point(s2_verbatim)["suppression"]["note"] == "Wrong claim."
+    # Different cluster: not suppressed.
+    assert _point(s_other)["suppressed"] is False
+    # Reworded point on the same cluster: digest differs → not suppressed.
+    assert _point(s_reworded)["suppressed"] is False
+
+
+def test_exact_review_overrides_cluster_fallback(vault_dir: Path) -> None:
+    """A per-synthesis decision on the re-derived S2 overrides the carried-forward
+    cluster suppression (exact lane wins)."""
+    from afair.mcp.memory_mirror_route import _read_syntheses
+    from afair.substrate.content_corrections import review_key_point
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)
+    s2_hash = _seed_second_synthesis(vault_dir, cluster_id="cluster:atlas", point_text=kp)
+
+    conn = open_db(vault_dir)
+    try:
+        # Suppress on S1 → carries forward to S2 via cluster fallback.
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        # But an explicit restore ON S2 must override the cluster fallback.
+        review_key_point(
+            conn,
+            synthesis_hash=s2_hash,
+            point_text=kp,
+            verdict="restore",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+    finally:
+        conn.close()
+
+    conn = open_db(vault_dir)
+    try:
+        served = {item["content_hash"]: item for item in _read_syntheses(conn, limit=50)}
+    finally:
+        conn.close()
+    # S1 still suppressed; S2 restored (exact decision overrides cluster carry).
+    assert served[s1_hash]["key_points"][0]["suppressed"] is True
+    assert served[s2_hash]["key_points"][0]["suppressed"] is False
+
+
+# ── Flavor B-b2: concurrent suppress-vs-restore serialization ────────────────
+def test_concurrent_suppress_restore_no_lost_decision_no_500(vault_dir: Path) -> None:
+    """Two concurrent decides on the same key point (separate connections):
+    exactly one verdict is the served latest, the returned status + the observe
+    event match what actually persisted, and neither path 500s."""
+    import threading
+
+    from afair.substrate.content_corrections import review_key_point
+
+    synthesis_hash, _source, kp = _seed_synthesis(vault_dir)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def _decide(name: str, verdict: str) -> None:
+        conn = open_db(vault_dir)
+        try:
+            barrier.wait(timeout=5)
+            results[name] = review_key_point(
+                conn,
+                synthesis_hash=synthesis_hash,
+                point_text=kp,
+                verdict=verdict,
+                cluster_id="cluster:atlas",
+                note=None,
+            )
+        except BaseException as exc:  # record any 500-shaped failure
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=_decide, args=("A", "suppress"))
+    t2 = threading.Thread(target=_decide, args=("B", "restore"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert not errors, f"a concurrent decide raised (would be a 500): {errors!r}"
+    assert len(results) == 2
+
+    # The served latest is exactly ONE verdict; the observe events never claim a
+    # verdict that isn't the persisted truth.
+    conn = open_db(vault_dir)
+    try:
+        rows = conn.execute(
+            "SELECT version, json_extract(extraction, '$.verdict') AS verdict "
+            "FROM interpretations WHERE event_hash = ? "
+            "AND produced_by LIKE 'key_point_review:v1:%' ORDER BY version DESC",
+            (synthesis_hash,),
+        ).fetchall()
+        assert rows, "at least one review row must have persisted"
+        served_verdict = rows[0]["verdict"]
+        assert served_verdict in ("suppress", "restore")
+
+        # Every observe event's result must correspond to a review row that
+        # actually landed — never an audit for a decision that didn't persist.
+        observes = conn.execute(
+            "SELECT json_extract(payload, '$.result') AS result FROM events "
+            "WHERE kind = 'observe' "
+            "AND json_extract(payload, '$.action') = 'suppress_key_point'"
+        ).fetchall()
+        persisted_verdicts = {r["verdict"] for r in rows}
+        for obs in observes:
+            assert obs["result"] in persisted_verdicts
+    finally:
+        conn.close()
+
+
+# ── Flavor A: honest re-clustering mechanism (fix-3) ─────────────────────────
+def test_correction_event_is_eligible_but_invalidated_target_is_not(vault_dir: Path) -> None:
+    """The honest re-clustering claim: after correct_event, the NEW correction
+    remember event is eligible for clustering (so it re-clusters via
+    entity/semantic signals after extraction), while the invalidated target is
+    excluded from _eligible_events — so synthesis LINEAGE cannot carry the
+    correction through the target (the comment's claim, made verifiable)."""
+    from afair.agents.living_syntheses import _eligible_events
+    from afair.substrate.content_corrections import correct_event
+
+    target = _seed_source(vault_dir, "Atlas launched in March.")
+    conn = open_db(vault_dir)
+    try:
+        result = correct_event(
+            conn,
+            target_hash=target,
+            correction_text="Atlas actually launched in April.",
+            reason=None,
+        )
+        eligible = _eligible_events(conn)
+    finally:
+        conn.close()
+
+    # The invalidated target is NOT eligible (lineage can't bridge on it).
+    assert target not in eligible
+    # The correction event IS eligible — it participates in clustering like any
+    # other remember event (entity/semantic path after extraction).
+    assert result.correction_content_hash in eligible
