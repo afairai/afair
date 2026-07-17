@@ -19,6 +19,7 @@ from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.invalidation import INVALIDATE_KIND, read_invalidations_batch
 from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
 from ..substrate import open_db, read_event_by_hash
+from ..substrate.content_corrections import point_digest, read_key_point_reviews
 from .cors import cors_headers
 from .internal_auth import authorize_internal
 
@@ -105,6 +106,13 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         ),
     ).fetchall()
 
+    # Batch-read the latest key-point suppression verdict per served synthesis
+    # (Flavor B-b2). Projection-only: the synthesis payload is NEVER rewritten
+    # (I2); we annotate served key points with suppressed:true + a caveat so a
+    # marked-wrong point is served WITH a marker, not dropped (ADR-0004).
+    synthesis_hashes = [row["content_hash"] for row in rows if row["kind"] == LIVING_SYNTHESIS_KIND]
+    reviews_by_synthesis = read_key_point_reviews(conn, synthesis_hashes)
+
     out: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -151,6 +159,10 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         key_points = payload.get("key_points", [])
         if not isinstance(key_points, list):
             key_points = []
+        if living:
+            key_points = _annotate_key_points(
+                key_points, reviews_by_synthesis.get(row["content_hash"], {})
+            )
         out.append(
             {
                 "event_id": row["id"],
@@ -177,6 +189,37 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _annotate_key_points(
+    key_points: list[Any], reviews: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Annotate served key points with the operator's suppression verdict.
+
+    Projection-only (I2): the synthesis payload is untouched; each served point
+    gains ``suppressed`` + (when suppressed) a ``suppression`` block. Matched by
+    ``point_digest`` of the served text — so a verbatim key point that re-forms
+    on a future re-synthesis of the same cluster carries the verdict forward
+    (a reworded point misses; documented b3 limitation). A ``restore`` verdict
+    is served as ``suppressed: false`` (the latest-wins row already reflects it).
+    """
+    annotated: list[dict[str, Any]] = []
+    for item in key_points:
+        if not isinstance(item, dict):
+            annotated.append(item)
+            continue
+        point = item.get("point")
+        enriched = dict(item)
+        review = reviews.get(point_digest(point)) if isinstance(point, str) else None
+        suppressed = review is not None and review.get("verdict") == "suppress"
+        enriched["suppressed"] = suppressed
+        if suppressed and review is not None:
+            enriched["suppression"] = {
+                "note": review.get("note"),
+                "decided_at": review.get("decided_at"),
+            }
+        annotated.append(enriched)
+    return annotated
 
 
 def _source_preview(payload: dict[str, Any]) -> str:
