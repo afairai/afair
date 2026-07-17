@@ -10,6 +10,24 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.24](https://github.com/afairai/afair/compare/v0.1.23...v0.1.24) (2026-07-17)
+
+
+### Features
+
+* **correct:** operator-initiated content correction backend (ADR-0009) ([b94646f](https://github.com/afairai/afair/commit/b94646f023bd65b38ecdc39aee895d802208f0e2))
+* **mirror:** annotate suppressed key points in the Memory Mirror (ADR-0009) ([bbb2a52](https://github.com/afairai/afair/commit/bbb2a5287497f5ba372ed1d7c1d38f7f3d6b8111))
+
+
+### Bug Fixes
+
+* **correct:** carry key-point suppressions across re-synthesis + serialize the decide ([94221b2](https://github.com/afairai/afair/commit/94221b23aaa70c759cb095fce810658c672942b0))
+
+
+### Documentation
+
+* **adr:** ADR-0009 operator content correction ([597ae22](https://github.com/afairai/afair/commit/597ae22e06deb80077edbbfcb94b18ebc02a50a0))
+
 ## [0.1.23](https://github.com/afairai/afair/compare/v0.1.22...v0.1.23) (2026-07-16)
 
 
