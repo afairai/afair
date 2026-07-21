@@ -166,6 +166,23 @@ def count_pending_corrections(conn: sqlite3.Connection) -> int:
     return int(row[0])
 
 
+def count_pending_corrections_by_kind(conn: sqlite3.Connection) -> dict[str, int]:
+    """Open (``status='proposed'``) entity-audit proposal counts GROUPED BY kind.
+
+    Powers the value-ranked nudge (Fix 3): edge_review counts can be split from
+    the higher-value retype/merge/merge_review counts so a client can rank what
+    it surfaces. Cheap — a single GROUP BY over the status index. Returns a dict
+    keyed by ``kind`` (``'retype' | 'merge' | 'merge_review' | 'edge_review'``);
+    absent kinds mean zero. ``sum()`` of the values equals
+    :func:`count_pending_corrections`.
+    """
+    rows = conn.execute(
+        "SELECT kind, COUNT(*) AS n FROM proposed_corrections "
+        "WHERE status = 'proposed' GROUP BY kind"
+    ).fetchall()
+    return {r["kind"]: int(r["n"]) for r in rows}
+
+
 def _apply_correction(
     conn: sqlite3.Connection,
     *,

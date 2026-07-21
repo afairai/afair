@@ -97,8 +97,9 @@ life, work or personal (a decision, a preference, a person, a date that matters,
 a plan), call `afair.remember(...)`.
 When you take an action (edit a file, run a query, fetch a URL) call
 `afair.observe(...)`. Don't ask whether to remember or recall; just do it.
-When a recall result shows `pending_corrections_count` > 0, tell me once per
-session that I have memories to review, then offer `recall(stats=True)`.
+Recall results carry `pending_counts`. Mention pending items at most once per
+session, and only when `pending_counts.conflicts > 0` or I ask. Never quote the
+raw total as a to-do list; low-confidence relation reviews expire on their own.
 """
 
 

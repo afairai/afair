@@ -79,6 +79,22 @@ _PENDING_CORRECTIONS_LIMIT = 5
 _UPCOMING_LIMIT = 8
 _UPCOMING_WINDOW_DAYS = 30.0
 
+# ── the value-ranked, rate-limited pending nudge (Fix 3) ─────────────────────
+# The old resource nagged whenever ANYTHING was pending, counting low-value
+# edge_reviews into the sentence. Now the nudge sentence is value-ranked and
+# rate-limited: conflicts (a memory conflict needs the operator's call) always
+# earn a mention; retype/merge/ontology earn one only when the high-value queue
+# has grown by NUDGE_MIN_NEW since it was last shown AND at least NUDGE_COOLDOWN_
+# DAYS have passed. edge_reviews are NEVER in the nudge sentence — they expire on
+# their own (Fix 2). Showing the nudge records the marker = the acknowledgment.
+_PENDING_NUDGE_MARKER = "pending_nudge"
+NUDGE_MIN_NEW = 3
+"""High-value pending items must have grown by at least this many since the last
+shown nudge before a non-conflict nudge fires again."""
+NUDGE_COOLDOWN_DAYS = 7.0
+"""And at least this many days must have passed since the last shown nudge (a
+conflict bypasses BOTH gates)."""
+
 
 class _Cache:
     """Tiny TTL+key cache for the session-start payload."""
@@ -112,15 +128,22 @@ _cache = _Cache()
 def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     """Compose the session-start payload from substrate state.
 
-    Pure function — no I/O outside the SQLite read. Cached by the
-    public ``read_session_start`` wrapper; this helper is exposed so
-    tests can compute the payload directly without the cache layer.
+    One SQLite read, plus ONE mutable, non-substrate write when the value-ranked
+    nudge is shown (it upserts the ``pending_nudge`` rate-limit marker in
+    ``worker_watermarks`` — the acknowledgment, so the nudge self-quiets). Cached
+    by the public ``read_session_start`` wrapper; this helper is exposed so tests
+    can compute the payload directly without the cache layer. The marker write is
+    idempotent per (queue-state, cooldown), so a re-compute on cache miss is safe.
     """
     # Imported lazily to avoid the agents → mcp circular at import time.
     from ..agents.mode_switcher import read_current_mode
     from ..agents.salience import SALIENCE_PRODUCED_BY
     from ..substrate import (
+        count_pending_conflict_proposals,
+        count_pending_corrections_by_kind,
+        count_pending_ontology_proposals,
         live_kind_slugs,
+        read_pending_conflict_proposals,
         read_pending_corrections,
         read_pending_ontology_proposals,
     )
@@ -130,12 +153,34 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     open_threads = _read_open_threads(conn, limit=_OPEN_THREADS_LIMIT)
     vault_size = _read_vault_size(conn)
     cumulative_salience = sum(item["salience"] for item in salient)
-    pending = [
-        {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
-        for p in read_pending_corrections(conn, limit=_PENDING_CORRECTIONS_LIMIT)
+
+    # Conflicts FIRST — the highest-value class (a memory conflict needs the
+    # operator's call). Itemized so the AI can raise the top ones, not just a
+    # count. Each gets the same directional prompt the decide surface serves.
+    conflict_pending = [
+        {
+            "id": p.id,
+            "kind": "conflict",
+            "prompt": _conflict_prompt(p.reason),
+            "confidence": p.confidence,
+        }
+        for p in read_pending_conflict_proposals(conn, limit=_PENDING_CORRECTIONS_LIMIT)
     ]
-    # Ontology proposals (ADR-0003 Phase 5) join the same pending list —
-    # same surface, same decide loop, no new mechanism (I1).
+    # entity-audit corrections split by value: edge_reviews (low-value,
+    # self-expiring) are separated from retype/merge/merge_review so they never
+    # ride the nudge sentence. All still travel in the structured payload.
+    audit_all = read_pending_corrections(conn, limit=_PENDING_CORRECTIONS_LIMIT * 2)
+    high_value_audit = [
+        {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
+        for p in audit_all
+        if p.kind != "edge_review"
+    ][:_PENDING_CORRECTIONS_LIMIT]
+    edge_review_pending = [
+        {"id": p.id, "kind": p.kind, "prompt": p.prompt, "confidence": p.confidence}
+        for p in audit_all
+        if p.kind == "edge_review"
+    ][:_PENDING_CORRECTIONS_LIMIT]
+    # Ontology proposals (ADR-0003 Phase 5): same surface, same decide loop.
     ontology_pending = [
         {
             "id": p.id,
@@ -145,8 +190,29 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         }
         for p in read_pending_ontology_proposals(conn, limit=_PENDING_CORRECTIONS_LIMIT)
     ]
-    pending += ontology_pending
+    # Conflicts first, then the high-value corrections + ontology, then the
+    # low-value edge_reviews — ranked order in the structured payload.
+    pending = conflict_pending + high_value_audit + ontology_pending + edge_review_pending
     upcoming = _read_upcoming(conn)
+
+    # Rate-limit + auto-acknowledge the nudge SENTENCE (Fix 3). The high-value
+    # total EXCLUDES edge_reviews and uses the TRUE queue counts (not the capped
+    # itemized lists above, which cap at _PENDING_CORRECTIONS_LIMIT), so the growth
+    # gate keeps working past the display cap. A conflict always nudges; otherwise
+    # the queue must have grown by NUDGE_MIN_NEW since the last nudge AND
+    # NUDGE_COOLDOWN_DAYS must have passed. Showing it records the marker = the ack.
+    conflicts_pending_total = count_pending_conflict_proposals(conn)
+    _by_kind = count_pending_corrections_by_kind(conn)
+    high_value_audit_total = (
+        _by_kind.get("retype", 0) + _by_kind.get("merge", 0) + _by_kind.get("merge_review", 0)
+    )
+    ontology_total = count_pending_ontology_proposals(conn)
+    high_value_total = conflicts_pending_total + high_value_audit_total + ontology_total
+    show_nudge = _nudge_should_show(
+        conn,
+        conflicts_pending=conflicts_pending_total,
+        high_value_total=high_value_total,
+    )
 
     instructions = (
         "These are the top recent salient events from the user's vault "
@@ -159,31 +225,44 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "signal trains the self-improvement tuner. Empty payload is a "
         "no-op."
     )
-    if pending:
+    # The nudge SENTENCE — only when a conflict is pending or the high-value queue
+    # grew past the cooldown. Never mentions edge_reviews.
+    if show_nudge and (conflict_pending or high_value_audit or ontology_pending):
         kinds_hint = "/".join(live_kind_slugs(conn))
+        if conflict_pending:
+            instructions += (
+                " A memory conflict needs your call: two memories are in "
+                "unresolved tension. The top ones are listed in "
+                "pending_corrections (kind 'conflict') with a directional "
+                "prompt. Raise one when it fits, then apply the answer with "
+                'afair.recall(decide={"proposal_id":"<id>","verdict":'
+                '"confirm"|"reject"|"retract"}).'
+            )
+        if high_value_audit or ontology_pending:
+            instructions += (
+                " There are also entity-graph corrections waiting (retype / "
+                "merge review, and ontology revisions from the Schema-Evolver). "
+                "The top ones are listed in pending_corrections, each with a "
+                "ready-to-ask prompt. When one fits the conversation, ask the "
+                "user, then apply their answer with "
+                'afair.recall(decide={"proposal_id":"<id>","verdict":"confirm"|'
+                '"reject"|"retract"}). If they say the kind is wrong, pass the '
+                f"corrected one as to_kind ({kinds_hint}). Never apply without "
+                "asking."
+            )
+    else:
+        # Suppressed: the items still ride the structured payload, but do not
+        # announce the count. Surface only if it genuinely fits the conversation.
         instructions += (
-            " pending_corrections lists entity-graph fixes the audit "
-            "proposed — most are cross-kind auto-merges where the system "
-            "picked a kind for an entity (e.g. 'Clario' filed as product when "
-            "it's your project). Each has a ready-to-ask prompt. When it fits "
-            "the conversation, ask the user, then apply their answer with "
-            'afair.recall(decide={"proposal_id":"<id>","verdict":"confirm"|'
-            '"reject"|"retract"}). If they say the kind is wrong, pass the '
-            f"corrected one as to_kind ({kinds_hint}), "
-            'e.g. verdict="reject", to_kind="project". '
-            "If they say it isn't a real entity at all (a file path, a test "
-            'artifact), use verdict="retract" to withdraw it. Never apply '
-            "without asking."
+            " pending_corrections may carry items; surface one only if it fits "
+            "the conversation naturally. Do not announce the count as a to-do "
+            "list."
         )
-    if ontology_pending:
+    # edge_reviews are ALWAYS handled automatically and never part of the nudge.
+    if edge_review_pending:
         instructions += (
-            " Entries whose kind starts with 'ontology_' revise the vault's "
-            "kind system itself (add/rename/merge/split/deprecate an entity "
-            "kind, proposed by the Schema-Evolver from observed usage). "
-            'Decide them the same way: verdict="confirm" applies the '
-            'revision, verdict="reject" leaves the ontology unchanged, and '
-            'verdict="revert" on a previously applied one undoes it with a '
-            "compensating revision. Never apply without asking."
+            " Low-confidence relation reviews are handled automatically and "
+            "expire on their own; mention them only if the user asks."
         )
     if upcoming:
         instructions += (
@@ -191,6 +270,10 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             "(a birthday, a deadline, a still-open promise), each with the "
             "date it next matters. Bring one up when it fits the conversation."
         )
+
+    # Record the acknowledgment when the nudge was shown (rate-limit auto-ack).
+    if show_nudge and (conflict_pending or high_value_audit or ontology_pending):
+        _write_nudge_marker(conn, high_value_total=high_value_total)
 
     return {
         "mode": mode,
@@ -256,6 +339,90 @@ def clear_cache() -> None:
     """Reset the cache. Used by tests; rarely called in production."""
     global _cache
     _cache = _Cache()
+
+
+def _conflict_prompt(reason: str) -> str:
+    """A directional yes/no prompt for one unresolved conflict pair (ADR-0008),
+    safe to show the operator verbatim. Kept in sync with the handlers copy that
+    serves the same prompt on the recall/decide surface."""
+    base = (
+        "Two of your memories are in unresolved tension. Is the newer one "
+        "current (supersedes the older), is the newer one wrong (keep the "
+        "older), or is this not a real conflict?"
+    )
+    return f"{base} ({reason})" if reason else base
+
+
+# ── the pending-nudge rate-limit marker (mutable, non-substrate) ─────────────
+
+
+def _read_nudge_marker(conn: sqlite3.Connection) -> tuple[str | None, int]:
+    """Return ``(last_shown_iso, last_shown_high_value_total)`` for the nudge, or
+    ``(None, 0)`` if the nudge has never been shown.
+
+    Stored in ``worker_watermarks`` (mutable derived state, same footing as the
+    edge-scorer epochs): ``through_created_at`` carries the last-shown ISO
+    timestamp, ``through_id`` carries the last-shown high-value total as text."""
+    from ..substrate import watermarks
+
+    wm = watermarks.read_watermark(conn, _PENDING_NUDGE_MARKER)
+    if wm is None:
+        return (None, 0)
+    last_shown_iso, total_str = wm
+    try:
+        return (last_shown_iso, int(total_str))
+    except (ValueError, TypeError):
+        return (last_shown_iso, 0)
+
+
+def _write_nudge_marker(conn: sqlite3.Connection, *, high_value_total: int) -> None:
+    """Record that the nudge was just shown: store now + the high-value total it
+    was shown for. A plain upsert (NOT ``write_watermark``, whose monotonic-ULID
+    guard would reject this non-ULID, decreasable value)."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO worker_watermarks (worker, through_created_at, through_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(worker) DO UPDATE SET
+                through_created_at = excluded.through_created_at,
+                through_id = excluded.through_id,
+                updated_at = excluded.updated_at
+            """,
+            (_PENDING_NUDGE_MARKER, now, str(high_value_total), now),
+        )
+
+
+def _nudge_should_show(
+    conn: sqlite3.Connection, *, conflicts_pending: int, high_value_total: int
+) -> bool:
+    """Decide whether the nudge SENTENCE fires this session (Fix 3 rate-limit).
+
+    Fires when EITHER a conflict is pending (always — a memory conflict needs the
+    operator's call, and bypasses both gates) OR the high-value queue has grown by
+    at least ``NUDGE_MIN_NEW`` since the last shown nudge AND at least
+    ``NUDGE_COOLDOWN_DAYS`` have passed. ``high_value_total`` deliberately EXCLUDES
+    edge_reviews — those never nudge."""
+    if conflicts_pending > 0:
+        return True
+    last_shown_iso, last_total = _read_nudge_marker(conn)
+    if high_value_total - last_total < NUDGE_MIN_NEW:
+        return False
+    if last_shown_iso is None:
+        return True  # never shown, and the growth gate above already passed
+    from datetime import UTC, datetime
+
+    try:
+        last_dt = datetime.fromisoformat(last_shown_iso)
+    except ValueError:
+        return True
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=UTC)
+    elapsed_days = (datetime.now(UTC) - last_dt).total_seconds() / 86400.0
+    return elapsed_days >= NUDGE_COOLDOWN_DAYS
 
 
 # ── substrate readers ──────────────────────────────────────────────────────

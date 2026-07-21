@@ -576,6 +576,26 @@ class CorrectionOutcomeView(BaseModel):
     note: str
 
 
+class PendingCounts(BaseModel):
+    """Open-proposal counts split BY VALUE CLASS, so a client can value-rank what
+    it surfaces instead of quoting one undifferentiated total.
+
+    ``conflicts`` are the highest-value class (a memory conflict needs the
+    operator's call) and worth surfacing on sight. ``entity`` (retype / merge /
+    merge_review) and ``ontology`` are worth mentioning when they accumulate.
+    ``edge_reviews`` are low-value: low-confidence relation reviews that expire on
+    their own (Fix 2) and are not worth the operator's attention unless asked.
+
+    ``pending_corrections_count`` on ``RecallResult`` stays the true grand total;
+    this is the same information split for ranking. Additive per I1.
+    """
+
+    conflicts: int = 0
+    entity: int = 0
+    ontology: int = 0
+    edge_reviews: int = 0
+
+
 class RecallResult(BaseModel):
     """Result of any `recall` call.
 
@@ -605,6 +625,11 @@ class RecallResult(BaseModel):
     coverage: RecallCoverage | None = None
     pending_corrections: list[ProposedCorrectionView] = []
     pending_corrections_count: int = 0
+    pending_counts: PendingCounts | None = None
+    """The open-proposal total split by value class (conflicts / entity /
+    ontology / edge_reviews) so a client can value-rank the nudge rather than
+    quote the raw ``pending_corrections_count``. Populated on every call whenever
+    anything is pending; null when the queue is empty. Additive per I1."""
     decisions: list[CorrectionOutcomeView] = []
     """Per-decision outcomes when this call carried ``decide=`` (single or
     batch). Empty on calls that didn't decide anything. Additive per I1."""

@@ -87,7 +87,11 @@ def test_pending_corrections_surface_with_prompt(
     assert len(pending) == 1
     assert pending[0]["kind"] == "retype"
     assert "re-type" in pending[0]["prompt"]
-    assert "afair.recall(decide=" in payload["instructions"]
+    # Fix 3: a single fresh high-value item is below the nudge threshold, so the
+    # decide-nudge sentence is suppressed — the item still rides the structured
+    # payload, and the AI is told to surface it only if it fits (not as a count).
+    assert "afair.recall(decide=" not in payload["instructions"]
+    assert "only if it fits" in payload["instructions"]
 
 
 def test_top_salient_query_uses_producer_index(db: sqlite3.Connection) -> None:
@@ -428,3 +432,199 @@ def test_session_start_upcoming_empty_when_nothing_due(db: sqlite3.Connection) -
     )
     payload = resources.build_session_start_payload(db)
     assert payload["upcoming"] == []
+
+
+# ── Fix 3: value-ranked, rate-limited pending nudge ──────────────────────────
+
+
+def _seed_retype(db: sqlite3.Connection, settings: Settings, name: str = "maxime.team") -> None:
+    """Seed one high-value retype proposal via the entity-audit worker."""
+    from afair.agents.entity_audit import EntityAuditWorker
+    from afair.substrate import write_entity
+
+    ev = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": name}
+    )
+    write_entity(
+        db,
+        canonical_name=name,
+        kind="person",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.8,
+    )
+    EntityAuditWorker().run(db, settings)
+
+
+def _seed_edge_review(db: sqlite3.Connection, settings: Settings, i: int = 1) -> None:
+    """Seed one low-value edge_review proposal via the edge scorer."""
+    from afair.substrate import (
+        record_edge_serves,
+        write_entity,
+        write_entity_edge,
+        write_entity_mention,
+    )
+
+    ev = write_event(
+        db,
+        origin="user",
+        kind="remember",
+        payload={"content_type": "text", "text": f"P{i} is loosely connected to the O{i}"},
+    )
+    subj = write_entity(
+        db,
+        canonical_name=f"P{i}",
+        kind="person",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.5,
+    )
+    obj = write_entity(
+        db,
+        canonical_name=f"O{i}",
+        kind="organization",
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.5,
+    )
+    for endpoint in (subj, obj):
+        write_entity_mention(
+            db,
+            entity_id=endpoint.id,
+            event_id=ev.id,
+            event_hash=ev.content_hash,
+            surface_form=endpoint.canonical_name,
+            canonicalized_by="t",
+            match_method="exact",
+            confidence=0.5,
+        )
+    edge = write_entity_edge(
+        db,
+        subject_id=subj.id,
+        predicate="is loosely connected to the",
+        object_id=obj.id,
+        source_event_id=ev.id,
+        discovered_by="t",
+        confidence=0.3,
+    )
+    assert edge is not None
+    record_edge_serves(db, [edge.id])
+    from afair.agents.edge_scorer import EdgeConfidenceScorer
+
+    EdgeConfidenceScorer().run(db, settings)
+
+
+def _seed_conflict(db: sqlite3.Connection) -> None:
+    """Enqueue one open conflict-resolution proposal."""
+    from afair.substrate import enqueue_conflict_proposal
+
+    a = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "I live in A"}
+    )
+    b = write_event(
+        db, origin="user", kind="remember", payload={"content_type": "text", "text": "I live in B"}
+    )
+    enqueue_conflict_proposal(
+        db,
+        event_a_id=a.id,
+        event_a_hash=a.content_hash,
+        event_b_id=b.id,
+        event_b_hash=b.content_hash,
+        newer_hash=b.content_hash,
+        flag_verdict="supersedes",
+        reason="location changed",
+        confidence=0.9,
+        detected_by="conflict_resolver:v0",
+    )
+
+
+def test_edge_reviews_ride_payload_but_not_the_nudge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Only edge_reviews pending: they appear in pending_corrections, but NO
+    review-ask sentence fires — they expire on their own."""
+    _seed_edge_review(db, settings)
+    payload = resources.build_session_start_payload(db)
+    kinds = {p["kind"] for p in payload["pending_corrections"]}
+    assert "edge_review" in kinds
+    # No decide-nudge for the edge_review; the static auto-expire line is present.
+    assert "afair.recall(decide=" not in payload["instructions"]
+    assert "expire on their own" in payload["instructions"]
+
+
+def test_conflict_is_itemized_first_and_always_nudges(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A pending conflict is listed FIRST and bypasses the rate limit — a memory
+    conflict always earns a mention."""
+    _seed_retype(db, settings)  # a high-value item, below the growth threshold alone
+    _seed_conflict(db)
+    payload = resources.build_session_start_payload(db)
+    pending = payload["pending_corrections"]
+    assert pending[0]["kind"] == "conflict"  # conflicts first
+    assert "a memory conflict needs your call" in payload["instructions"].lower()
+    assert "afair.recall(decide=" in payload["instructions"]
+
+
+def test_nudge_is_rate_limited_and_self_acknowledges(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Three fresh high-value items cross NUDGE_MIN_NEW so the nudge fires and
+    records the marker; an immediate rebuild with the SAME queue does not
+    re-fire (cooldown + no growth)."""
+    for n in ("alpha.team", "beta.team", "gamma.team"):
+        _seed_retype(db, settings, name=n)
+    first = resources.build_session_start_payload(db)
+    assert "afair.recall(decide=" in first["instructions"]  # fired (3 >= NUDGE_MIN_NEW)
+
+    # Immediate rebuild, unchanged queue → cooldown + no growth → suppressed.
+    resources.clear_cache()
+    second = resources.build_session_start_payload(db)
+    assert "afair.recall(decide=" not in second["instructions"]
+    assert "only if it fits" in second["instructions"]
+
+
+def test_nudge_returns_after_growth_and_cooldown(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the nudge is shown, it returns once the queue grows by NUDGE_MIN_NEW
+    AND the cooldown has elapsed (simulated by back-dating the marker)."""
+    from afair.substrate import watermarks
+
+    for n in ("alpha.team", "beta.team", "gamma.team"):
+        _seed_retype(db, settings, name=n)
+    resources.build_session_start_payload(db)  # fires, records marker at total=3
+
+    # Back-date the marker 8 days so the cooldown has elapsed.
+    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    wm = watermarks.read_watermark(db, resources._PENDING_NUDGE_MARKER)
+    assert wm is not None
+    with db:
+        db.execute(
+            "UPDATE worker_watermarks SET through_created_at = ? WHERE worker = ?",
+            (old, resources._PENDING_NUDGE_MARKER),
+        )
+    # Grow the high-value queue by 3 more.
+    for n in ("delta.team", "epsilon.team", "zeta.team"):
+        _seed_retype(db, settings, name=n)
+    resources.clear_cache()
+    payload = resources.build_session_start_payload(db)
+    assert "afair.recall(decide=" in payload["instructions"]  # returned
+
+
+def test_pending_corrections_count_stays_true_total(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The value split never changes the grand total the recall handler serves:
+    conflicts + high-value + edge_reviews all count into the queue."""
+    from afair.substrate import (
+        count_pending_conflict_proposals,
+        count_pending_corrections,
+    )
+
+    _seed_retype(db, settings)
+    _seed_edge_review(db, settings)
+    _seed_conflict(db)
+    total = count_pending_corrections(db) + count_pending_conflict_proposals(db)
+    # retype (1) + edge_review (1) + conflict (1) = 3.
+    assert total == 3

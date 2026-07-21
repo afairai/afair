@@ -696,6 +696,41 @@
             "title": "Pending Corrections Count",
             "type": "integer"
           },
+          "pending_counts": {
+            "anyOf": [
+              {
+                "description": "Open-proposal counts split BY VALUE CLASS, so a client can value-rank what\nit surfaces instead of quoting one undifferentiated total.\n\n``conflicts`` are the highest-value class (a memory conflict needs the\noperator's call) and worth surfacing on sight. ``entity`` (retype / merge /\nmerge_review) and ``ontology`` are worth mentioning when they accumulate.\n``edge_reviews`` are low-value: low-confidence relation reviews that expire on\ntheir own (Fix 2) and are not worth the operator's attention unless asked.\n\n``pending_corrections_count`` on ``RecallResult`` stays the true grand total;\nthis is the same information split for ranking. Additive per I1.",
+                "properties": {
+                  "conflicts": {
+                    "default": 0,
+                    "title": "Conflicts",
+                    "type": "integer"
+                  },
+                  "edge_reviews": {
+                    "default": 0,
+                    "title": "Edge Reviews",
+                    "type": "integer"
+                  },
+                  "entity": {
+                    "default": 0,
+                    "title": "Entity",
+                    "type": "integer"
+                  },
+                  "ontology": {
+                    "default": 0,
+                    "title": "Ontology",
+                    "type": "integer"
+                  }
+                },
+                "title": "PendingCounts",
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "summary": {
             "anyOf": [
               {

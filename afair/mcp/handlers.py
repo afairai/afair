@@ -66,7 +66,7 @@ from ..substrate import (
     build_text_payload,
     count_events_by_client,
     count_pending_conflict_proposals,
-    count_pending_corrections,
+    count_pending_corrections_by_kind,
     count_pending_ontology_proposals,
     iter_events,
     latest_edge_confidence_batch,
@@ -127,6 +127,7 @@ from .schemas import (
     InvalidationSummary,
     ObserveEvent,
     ObserveResult,
+    PendingCounts,
     ProposedCorrectionView,
     RecallCoverage,
     RecallFeedback,
@@ -1789,10 +1790,27 @@ def recall(
     # The cheap universal nudge: the TRUE open-queue total on every recall,
     # so a client can prompt "you have N memories to review" without the
     # operator ever calling stats=True. The heavy list stays gated above.
-    pending_count = (
-        count_pending_corrections(db)
-        + count_pending_ontology_proposals(db)
-        + count_pending_conflict_proposals(db)
+    _by_kind = count_pending_corrections_by_kind(db)
+    _ontology_count = count_pending_ontology_proposals(db)
+    _conflict_count = count_pending_conflict_proposals(db)
+    pending_count = sum(_by_kind.values()) + _ontology_count + _conflict_count
+    # Same total, split by value class (Fix 3) so a client can value-rank the
+    # nudge instead of quoting the raw total. entity = retype/merge/merge_review
+    # (the human-judgment corrections); edge_reviews = the low-value, self-expiring
+    # relation reviews. Null when the queue is empty (nothing to nudge about).
+    pending_counts = (
+        PendingCounts(
+            conflicts=_conflict_count,
+            entity=(
+                _by_kind.get("retype", 0)
+                + _by_kind.get("merge", 0)
+                + _by_kind.get("merge_review", 0)
+            ),
+            ontology=_ontology_count,
+            edge_reviews=_by_kind.get("edge_review", 0),
+        )
+        if pending_count > 0
+        else None
     )
 
     # ── Single-event lookup mode ───────────────────────────────────────────
@@ -1813,6 +1831,7 @@ def recall(
                 summary=summary,
                 pending_corrections=pending,
                 pending_corrections_count=pending_count,
+                pending_counts=pending_counts,
                 decisions=decisions_out,
             )
         invalidations = _attach_invalidations([target], db)
@@ -1852,6 +1871,7 @@ def recall(
             summary=summary,
             pending_corrections=pending,
             pending_corrections_count=pending_count,
+            pending_counts=pending_counts,
             decisions=decisions_out,
         )
 
@@ -2015,6 +2035,7 @@ def recall(
         coverage=_compute_coverage(events, invalidations, conflicts, overlay),
         pending_corrections=pending,
         pending_corrections_count=pending_count,
+        pending_counts=pending_counts,
         decisions=decisions_out,
         next_cursor=next_cursor,
     )

@@ -25,6 +25,7 @@ from .corrections import (
     CorrectionOutcome,
     PendingCorrection,
     count_pending_corrections,
+    count_pending_corrections_by_kind,
     decide_correction,
     read_pending_corrections,
 )
@@ -182,6 +183,7 @@ __all__ = [
     "count_events_by_client",
     "count_pending_conflict_proposals",
     "count_pending_corrections",
+    "count_pending_corrections_by_kind",
     "count_pending_ontology_proposals",
     "decide_conflict_proposal",
     "decide_correction",
