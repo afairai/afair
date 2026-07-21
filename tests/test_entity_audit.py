@@ -108,12 +108,18 @@ def settings(tmp_path: Path) -> Settings:
     )
 
 
-def _entity(db: sqlite3.Connection, name: str, kind: str) -> str:
+def _entity(db: sqlite3.Connection, name: str, kind: str, *, split_homonym: bool = False) -> str:
     ev = write_event(
         db, origin="user", kind="remember", payload={"content_type": "text", "text": name}
     )
     return write_entity(
-        db, canonical_name=name, kind=kind, created_by="t", source_event_id=ev.id, confidence=0.8
+        db,
+        canonical_name=name,
+        kind=kind,
+        created_by="t",
+        source_event_id=ev.id,
+        confidence=0.8,
+        split_homonym=split_homonym,
     ).id
 
 
@@ -287,6 +293,156 @@ def test_worker_skips_already_decided_proposal(db: sqlite3.Connection, settings:
     ).fetchall()
     assert len(rows) == 1
     assert rows[0]["status"] == "confirmed"  # untouched
+
+
+# ── semantic anti-re-nag (the Fable-x6 loop) ──────────────────────────────────
+
+
+def test_semantic_key_suppresses_refiled_merge_review_after_decide(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Regression for the Fable-x6 loop. The canonicalizer re-mints a NEW same-name
+    cross-kind entity (fresh ULID) on every kind flip; the deduplicator auto-merges
+    each fresh one into the same product-Fable. The (kind, from_entity_id) guard is
+    keyed on the re-minted id, so it never blocks — the IDENTICAL question is
+    re-proposed forever. The semantic key (from_name, from_kind, resolved into)
+    suppresses the re-file even though from_entity_id differs.
+
+    Red against the parent commit: without the semantic guard the second
+    merge_review IS filed, so this asserts == 0 and dedup stat == 1.
+    """
+    # Cycle 1: person Fable auto-merged into product Fable → a merge_review filed.
+    from1, into = _auto_merge_across_kinds(
+        db, "Fable", "person", "product", by="entity_deduplicator:v0"
+    )
+    stats1 = EntityAuditWorker().run(db, settings)
+    assert stats1["merge_review_proposals"] == 1
+    # Operator decides it (rejects the auto-picked kind — the honest resolution).
+    db.execute(
+        "UPDATE proposed_corrections SET status = 'rejected', "
+        "decided_at = '2026-01-01T00:00:00+00:00' WHERE entity_id = ?",
+        (from1,),
+    )
+    db.commit()
+
+    # Cycle 2: a FRESH person-Fable (new v2 disambiguator, distinct id) is minted
+    # and auto-merged into the SAME product Fable — the canonicalizer's kind-flip
+    # re-mint reproduced (split_homonym mints the next ordinal for the same name).
+    from2 = _entity(db, "Fable", "person", split_homonym=True)
+    write_entity_merge(
+        db,
+        from_entity_id=from2,
+        into_entity_id=into,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    assert from2 != from1
+    # The detector STILL reports BOTH merges (each has a distinct from_entity_id,
+    # both still cross-kind) — the raw signal the old guard could not collapse.
+    assert len(find_cross_kind_auto_merges(db)) == 2
+
+    stats2 = EntityAuditWorker().run(db, settings)
+    # No new review: both merges (the decided from1 and the fresh from2) map to the
+    # one already-decided question, so the semantic key suppresses both re-files.
+    assert stats2["merge_review_proposals"] == 0
+    assert stats2["merge_review_deduped_semantic"] == 2
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM proposed_corrections WHERE kind = 'merge_review'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_semantic_key_absorbs_pending_twin_before_decide(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Two fresh same-name cross-kind merges into the same target in ONE cycle
+    (both still 'proposed') collapse to a single review — the semantic key sees
+    the first-inserted row of ANY status."""
+    _from1, into = _auto_merge_across_kinds(
+        db, "Fable", "person", "product", by="entity_deduplicator:v0"
+    )
+    from2 = _entity(db, "Fable", "person", split_homonym=True)
+    write_entity_merge(
+        db,
+        from_entity_id=from2,
+        into_entity_id=into,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 1
+    assert stats["merge_review_deduped_semantic"] == 1
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM proposed_corrections WHERE kind = 'merge_review'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_semantic_key_does_not_suppress_distinct_target(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A same-name person merged into a DIFFERENTLY-NAMED product is a genuinely
+    new question — the resolved into-target differs, so it is not suppressed.
+
+    (Two same-name-same-kind products share one v2 name-first id and ARE the same
+    entity, so 'distinct target' means a distinct NAME, not a distinct instance.)"""
+    _auto_merge_across_kinds(db, "Fable", "person", "product", by="entity_deduplicator:v0")
+    # A fresh person Fable merged into a DIFFERENTLY-named product ('FableAI').
+    from2 = _entity(db, "Fable", "person", split_homonym=True)
+    into2 = _entity(db, "FableAI", "product")  # distinct name → distinct v2 id
+    write_entity_merge(
+        db,
+        from_entity_id=from2,
+        into_entity_id=into2,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 2  # both surface
+    assert stats["merge_review_deduped_semantic"] == 0
+
+
+def test_semantic_key_does_not_suppress_distinct_from_kind(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """A same-name entity of a DIFFERENT from-kind merged into the same target is
+    a distinct question — not suppressed."""
+    _, into = _auto_merge_across_kinds(
+        db, "Fable", "person", "product", by="entity_deduplicator:v0"
+    )
+    # A concept Fable (distinct from-kind) merged into the same product Fable.
+    from2 = _entity(db, "Fable", "concept")
+    write_entity_merge(
+        db,
+        from_entity_id=from2,
+        into_entity_id=into,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 2  # person-Fable and concept-Fable
+    assert stats["merge_review_deduped_semantic"] == 0
+
+
+def test_semantic_key_leaves_retype_path_unchanged(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The semantic guard is merge_review-only; retype proposals still file and
+    still honor the (kind, entity_id) NOT EXISTS idempotency."""
+    _entity(db, "maxime.team", "person")  # retype -> product
+    first = EntityAuditWorker().run(db, settings)
+    assert first["retype_proposals"] == 1
+    assert first["merge_review_deduped_semantic"] == 0
+    second = EntityAuditWorker().run(db, settings)
+    assert second["retype_proposals"] == 0  # unchanged idempotency
 
 
 def test_decided_row_not_refiled_under_partial_index(

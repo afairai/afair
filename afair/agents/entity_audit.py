@@ -257,6 +257,56 @@ def _insert_proposal(
     return cur.rowcount > 0
 
 
+def _semantic_merge_review_exists(
+    conn: sqlite3.Connection,
+    *,
+    from_name: str,
+    from_kind: str,
+    into_entity_id: str,
+) -> bool:
+    """True when a ``merge_review`` proposal of ANY status already asks the same
+    QUESTION as the one about to be enqueued.
+
+    The Fable-x6 root cause: the ``(kind, entity_id)`` guard in
+    :func:`_insert_proposal` is keyed on ``from_entity_id``, a fresh ULID the
+    canonicalizer re-mints on every kind flip of a same-name entity. So the
+    IDENTICAL question — "was auto-merging a *person* named Fable into the
+    *product* Fable right?" — carries a new ``from_entity_id`` each cycle and the
+    NOT EXISTS never blocks. It gets re-proposed forever.
+
+    The semantic key is the QUESTION, not the merge instance:
+    ``(lower(from_name), from_kind, resolved into_entity_id)``. Comparing the
+    RESOLVED canonical of the into-target absorbs pre-fix rows whose stored
+    ``into_entity_id`` was itself later merged away; ``lower(into_name)`` is the
+    documented fallback for such rows if the resolved ids still differ. Any prior
+    row for the same question — proposed, confirmed, or rejected — suppresses the
+    re-nag. It never suppresses a genuinely-new question: a different into-target
+    or a different from-kind both fall through to a fresh proposal.
+    """
+    from ..substrate.entities import resolve_canonical
+
+    resolved_into = resolve_canonical(conn, into_entity_id)
+    row = conn.execute(
+        """
+        SELECT 1 FROM proposed_corrections pc
+        WHERE pc.kind = 'merge_review'
+          AND lower(json_extract(pc.detail, '$.from_name')) = lower(?)
+          AND json_extract(pc.detail, '$.from_kind') = ?
+          AND (
+              json_extract(pc.detail, '$.into_entity_id') = ?
+              OR ? IN (
+                  SELECT em.into_entity_id FROM entity_merges em
+                  WHERE em.from_entity_id
+                        = json_extract(pc.detail, '$.into_entity_id')
+              )
+          )
+        LIMIT 1
+        """,
+        (from_name, from_kind, resolved_into, resolved_into),
+    ).fetchone()
+    return row is not None
+
+
 class EntityAuditWorker(ColdPathWorker):
     """Scan the entity graph and queue corrections for the operator to confirm.
     Detection only — never applies. No LLM in v0 (deterministic heuristics)."""
@@ -288,6 +338,7 @@ class EntityAuditWorker(ColdPathWorker):
             "retype_proposals": 0,
             "merge_review_proposals": 0,
             "suppressed_structural": 0,
+            "merge_review_deduped_semantic": 0,
         }
         with conn:
             for eid, name, kind in entities:
@@ -322,6 +373,18 @@ class EntityAuditWorker(ColdPathWorker):
                 ):
                     stats["suppressed_structural"] += 1
                     continue
+                # Semantic anti-re-nag: the same question keyed on
+                # (from_name, from_kind, resolved into-target) may already be on
+                # the queue under a different (re-minted) from_entity_id. Suppress
+                # before insert so the Fable-x6 loop cannot re-file it each cycle.
+                if _semantic_merge_review_exists(
+                    conn,
+                    from_name=detail["from_name"],
+                    from_kind=detail["from_kind"],
+                    into_entity_id=detail["into_entity_id"],
+                ):
+                    stats["merge_review_deduped_semantic"] += 1
+                    continue
                 if _insert_proposal(
                     conn,
                     kind="merge_review",
@@ -333,6 +396,10 @@ class EntityAuditWorker(ColdPathWorker):
                 ):
                     stats["merge_review_proposals"] += 1
 
-        if stats["retype_proposals"] or stats["merge_review_proposals"]:
+        if (
+            stats["retype_proposals"]
+            or stats["merge_review_proposals"]
+            or stats["merge_review_deduped_semantic"]
+        ):
             log.info("entity_audit.proposals", **stats)
         return stats
