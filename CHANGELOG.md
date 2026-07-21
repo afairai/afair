@@ -10,6 +10,19 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.25](https://github.com/afairai/afair/compare/v0.1.24...v0.1.25) (2026-07-21)
+
+
+### Features
+
+* **recall:** value-rank and rate-limit the pending-review nudge ([b1ac59b](https://github.com/afairai/afair/commit/b1ac59b6536364c4c8ed9e4904141fa5f03c411b))
+
+
+### Bug Fixes
+
+* **audit:** suppress duplicate merge_reviews by semantic key, not entity instance ([16e20a4](https://github.com/afairai/afair/commit/16e20a4b543f1961a51a2dd471ba0c94d3db454f))
+* **edges:** expire unattended low-confidence edge_reviews from the queue, keep the edge served ([1302152](https://github.com/afairai/afair/commit/130215215ccc2d998ef7ce6ce90a7793bf62c05c))
+
 ## [0.1.24](https://github.com/afairai/afair/compare/v0.1.23...v0.1.24) (2026-07-17)
 
 
