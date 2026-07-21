@@ -756,6 +756,235 @@ def test_serve_tracking_epoch_is_set_once_and_stable(
     assert es._serve_tracking_epoch(db) == first
 
 
+# ── Fix 2: pending edge_review TTL (retire the review SLOT, keep the edge) ────
+
+
+def _open_edge_review(db: sqlite3.Connection, settings: Settings, *, i: int = 1) -> Any:
+    """Seed one served weak edge (on a DISTINCT subject ``i``) and run a cycle so
+    it becomes an OPEN ('proposed') edge_review. Returns the newest proposed
+    edge_review row (id + edge_id in detail)."""
+    from afair.substrate import read_pending_corrections
+
+    edge = _seed_weak_edge(db, i)
+    EdgeConfidenceScorer().run(db, settings)
+    return next(
+        p
+        for p in read_pending_corrections(db)
+        if p.kind == "edge_review" and p.detail["edge_id"] == edge.id
+    )
+
+
+def _backdate_proposal(db: sqlite3.Connection, proposal_id: str, *, days_ago: float) -> None:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    with db:
+        db.execute(
+            "UPDATE proposed_corrections SET detected_at = ? WHERE id = ?", (when, proposal_id)
+        )
+
+
+def _set_review_expiry_epoch(db: sqlite3.Connection, *, days_ago: float) -> None:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    with db:
+        db.execute(
+            "INSERT INTO worker_watermarks (worker, through_created_at, through_id, updated_at) "
+            "VALUES (?, ?, '0', ?) "
+            "ON CONFLICT(worker) DO UPDATE SET through_created_at = excluded.through_created_at",
+            (es.EDGE_REVIEW_EXPIRY_EPOCH_KEY, when, when),
+        )
+
+
+def test_review_expiry_epoch_is_set_once_and_stable(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The pending-review-expiry epoch is created on the first cycle and never
+    moves on later cycles (mirrors the serve-tracking epoch)."""
+    EdgeConfidenceScorer().run(db, settings)
+    first = es._review_expiry_epoch(db)
+    EdgeConfidenceScorer().run(db, settings)
+    assert es._review_expiry_epoch(db) == first
+
+
+def test_fresh_deploy_does_not_expire_the_pending_backlog(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """ROLLOUT SAFETY: a long-open (90d) pending edge_review on a FRESH vault
+    (expiry epoch = now) is NOT expired on the first cycle — the epoch gives the
+    whole backlog a full TTL window before anything ages out."""
+    proposal = _open_edge_review(db, settings)
+    _backdate_proposal(db, proposal.id, days_ago=90)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 0
+    row = db.execute(
+        "SELECT status FROM proposed_corrections WHERE id = ?", (proposal.id,)
+    ).fetchone()
+    assert row["status"] == "proposed"  # still open, still on the queue
+
+
+def test_matured_epoch_lets_old_pending_review_expire(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Once the expiry epoch is older than the TTL (epoch 40d old) a 90d-open
+    pending review is finally eligible — the epoch delays, not disables."""
+    proposal = _open_edge_review(db, settings)
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)  # tracking began past the 30d TTL
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 1
+    row = db.execute(
+        "SELECT status, decided_by FROM proposed_corrections WHERE id = ?", (proposal.id,)
+    ).fetchone()
+    assert row["status"] == "expired"
+    assert row["decided_by"] == es.EDGE_REVIEW_EXPIRY_PRODUCER
+
+
+def test_expiry_writes_no_invalidation_no_verdict_and_keeps_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The core promise: expiry retires the review SLOT only. The edge is NOT
+    invalidated (I2 — entity_edges untouched, no edge_invalidations), NO
+    edge_reviews verdict row is written, and the edge stays LIVE."""
+    from afair.substrate import iter_edges_for_entity
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    subject_id = db.execute(
+        "SELECT subject_id FROM entity_edges WHERE id = ?", (edge_id,)
+    ).fetchone()["subject_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 1
+    # No invalidation, no verdict row.
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM edge_invalidations WHERE edge_id = ?", (edge_id,)
+        ).fetchone()[0]
+        == 0
+    )
+    assert db.execute("SELECT COUNT(*) FROM edge_reviews").fetchone()[0] == 0
+    # The edge is still LIVE (served-with-caveat, unchanged recall behavior).
+    live = iter_edges_for_entity(db, subject_id)
+    assert any(e.id == edge_id for e in live)
+
+
+def test_expired_review_is_never_re_proposed(db: sqlite3.Connection, settings: Settings) -> None:
+    """ANTI-CHURN: once expired, the same low-confidence edge is never re-proposed
+    (the candidate page excludes edges with an expired edge_review). No
+    retire→re-propose loop, even though the edge remains served + sub-threshold."""
+    from afair.substrate import read_pending_corrections
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)  # expires it
+
+    # Several more cycles: the edge is still served + sub-threshold, yet never
+    # re-proposed (the expired row is the durable guard).
+    for _ in range(3):
+        EdgeConfidenceScorer().run(db, settings)
+    open_reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert all(p.detail["edge_id"] != edge_id for p in open_reviews)
+    # Exactly one proposed_corrections row for this edge, and it is expired.
+    rows = db.execute(
+        "SELECT status FROM proposed_corrections "
+        "WHERE kind = 'edge_review' AND json_extract(detail, '$.edge_id') = ?",
+        (edge_id,),
+    ).fetchall()
+    assert [r["status"] for r in rows] == ["expired"]
+
+
+def test_recall_still_serves_expired_edge_with_caveat(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """END-TO-END: after the review slot expires, recall STILL serves the edge
+    (it is live) — expiry is of the review, not the relation. The caveat is a
+    served-confidence property (handlers) unaffected by the queue state."""
+    from afair.substrate import iter_edges_for_entity
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    subject_id = db.execute(
+        "SELECT subject_id FROM entity_edges WHERE id = ?", (edge_id,)
+    ).fetchone()["subject_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)
+
+    # The edge is still returned by the live edge reader → recall still surfaces it.
+    live = iter_edges_for_entity(db, subject_id)
+    served = next(e for e in live if e.id == edge_id)
+    # And its served confidence is below the caveat threshold, so recall shows the
+    # low-confidence caveat rather than suppressing the edge.
+    from afair.substrate import latest_edge_scores_batch as _scores
+
+    scores = _scores(db, [edge_id])
+    served_conf = scores[edge_id].confidence if edge_id in scores else served.confidence
+    assert served_conf < 0.5
+
+
+def test_operator_can_decide_an_expired_review(db: sqlite3.Connection, settings: Settings) -> None:
+    """OPERATOR OVERRIDE: an expired edge_review is still decidable — it routes to
+    _decide_edge_review and writes the real verdict. A genuinely-decided
+    (confirmed) review reports already_decided."""
+    from afair.substrate import decide_correction, latest_edge_review
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)  # → expired
+    assert (
+        db.execute(
+            "SELECT status FROM proposed_corrections WHERE id = ?", (proposal.id,)
+        ).fetchone()["status"]
+        == "expired"
+    )
+
+    # The operator can still confirm it — the real verdict lands.
+    outcome = decide_correction(db, proposal_id=proposal.id, verdict="confirm")
+    assert outcome.status == "applied"
+    assert latest_edge_review(db, edge_id) == "confirm"
+
+    # A truly-decided review is NOT re-decidable.
+    other = _open_edge_review(db, settings, i=2)
+    decide_correction(db, proposal_id=other.id, verdict="confirm")
+    again = decide_correction(db, proposal_id=other.id, verdict="reject")
+    assert again.status == "already_decided"
+
+
+def test_pending_expiry_is_capped_per_cycle(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE per run; the backlog drains
+    across cycles."""
+    monkeypatch.setattr(es, "MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE", 25)
+    # 30 distinct-subject served weak edges → 30 open reviews (raise the propose
+    # cap so they all queue up front in a couple of cycles).
+    monkeypatch.setattr(es, "MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE", 30)
+    for i in range(30):
+        _seed_weak_edge(db, i)
+    EdgeConfidenceScorer().run(db, settings)
+    open_ids = [
+        r["id"]
+        for r in db.execute(
+            "SELECT id FROM proposed_corrections WHERE kind = 'edge_review' AND status = 'proposed'"
+        ).fetchall()
+    ]
+    assert len(open_ids) == 30
+    for pid in open_ids:
+        _backdate_proposal(db, pid, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+
+    first = EdgeConfidenceScorer().run(db, settings)
+    assert first["edge_reviews_expired_pending"] == 25  # capped
+    second = EdgeConfidenceScorer().run(db, settings)
+    assert second["edge_reviews_expired_pending"] == 5  # remainder drains
+
+
 # ── retro-sweep: noise edges (observe / transient / vague predicate) — B4 ────
 
 

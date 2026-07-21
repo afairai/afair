@@ -544,7 +544,7 @@ SCHEMA_DDL: tuple[str, ...] = (
         detected_by   TEXT NOT NULL,
         detected_at   TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'proposed'
-                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied', 'expired')),
         decided_at    TEXT,
         decided_by    TEXT
     ) STRICT
@@ -1209,7 +1209,7 @@ _PROPOSED_CORRECTIONS_REBUILD_DDL = """
         detected_by   TEXT NOT NULL,
         detected_at   TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'proposed'
-                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied', 'expired')),
         decided_at    TEXT,
         decided_by    TEXT
     ) STRICT
@@ -1288,6 +1288,45 @@ def migrate_proposed_corrections_open_unique(conn: Any) -> bool:
             "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
         )
         return False
+    with conn:
+        conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
+        conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)
+        conn.execute("INSERT INTO proposed_corrections SELECT * FROM proposed_corrections_old")
+        conn.execute("DROP TABLE proposed_corrections_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
+            "ON proposed_corrections(status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
+        )
+    return True
+
+
+def migrate_proposed_corrections_status_check(conn: Any) -> bool:
+    """Widen the ``proposed_corrections.status`` CHECK to admit ``expired``
+    (Fix 2 — the pending edge_review TTL).
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table's constraint,
+    so a vault created before this change keeps the frozen
+    ``CHECK (status IN ('proposed','confirmed','rejected','applied'))`` and would
+    REJECT the ``expired`` status the pending-TTL sweep sets. Same non-substrate
+    reasoning + guarded transactional rebuild as
+    :func:`migrate_proposed_corrections_kind_check`: the applied corrections live
+    elsewhere, this queue is regenerable derived state (no I2 triggers).
+
+    Idempotent: guarded on the stored DDL not yet mentioning ``expired``. A fresh
+    vault whose table already carries the widened CHECK is never rebuilt. Runs
+    AFTER the kind + open-unique migrations, so the table it rebuilds already has
+    the widened ``kind`` CHECK and the partial index. Returns True on rebuild."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return False
+    if "'expired'" in row["sql"]:
+        return False  # already widened (fresh vault or prior migration)
     with conn:
         conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
         conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)

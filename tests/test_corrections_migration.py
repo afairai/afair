@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from afair.substrate import open_db, write_entity, write_event
-from afair.substrate.schema import migrate_proposed_corrections_open_unique
+from afair.substrate.schema import (
+    migrate_proposed_corrections_open_unique,
+    migrate_proposed_corrections_status_check,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -39,6 +42,27 @@ _OLD_DDL = """
         decided_at    TEXT,
         decided_by    TEXT,
         UNIQUE(kind, entity_id)
+    ) STRICT
+"""
+
+
+# The pre-Fix2 table shape: post-P1 (no inline UNIQUE, partial index) but the
+# NARROW status CHECK without 'expired' — what the status-check migration widens.
+_PRE_EXPIRED_DDL = """
+    CREATE TABLE proposed_corrections (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL CHECK (kind IN ('retype', 'merge', 'merge_review', 'edge_review')),
+        entity_id     TEXT NOT NULL REFERENCES entities(id),
+        detail        TEXT NOT NULL,
+        evidence      TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        tier          TEXT NOT NULL CHECK (tier IN ('auto', 'review')),
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+        decided_at    TEXT,
+        decided_by    TEXT
     ) STRICT
 """
 
@@ -84,6 +108,22 @@ def _insert(conn: sqlite3.Connection, *, pid: str, kind: str, entity_id: str, st
             ) VALUES (?, ?, ?, '{}', 'ev', 0.5, 'review', 'test', ?, ?, ?)
             """,
             (pid, kind, entity_id, "2026-01-01T00:00:00+00:00", status, decided_at),
+        )
+
+
+def _revert_to_pre_expired_shape(conn: sqlite3.Connection) -> None:
+    """Rebuild proposed_corrections with the NARROW status CHECK (no 'expired')
+    so we can exercise the status-check forward migration on a legacy table."""
+    with conn:
+        conn.execute("DROP TABLE proposed_corrections")
+        conn.execute(_PRE_EXPIRED_DDL)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
+            "ON proposed_corrections(status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
         )
 
 
@@ -151,6 +191,89 @@ def test_legacy_vault_boots_clean_through_open_db(tmp_path: Path) -> None:
     assert migrate_proposed_corrections_open_unique(conn3) is False
     ids2 = {r["id"] for r in conn3.execute("SELECT id FROM proposed_corrections").fetchall()}
     assert ids2 == {f"row_{s}" for s in statuses}
+    conn3.close()
+
+
+# ── Fix 2: the status-check widen (admit 'expired') ─────────────────────────
+
+
+def test_status_check_migration_widens_and_preserves_rows(db: sqlite3.Connection) -> None:
+    """A legacy vault with the NARROW status CHECK rejects 'expired'; after the
+    migration it accepts 'expired', rows are preserved, and the partial index +
+    widened kind CHECK survive the rebuild."""
+    import sqlite3 as _sqlite
+
+    _revert_to_pre_expired_shape(db)
+    e1 = _entity(db, "SubjA", "product")
+    _insert(db, pid="keep_me", kind="edge_review", entity_id=e1, status="proposed")
+    # Pre-migration: 'expired' is rejected by the narrow CHECK.
+    e2 = _entity(db, "SubjB", "product")
+    with pytest.raises(_sqlite.IntegrityError):
+        _insert(db, pid="early", kind="edge_review", entity_id=e2, status="expired")
+
+    assert migrate_proposed_corrections_status_check(db) is True
+
+    # Row preserved; widened CHECK now admits 'expired'.
+    ids = {r["id"] for r in db.execute("SELECT id FROM proposed_corrections").fetchall()}
+    assert ids == {"keep_me"}
+    table_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()["sql"]
+    assert "'expired'" in table_sql
+    assert _has_open_unique_index(db)
+    # Post-migration: an 'expired' insert now succeeds.
+    with db:
+        db.execute(
+            "UPDATE proposed_corrections SET status = 'expired', "
+            "decided_at = '2026-06-01T00:00:00+00:00' WHERE id = 'keep_me'"
+        )
+    assert (
+        db.execute("SELECT status FROM proposed_corrections WHERE id = 'keep_me'").fetchone()[
+            "status"
+        ]
+        == "expired"
+    )
+
+
+def test_status_check_migration_is_idempotent(db: sqlite3.Connection) -> None:
+    _revert_to_pre_expired_shape(db)
+    assert migrate_proposed_corrections_status_check(db) is True
+    # Second run: already widened → no rebuild.
+    assert migrate_proposed_corrections_status_check(db) is False
+    # A fresh vault (SCHEMA_DDL ships the widened CHECK) is never rebuilt.
+    assert migrate_proposed_corrections_status_check(db) is False
+
+
+def test_legacy_vault_gains_expired_status_through_open_db(tmp_path: Path) -> None:
+    """Production path: a legacy-shaped vault (narrow status CHECK) opened through
+    real open_db migrates at boot so an 'expired' insert works, and a second boot
+    is a no-op."""
+    conn = open_db(tmp_path)
+    _revert_to_pre_expired_shape(conn)
+    eid = _entity(conn, "BootSubj", "product")
+    _insert(conn, pid="boot_row", kind="edge_review", entity_id=eid, status="proposed")
+    conn.close()
+
+    conn2 = open_db(tmp_path)  # migration runs inside init_db
+    table_sql = conn2.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()["sql"]
+    assert "'expired'" in table_sql
+    with conn2:
+        conn2.execute(
+            "UPDATE proposed_corrections SET status = 'expired', "
+            "decided_at = '2026-06-01T00:00:00+00:00' WHERE id = 'boot_row'"
+        )
+    assert (
+        conn2.execute("SELECT status FROM proposed_corrections WHERE id = 'boot_row'").fetchone()[
+            "status"
+        ]
+        == "expired"
+    )
+    conn2.close()
+
+    conn3 = open_db(tmp_path)  # idempotent second boot
+    assert migrate_proposed_corrections_status_check(conn3) is False
     conn3.close()
 
 

@@ -514,7 +514,14 @@ def decide_correction(
         return CorrectionOutcome(
             proposal_id=proposal_id, status="not_found", note=f"no proposal {proposal_id!r}"
         )
-    if row["status"] != "proposed":
+    # An OPEN proposal is decidable. So is an EXPIRED edge_review: the pending-TTL
+    # sweep (edge_scorer) retires the review SLOT to unclog the queue, but the
+    # edge stays served-with-caveat and NO verdict was recorded — so the operator
+    # can still decide it, routing to _decide_edge_review to write the real
+    # verdict. Every other non-proposed status is a real decision already made.
+    if row["status"] != "proposed" and not (
+        row["kind"] == "edge_review" and row["status"] == "expired"
+    ):
         return CorrectionOutcome(
             proposal_id=proposal_id,
             status="already_decided",

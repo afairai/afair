@@ -281,6 +281,36 @@ def test_pruner_ages_out_only_decided_edge_reviews(db, settings_local: Settings)
     )
 
 
+def test_pruner_keeps_expired_edge_reviews_past_retention(db, settings_local: Settings) -> None:
+    """Fix 2: an EXPIRED edge_review (pending-TTL sweep) is the durable
+    anti-re-propose guard (it has NO edge_reviews substrate row), so the Pruner
+    must keep it even past the retention window — while still deleting a genuinely
+    decided (confirmed/rejected/applied) edge_review of the same age."""
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+
+    e_exp = _pc_entity(db, "SubjExpired", "product")
+    e_dec = _pc_entity(db, "SubjDecided", "product")
+    _pc_insert(
+        db, pid="expired_old", kind="edge_review", entity_id=e_exp, status="expired", decided_at=old
+    )
+    _pc_insert(
+        db,
+        pid="rejected_old",
+        kind="edge_review",
+        entity_id=e_dec,
+        status="rejected",
+        decided_at=old,
+    )
+
+    stats = Pruner().run(db, settings_local)
+    assert stats["decided_edge_reviews_deleted"] == 1  # only the rejected row
+
+    remaining = {r["id"] for r in db.execute("SELECT id FROM proposed_corrections").fetchall()}
+    assert remaining == {"expired_old"}  # the expired guard survives
+
+
 # ── Conflict-Resolver ─────────────────────────────────────────────────────
 
 

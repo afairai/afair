@@ -133,14 +133,20 @@ class Pruner(ColdPathWorker):
 
         # Decided edge_review queue hygiene (P1-1). Only edge_review rows, only
         # decided ones, only past the retention window — never open proposals,
-        # never decided non-edge_review proposals (anti-re-nag memory).
+        # never decided non-edge_review proposals (anti-re-nag memory), and never
+        # EXPIRED rows: an expired edge_review (pending-TTL sweep) has NO
+        # edge_reviews substrate row, so its queue row IS the durable
+        # anti-re-propose guard (edge_scorer's NOT EXISTS ... status='expired').
+        # Deleting it would let the same low-confidence edge be re-proposed
+        # forever — the same keep-the-durable-guard reasoning that keeps decided
+        # retype/merge rows.
         er_cutoff = (
             datetime.now(UTC) - timedelta(days=DECIDED_EDGE_REVIEW_RETENTION_DAYS)
         ).isoformat()
         with conn:
             cursor = conn.execute(
                 "DELETE FROM proposed_corrections "
-                "WHERE kind = 'edge_review' AND status != 'proposed' "
+                "WHERE kind = 'edge_review' AND status NOT IN ('proposed', 'expired') "
                 "AND decided_at IS NOT NULL AND decided_at < ?",
                 (er_cutoff,),
             )

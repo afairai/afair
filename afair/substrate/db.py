@@ -31,6 +31,7 @@ from .schema import (
     VEC_DDL,
     migrate_proposed_corrections_kind_check,
     migrate_proposed_corrections_open_unique,
+    migrate_proposed_corrections_status_check,
 )
 
 if TYPE_CHECKING:
@@ -263,6 +264,12 @@ def init_db(
     # ADR-0004 edge-review calibration growth). Guarded + idempotent; runs AFTER
     # the kind-check widen (which may already rebuild to the final shape).
     migrate_proposed_corrections_open_unique(conn)
+    # Fix 2: widen the proposed_corrections.status CHECK on pre-existing vaults so
+    # the pending edge_review TTL can set status='expired'. Guarded + idempotent;
+    # a no-op on fresh vaults (SCHEMA_DDL ships the widened CHECK) and on
+    # already-migrated ones. Runs AFTER the two rebuilds above so it operates on
+    # the final kind-CHECK + partial-index shape.
+    migrate_proposed_corrections_status_check(conn)
     # Bootstrap the kind registry (ADR-0003 Phase 1). Idempotent — a
     # fresh vault gets the seven seeded, an existing vault gains the
     # registry on its next open, an already-seeded vault no-ops.
