@@ -10,6 +10,24 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.26](https://github.com/afairai/afair/compare/v0.1.25...v0.1.26) (2026-07-22)
+
+
+### Features
+
+* **syntheses:** steer re-synthesis away from operator-marked-wrong claims (ADR-0009 b3) ([eef0f3b](https://github.com/afairai/afair/commit/eef0f3b5e35e5a4aa066541cec428dc741d0f06b))
+
+
+### Bug Fixes
+
+* **audit:** resolve merged-away into-target through the full merge chain ([da9b019](https://github.com/afairai/afair/commit/da9b019af06b86a9d24b4cb074940563874ad19b))
+* **recall:** exclude conflicts from the nudge growth baseline ([0f5158e](https://github.com/afairai/afair/commit/0f5158e856237a993cbccb542e1cc810f1337667))
+
+
+### Documentation
+
+* **adr:** record ADR-0009 b3 shipped (steered re-synthesis) ([e437153](https://github.com/afairai/afair/commit/e43715320c70175a08cbad6ba6f6f689843b85e2))
+
 ## [0.1.25](https://github.com/afairai/afair/compare/v0.1.24...v0.1.25) (2026-07-21)
 
 
