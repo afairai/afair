@@ -86,6 +86,18 @@ the Mirror to annotate the matching served key point."""
 VERDICT_SUPPRESS = "suppress"
 VERDICT_RESTORE = "restore"
 
+# ── Flavor B-b3 re-synthesis steering bounds (ADR-0009 Addendum 2026-07) ───
+STEERING_MAX_CLAIMS = 12
+"""Cap on the number of operator-marked-wrong claims fed into one re-synthesis
+prompt. Bounds the fenced steering block so 12 claims x the char cap stays well
+under the synthesis ``max_tokens`` budget; newest decisions win under the cap."""
+
+STEERING_MAX_CLAIM_CHARS = 500
+"""Truncation cap for a suppressed key point's text inside the steering block."""
+
+STEERING_MAX_NOTE_CHARS = 300
+"""Truncation cap for the operator's free-text note inside the steering block."""
+
 
 # ── result models ─────────────────────────────────────────────────────────
 class CorrectEventResult(BaseModel):
@@ -583,6 +595,121 @@ def read_key_point_reviews(
                 resolved[digest] = {**entry, "matched_by": "exact"}
         if resolved:
             out[synthesis_hash] = resolved
+    return out
+
+
+def read_live_suppressions_for_steering(
+    conn: sqlite3.Connection,
+    *,
+    cluster_ids: list[str],
+    synthesis_hashes: list[str],
+    limit: int = STEERING_MAX_CLAIMS,
+) -> list[dict[str, Any]]:
+    """Gather the operator-marked-wrong key points to steer a re-synthesis (b3).
+
+    Sole owner of the key-point-review lane semantics (parity with
+    :func:`read_key_point_reviews`, so the write-time steering worker and the
+    read-time Memory Mirror never disagree about which claims are suppressed):
+
+      - **exact lane** — a review whose ``event_hash`` is in ``synthesis_hashes``
+        (the cluster's prior synthesis events).
+      - **cluster-fallback lane** — a review whose recorded ``cluster_id`` is in
+        ``cluster_ids`` (the candidate's cluster plus its ancestor clusters, so a
+        suppression survives a cluster merge/split).
+
+    Precedence: exact overrides cluster per ``point_digest`` (same rule as
+    :func:`read_key_point_reviews`). Latest-wins within each lane (highest
+    ``version``, newest ``produced_at``). Keeps only claims whose effective
+    verdict is ``suppress`` (a ``restore`` is the absence of a suppression).
+
+    Read-only over ``interpretations`` (I2: nothing mutated, no new table).
+    Returns at most ``limit`` claims, newest decision first (``decided_at``
+    DESC, ``point_digest`` ASC tie-break), each ``{point_text, note|None,
+    decided_at}`` with ``point_text`` truncated at :data:`STEERING_MAX_CLAIM_CHARS`
+    and ``note`` at :data:`STEERING_MAX_NOTE_CHARS`.
+    """
+    if not cluster_ids and not synthesis_hashes:
+        return []
+
+    hashes = sorted(set(synthesis_hashes))
+    clusters = sorted({c for c in cluster_ids if isinstance(c, str)})
+
+    # One query for both lanes (same shape as read_key_point_reviews): rows keyed
+    # to a prior synthesis hash OR carrying one of the candidate's cluster ids.
+    # Newest-first per lane so the first row seen per lane/digest is the latest.
+    where_parts: list[str] = []
+    params: list[Any] = [KEY_POINT_REVIEW_PRODUCED_BY_PREFIX]
+    if hashes:
+        hash_ph = ",".join("?" * len(hashes))
+        where_parts.append(f"event_hash IN ({hash_ph})")
+        params.extend(hashes)
+    if clusters:
+        cluster_ph = ",".join("?" * len(clusters))
+        where_parts.append(f"json_extract(extraction, '$.cluster_id') IN ({cluster_ph})")
+        params.extend(clusters)
+    rows = conn.execute(
+        f"""
+        SELECT event_hash, extraction
+        FROM interpretations
+        WHERE produced_by LIKE ? || ':%'
+          AND ({" OR ".join(where_parts)})
+        ORDER BY produced_by, version DESC, produced_at DESC
+        """,
+        params,
+    ).fetchall()
+
+    # Collapse to the latest verdict per exact (event_hash, digest) lane and per
+    # (cluster_id, digest) lane separately (newest-first ORDER BY → first wins).
+    hash_set = set(hashes)
+    cluster_set = set(clusters)
+    exact: dict[str, dict[str, Any]] = {}
+    by_cluster: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        extraction = json.loads(row["extraction"])
+        digest = extraction.get("point_digest")
+        if not isinstance(digest, str):
+            continue
+        entry = {
+            "verdict": extraction.get("verdict"),
+            "point_text": extraction.get("point_text"),
+            "note": extraction.get("note"),
+            "decided_at": extraction.get("decided_at"),
+        }
+        if row["event_hash"] in hash_set and digest not in exact:
+            exact[digest] = entry
+        row_cluster = extraction.get("cluster_id")
+        if isinstance(row_cluster, str) and row_cluster in cluster_set and digest not in by_cluster:
+            by_cluster[digest] = entry
+
+    # Exact overrides cluster per digest (parity with read_key_point_reviews).
+    resolved: dict[str, dict[str, Any]] = {**by_cluster, **exact}
+
+    suppressed = [
+        entry
+        for digest, entry in resolved.items()
+        if entry.get("verdict") == VERDICT_SUPPRESS
+        and isinstance(entry.get("point_text"), str)
+        and entry["point_text"].strip()
+    ]
+    # Deterministic order: decided_at DESC (newest decisions matter most under
+    # the cap), point_digest ASC as the tie-break. Two stable passes give the
+    # mixed direction: sort by digest ASC first, then by decided_at DESC — the
+    # stable second pass preserves the digest order within equal decided_at.
+    suppressed.sort(key=lambda e: point_digest(str(e["point_text"])))
+    suppressed.sort(key=lambda e: e.get("decided_at") or "", reverse=True)
+
+    out: list[dict[str, Any]] = []
+    for entry in suppressed[:limit]:
+        point_text = str(entry["point_text"])[:STEERING_MAX_CLAIM_CHARS]
+        note_value = entry.get("note")
+        note = str(note_value)[:STEERING_MAX_NOTE_CHARS] if isinstance(note_value, str) else None
+        out.append(
+            {
+                "point_text": point_text,
+                "note": note,
+                "decided_at": entry.get("decided_at"),
+            }
+        )
     return out
 
 

@@ -837,3 +837,207 @@ def test_correction_event_is_eligible_but_invalidated_target_is_not(vault_dir: P
     # The correction event IS eligible — it participates in clustering like any
     # other remember event (entity/semantic path after extraction).
     assert result.correction_content_hash in eligible
+
+
+# ── Flavor B-b3: gather operator-marked-wrong claims for re-synthesis steering ──
+def test_steering_gather_suppress_only_filter(vault_dir: Path) -> None:
+    """Only claims whose effective verdict is ``suppress`` are gathered; a
+    restore (absence of a suppression) yields nothing."""
+    from afair.substrate.content_corrections import (
+        read_live_suppressions_for_steering,
+        review_key_point,
+    )
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note="Wrong claim.",
+        )
+        steering = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s1_hash]
+        )
+        assert [s["point_text"] for s in steering] == [kp]
+        assert steering[0]["note"] == "Wrong claim."
+
+        # Restore removes it from the next gather (absence, not a row of its own).
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="restore",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        steering = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s1_hash]
+        )
+        assert steering == []
+    finally:
+        conn.close()
+
+
+def test_steering_gather_latest_wins(vault_dir: Path) -> None:
+    """suppress → restore → suppress collapses to the latest (suppress) verdict."""
+    from afair.substrate.content_corrections import (
+        read_live_suppressions_for_steering,
+        review_key_point,
+    )
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)
+    conn = open_db(vault_dir)
+    try:
+        for verdict in ("suppress", "restore", "suppress"):
+            review_key_point(
+                conn,
+                synthesis_hash=s1_hash,
+                point_text=kp,
+                verdict=verdict,
+                cluster_id="cluster:atlas",
+                note=None,
+            )
+        steering = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s1_hash]
+        )
+        assert [s["point_text"] for s in steering] == [kp]
+    finally:
+        conn.close()
+
+
+def test_steering_gather_ancestor_cluster_inclusion(vault_dir: Path) -> None:
+    """A suppression recorded under an ANCESTOR cluster is gathered when the
+    ancestor id is passed (suppression survives a cluster merge/split)."""
+    from afair.substrate.content_corrections import (
+        read_live_suppressions_for_steering,
+        review_key_point,
+    )
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)  # cluster:atlas
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        # The candidate now has a NEW cluster id but names cluster:atlas as an
+        # ancestor — passing the ancestor id in cluster_ids surfaces it.
+        steering = read_live_suppressions_for_steering(
+            conn,
+            cluster_ids=["cluster:merged", "cluster:atlas"],
+            synthesis_hashes=[],
+        )
+        assert [s["point_text"] for s in steering] == [kp]
+        # Without the ancestor, nothing matches.
+        empty = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:merged"], synthesis_hashes=[]
+        )
+        assert empty == []
+    finally:
+        conn.close()
+
+
+def test_steering_gather_empty_when_no_ids(vault_dir: Path) -> None:
+    """No cluster ids and no synthesis hashes → empty list, no query."""
+    from afair.substrate.content_corrections import read_live_suppressions_for_steering
+
+    conn = open_db(vault_dir)
+    try:
+        assert read_live_suppressions_for_steering(conn, cluster_ids=[], synthesis_hashes=[]) == []
+    finally:
+        conn.close()
+
+
+def test_steering_gather_exact_overrides_cluster(vault_dir: Path) -> None:
+    """An explicit restore on the exact synthesis overrides a carried-forward
+    cluster suppression for the same digest (exact lane wins) — so the claim is
+    NOT steered against on the re-derived synthesis."""
+    from afair.substrate.content_corrections import (
+        read_live_suppressions_for_steering,
+        review_key_point,
+    )
+
+    s1_hash, _source, kp = _seed_synthesis(vault_dir)
+    s2_hash = _seed_second_synthesis(vault_dir, cluster_id="cluster:atlas", point_text=kp)
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=kp,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        # Explicit restore ON s2 overrides the cluster carry for its digest.
+        review_key_point(
+            conn,
+            synthesis_hash=s2_hash,
+            point_text=kp,
+            verdict="restore",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        # Gathering for s2 (exact hash) + the cluster: exact restore wins.
+        steering = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s2_hash]
+        )
+        assert steering == []
+    finally:
+        conn.close()
+
+
+def test_steering_gather_bounded_and_truncated(vault_dir: Path) -> None:
+    """More than STEERING_MAX_CLAIMS distinct suppressions → exactly the cap,
+    newest-first, deterministic across runs; an oversize point_text truncates."""
+    from afair.substrate.content_corrections import (
+        STEERING_MAX_CLAIM_CHARS,
+        STEERING_MAX_CLAIMS,
+        read_live_suppressions_for_steering,
+        review_key_point,
+    )
+
+    s1_hash, _source, _kp = _seed_synthesis(vault_dir)
+    conn = open_db(vault_dir)
+    try:
+        n = STEERING_MAX_CLAIMS + 3
+        for index in range(n):
+            review_key_point(
+                conn,
+                synthesis_hash=s1_hash,
+                point_text=f"claim number {index:03d}",
+                verdict="suppress",
+                cluster_id="cluster:atlas",
+                note=None,
+            )
+        # An oversize claim, decided last (so it sorts first under decided_at DESC).
+        big = "x" * (STEERING_MAX_CLAIM_CHARS + 200)
+        review_key_point(
+            conn,
+            synthesis_hash=s1_hash,
+            point_text=big,
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        run1 = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s1_hash]
+        )
+        run2 = read_live_suppressions_for_steering(
+            conn, cluster_ids=["cluster:atlas"], synthesis_hashes=[s1_hash]
+        )
+        assert len(run1) == STEERING_MAX_CLAIMS
+        # Deterministic across two identical runs.
+        assert run1 == run2
+        # The oversize claim is truncated at the char cap.
+        assert len(run1[0]["point_text"]) == STEERING_MAX_CLAIM_CHARS
+    finally:
+        conn.close()
