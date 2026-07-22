@@ -612,6 +612,60 @@ def test_nudge_returns_after_growth_and_cooldown(
     assert "afair.recall(decide=" in payload["instructions"]  # returned
 
 
+def test_resolving_a_conflict_does_not_inflate_the_nudge_baseline(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nudge growth baseline tracks ONLY the non-conflict high-value total.
+
+    A conflict bypasses the growth gate unconditionally, so it must not be folded
+    into the stored baseline: otherwise resolving the conflict deflates the count
+    and a later legitimate +NUDGE_MIN_NEW non-conflict growth is wrongly
+    suppressed. Here the nudge first fires via the conflict bypass (recording the
+    marker), the conflict is resolved, and a later +3 non-conflict growth must
+    still nudge."""
+    from afair.substrate import (
+        decide_conflict_proposal,
+        read_pending_conflict_proposals,
+        watermarks,
+    )
+
+    # A conflict + 3 non-conflict high-value items. The nudge fires via the
+    # conflict bypass and records the marker.
+    for n in ("alpha.team", "beta.team", "gamma.team"):
+        _seed_retype(db, settings, name=n)
+    _seed_conflict(db)
+    first = resources.build_session_start_payload(db)
+    assert "a memory conflict needs your call" in first["instructions"].lower()
+
+    # The marker stored the NON-CONFLICT baseline (3), not the combined total (4).
+    # read_watermark returns (through_created_at, through_id); the stored total
+    # rides in through_id.
+    wm = watermarks.read_watermark(db, resources._PENDING_NUDGE_MARKER)
+    assert wm is not None
+    assert wm[1] == "3"
+
+    # Resolve the conflict — the conflict count drops to 0, the baseline is
+    # unchanged (still 3, conflict-free).
+    proposals = read_pending_conflict_proposals(db, limit=10)
+    assert len(proposals) == 1
+    decide_conflict_proposal(db, proposal_id=proposals[0].id, verdict="confirm")
+
+    # Back-date the marker past the cooldown, then grow the non-conflict queue by
+    # NUDGE_MIN_NEW (3 more retypes → non-conflict total 6). Growth is measured
+    # against the conflict-free baseline of 3, so 6 - 3 = 3 >= NUDGE_MIN_NEW fires.
+    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    with db:
+        db.execute(
+            "UPDATE worker_watermarks SET through_created_at = ? WHERE worker = ?",
+            (old, resources._PENDING_NUDGE_MARKER),
+        )
+    for n in ("delta.team", "epsilon.team", "zeta.team"):
+        _seed_retype(db, settings, name=n)
+    resources.clear_cache()
+    payload = resources.build_session_start_payload(db)
+    assert "afair.recall(decide=" in payload["instructions"]  # legitimate nudge fired
+
+
 def test_pending_corrections_count_stays_true_total(
     db: sqlite3.Connection, settings: Settings
 ) -> None:

@@ -207,11 +207,17 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         _by_kind.get("retype", 0) + _by_kind.get("merge", 0) + _by_kind.get("merge_review", 0)
     )
     ontology_total = count_pending_ontology_proposals(conn)
-    high_value_total = conflicts_pending_total + high_value_audit_total + ontology_total
+    # The growth baseline tracks ONLY the non-conflict high-value total (entity
+    # retype/merge + ontology). Conflicts bypass the growth gate unconditionally,
+    # so folding them into the stored baseline would let a resolved conflict
+    # deflate the count and wrongly suppress a later legitimate non-conflict
+    # nudge. Keep the two separate: conflicts gate on their own presence, the
+    # rest gates on non-conflict growth.
+    non_conflict_high_value_total = high_value_audit_total + ontology_total
     show_nudge = _nudge_should_show(
         conn,
         conflicts_pending=conflicts_pending_total,
-        high_value_total=high_value_total,
+        non_conflict_high_value_total=non_conflict_high_value_total,
     )
 
     instructions = (
@@ -272,8 +278,11 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         )
 
     # Record the acknowledgment when the nudge was shown (rate-limit auto-ack).
+    # The marker stores the NON-CONFLICT high-value total so the next growth
+    # comparison is against a conflict-free baseline (resolving a conflict must
+    # not move the baseline).
     if show_nudge and (conflict_pending or high_value_audit or ontology_pending):
-        _write_nudge_marker(conn, high_value_total=high_value_total)
+        _write_nudge_marker(conn, high_value_total=non_conflict_high_value_total)
 
     return {
         "mode": mode,
@@ -397,19 +406,22 @@ def _write_nudge_marker(conn: sqlite3.Connection, *, high_value_total: int) -> N
 
 
 def _nudge_should_show(
-    conn: sqlite3.Connection, *, conflicts_pending: int, high_value_total: int
+    conn: sqlite3.Connection, *, conflicts_pending: int, non_conflict_high_value_total: int
 ) -> bool:
     """Decide whether the nudge SENTENCE fires this session (Fix 3 rate-limit).
 
     Fires when EITHER a conflict is pending (always — a memory conflict needs the
-    operator's call, and bypasses both gates) OR the high-value queue has grown by
-    at least ``NUDGE_MIN_NEW`` since the last shown nudge AND at least
-    ``NUDGE_COOLDOWN_DAYS`` have passed. ``high_value_total`` deliberately EXCLUDES
-    edge_reviews — those never nudge."""
+    operator's call, and bypasses both gates) OR the non-conflict high-value queue
+    (entity retype/merge + ontology) has grown by at least ``NUDGE_MIN_NEW`` since
+    the last shown nudge AND at least ``NUDGE_COOLDOWN_DAYS`` have passed. The
+    growth baseline deliberately EXCLUDES conflicts (they gate on their own
+    presence, so folding them in would let a resolved conflict deflate the
+    baseline and suppress a later legitimate nudge) and edge_reviews (those never
+    nudge)."""
     if conflicts_pending > 0:
         return True
     last_shown_iso, last_total = _read_nudge_marker(conn)
-    if high_value_total - last_total < NUDGE_MIN_NEW:
+    if non_conflict_high_value_total - last_total < NUDGE_MIN_NEW:
         return False
     if last_shown_iso is None:
         return True  # never shown, and the growth gate above already passed
