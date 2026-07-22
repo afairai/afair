@@ -384,6 +384,68 @@ def test_semantic_key_absorbs_pending_twin_before_decide(
     )
 
 
+def test_semantic_key_suppresses_across_multi_hop_into_chain(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The stored proposal's into-target is resolved through the FULL merge chain.
+
+    Cycle 1 files a merge_review for person-Fable -> product-Fable(A); the
+    operator decides it. Product-Fable(A) is then merged A->B->C (a 3-hop chain
+    among products, same-kind so no new cross-kind review). A fresh person-Fable
+    is auto-merged into the TERMINAL C. The new proposal resolves its into-target
+    to C; the stored row's into-target (A) must resolve A->B->C to C too, so the
+    IDENTICAL question is suppressed. A one-hop resolution would find B, miss C,
+    and leave one extra nag."""
+    from2, into_a = _auto_merge_across_kinds(
+        db, "Fable", "person", "product", by="entity_deduplicator:v0"
+    )
+    stats1 = EntityAuditWorker().run(db, settings)
+    assert stats1["merge_review_proposals"] == 1
+    db.execute(
+        "UPDATE proposed_corrections SET status = 'rejected', "
+        "decided_at = '2026-01-01T00:00:00+00:00' WHERE entity_id = ?",
+        (from2,),
+    )
+    db.commit()
+
+    # Multi-hop chain of the into-target among products: A -> B -> C.
+    into_b = _entity(db, "FableProductB", "product")
+    into_c = _entity(db, "FableProductC", "product")
+    write_entity_merge(
+        db,
+        from_entity_id=into_a,
+        into_entity_id=into_b,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    write_entity_merge(
+        db,
+        from_entity_id=into_b,
+        into_entity_id=into_c,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+
+    # A fresh person-Fable auto-merged into the TERMINAL C (cross-kind).
+    from3 = _entity(db, "Fable", "person", split_homonym=True)
+    write_entity_merge(
+        db,
+        from_entity_id=from3,
+        into_entity_id=into_c,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+
+    stats2 = EntityAuditWorker().run(db, settings)
+    # The same question (person Fable -> the Fable product, now C) is suppressed
+    # via the full-chain resolution of the stored into-target A.
+    assert stats2["merge_review_proposals"] == 0
+    assert stats2["merge_review_deduped_semantic"] >= 1
+
+
 def test_semantic_key_does_not_suppress_distinct_target(
     db: sqlite3.Connection, settings: Settings
 ) -> None:

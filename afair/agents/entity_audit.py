@@ -277,34 +277,43 @@ def _semantic_merge_review_exists(
     The semantic key is the QUESTION, not the merge instance:
     ``(lower(from_name), from_kind, resolved into_entity_id)``. Comparing the
     RESOLVED canonical of the into-target absorbs pre-fix rows whose stored
-    ``into_entity_id`` was itself later merged away; ``lower(into_name)`` is the
-    documented fallback for such rows if the resolved ids still differ. Any prior
-    row for the same question — proposed, confirmed, or rejected — suppresses the
-    re-nag. It never suppresses a genuinely-new question: a different into-target
-    or a different from-kind both fall through to a fresh proposal.
+    ``into_entity_id`` was itself later merged away. The stored into-target is
+    resolved through the FULL merge chain (:func:`resolve_canonical`), not a
+    single hop: a multi-hop chain (the stored target was merged A->B->C) would
+    otherwise leave one extra nag, because a one-hop lookup finds B while the new
+    proposal resolves to the terminal C. Any prior row for the same question —
+    proposed, confirmed, or rejected — suppresses the re-nag. It never suppresses
+    a genuinely-new question: a different into-target or a different from-kind
+    both fall through to a fresh proposal. Fail-safe: an unresolvable stored
+    target simply does not match, so at worst the operator sees one extra nag —
+    never an over-suppression.
     """
     from ..substrate.entities import resolve_canonical
 
     resolved_into = resolve_canonical(conn, into_entity_id)
-    row = conn.execute(
+    # Filter cheaply on the stable part of the question (from_name, from_kind),
+    # then resolve each candidate's STORED into-target through the full merge
+    # chain in Python. SQL cannot call the transitive resolver, and a one-hop
+    # entity_merges subquery under-suppresses on a multi-hop chain.
+    rows = conn.execute(
         """
-        SELECT 1 FROM proposed_corrections pc
+        SELECT json_extract(pc.detail, '$.into_entity_id') AS stored_into
+        FROM proposed_corrections pc
         WHERE pc.kind = 'merge_review'
           AND lower(json_extract(pc.detail, '$.from_name')) = lower(?)
           AND json_extract(pc.detail, '$.from_kind') = ?
-          AND (
-              json_extract(pc.detail, '$.into_entity_id') = ?
-              OR ? IN (
-                  SELECT em.into_entity_id FROM entity_merges em
-                  WHERE em.from_entity_id
-                        = json_extract(pc.detail, '$.into_entity_id')
-              )
-          )
-        LIMIT 1
         """,
-        (from_name, from_kind, resolved_into, resolved_into),
-    ).fetchone()
-    return row is not None
+        (from_name, from_kind),
+    ).fetchall()
+    for row in rows:
+        stored_into = row["stored_into"]
+        if not isinstance(stored_into, str):
+            continue
+        if stored_into == resolved_into:
+            return True
+        if resolve_canonical(conn, stored_into) == resolved_into:
+            return True
+    return False
 
 
 class EntityAuditWorker(ColdPathWorker):
