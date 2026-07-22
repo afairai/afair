@@ -94,3 +94,7 @@ requirements.audit.txt
 
 # Codex/other-harness vendored skills (mirror of the gitignored .claude/skills/)
 .agents/skills/
+
+# Stray local design screenshots (never commit to the public repo)
+mm-desktop.png
+*-desktop.png
