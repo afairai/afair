@@ -59,7 +59,7 @@ dependencies = [
     # to the image-vision path automatically because their text extract
     # comes back empty and the page-renders are sent to a vision model.
     "pypdf>=6.14.2",
-    "sentry-sdk[fastapi,starlette]>=2.63.0",
+    "sentry-sdk[fastapi,starlette]>=2.64.0",
 ]
 
 [project.scripts]
