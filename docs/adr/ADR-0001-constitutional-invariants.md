@@ -39,7 +39,9 @@ so the reasons can be re-examined without re-deriving them.
 | **I5** Vendor neutrality | Single-provider risk (price, deprecation, ToS). The system must run on Claude, GPT, Gemini, Mistral, or local models. |
 | **I6** Emergent over imposed | Rigid PKM schemas (notes/tasks/contacts straitjacket). No fixed ontology ships; categories emerge, merge, split, die from usage. |
 | **I7** Recursive self-modification with rollback | Black-box drift in a self-improving system. Every change is recorded and reversible; I1–I6 are an exempt kernel it cannot optimize away. |
-| **I8** Single-tenant by design | The entire class of cross-tenant data leaks — which cannot exist when nothing is shared. One machine per user. |
+| **I8** Single-tenant by design | The entire class of cross-tenant data leaks, which cannot exist when nothing is shared. One machine per principal. |
+
+> I8 wording generalized by [ADR-0010](ADR-0010-principal-generalization.md): the single tenant is a principal, a person or a single organization; the negated failure mode and the economic bet are unchanged.
 
 Each is a deliberate "not like everyone else," encoded as architecture rather
 than left as a value statement.
@@ -109,8 +111,8 @@ These are not flaws. They are deliberate bets where the cost lands later. They
 are recorded so a future reader weighs them with eyes open.
 
 1. **I8 unit economics — the biggest bet, and it is economic, not technical.**
-   One machine per user is isolation-perfect but, at 10k users, is 10k
-   machines. I8 + I4 structurally foreclose cheap multi-tenant SaaS economics.
+   One machine per principal is isolation-perfect but, at 10k principals, is
+   10k machines. I8 + I4 structurally foreclose cheap multi-tenant SaaS economics.
    Fly scale-to-zero (`auto_stop_machines`) blunts the cost, but this is the
    invariant most likely to force a hard conversation at scale. We accept it:
    the wager is that isolation and sovereignty are worth more to this product

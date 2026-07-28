@@ -113,6 +113,11 @@ shipped (v0.1.10 to v0.1.17, all live on the fleet):
   optional advisory `asserted_by: "user" | "model"` field that records who
   asserted a fact but by construction can never raise trust
   (operator-grade trust still comes only from `recall(decide=)`).
+- **Principal generalization (ADR-0010, 2026-07-28).** The constitution now
+  reads principal (a person or a single organization) where it read user:
+  I8 reworded not weakened, `principal_kind`/`principal_name` settings plus
+  prompt/surface framing with a person byte-identity guard, and the advisory
+  in-payload `actor` field for shared-credential attribution.
 
 **Current focus: Personal design partners.** The living-synthesis worker,
 end-to-end memory-quality gate, read-only Memory Mirror, and direct-to-vault
@@ -225,6 +230,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `docs/adr/ADR-0007-emergent-living-syntheses.md` | Replaces the entity-only topic axis with deterministic automatic clustering over entity recurrence, strong semantic links, and explicit lineage. The model labels and summarizes selected evidence but cannot choose a fixed category or add sources. Stable cluster identity, split/merge ancestry, citations, append-only supersession, hub suppression, and bounded cycles preserve I2/I3/I6/I7. Legacy entity articles remain readable but are no longer scheduled | When cluster discovery, lineage, synthesis, or serving behavior changes |
 | `docs/adr/ADR-0008-operator-conflict-resolution.md` | Makes conflict flags decidable: unresolved `conflict_flag`s become proposals in the non-substrate `proposed_conflict_resolutions` queue (enqueued by the resolver + a bounded backfill over historical flags), decided ONLY through `decide_correction` via `cfl_` prefix dispatch (the ADR-0003 `ont_` precedent), reachable from both `recall(decide=)` and the dashboard decide route. Three operator intents (keep newer / not a conflict / keep older) map onto the frozen confirm/reject/retract enum via directional framing, no wire change; resolution is append-only (resolution interpretation + `invalidate` event + observe; sources and flags never mutated, I2); resolved flags are served WITH their resolution (ADR-0004 posture) but excluded from unresolved counts | When the conflict-resolution loop or its serving changes |
 | `docs/adr/ADR-0009-operator-content-correction.md` | Closes the Mirror's last dead end: a fact that is simply wrong (no counter-event, no worker proposal). A distinct operator-initiated route `POST /internal/correct`, deliberately NOT routed through `decide_correction` (operator-asserts, not AI-proposes; a synthetic proposal would invert ADR-0002 and pollute the pending views), composing `write_invalidation` + `write_event_with_status` with observe/`corrected_by` provenance, reversible by construction. Flavor A source-wrong: invalidate + optional parent-linked correction remember, syntheses re-derive without it within the 6h cycle. Flavor B synthesis-wrong, honest core: re-derivation from unchanged sources can REPRODUCE the error, so blind re-synthesis is not a fix; MVP = b2 suppress-a-key-point (append-only `key_point_review:v1:<digest>` interpretation, latest-wins, served WITH a marker not dropped, restore = later row) + b1 reject-the-synthesis (with the may-repeat caveat); b3 prompt steering SHIPPED (Addendum 2026-07): the synthesis worker reads live suppressions and tells the model not to restate them, injection-safe (every variable byte fenced in `wrap_untrusted`, only static repo bytes are instructions), bounded (<=12 claims), gather in `content_corrections.read_live_suppressions_for_steering` imported function-scoped to break the import cycle. Supersession never deletes bytes (the ADR-0001 erasure boundary); only deletion is the regenerable `events_fts` index row | When the correction route, suppression overlay, or their serving changes |
+| `docs/adr/ADR-0010-principal-generalization.md` | Generalizes the vault owner from a person to a principal (a person or a single organization): the I8 wording amendment, `principal_kind`/`principal_name` settings, prompt + MCP-surface framing parametrization guarded by person byte-identity snapshots (prose only, never schema), and the advisory in-payload in-hash `actor` field for shared-credential attribution (four provenance axes: `origin`/`client`/`asserted_by`/`actor`). v1 access stays attribution, not isolation; ACLs/namespaces need their own ADR | When the principal model, framing sites, or actor semantics change |
 | `CLAUDE.md` (this file) | Project-specific working rules + current state + phase status | After each merge that changes state |
 | `README.md` | Public-facing setup + orientation; the two-paths (self-host vs hosted afair.ai) front door | When setup steps change |
 | `LICENSE` | AGPLv3: the open-source core license (see VISION §12) | Only on a license change |
@@ -273,7 +279,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 - **I5**: No code path privileges one AI provider. litellm wrapper, env-driven model selection.
 - **I6**: No fixed ontology. Extractor uses context cues, not a hardcoded enum of types.
 - **I7**: Self-modification is recorded and reversible. I1 to I6 are exempt from self-modification.
-- **I8**: Single-tenant. No shared DB, no shared app server. Per-user dedicated Fly machine in managed.
+- **I8**: Single-tenant. Every instance belongs to exactly one principal (a person or a single organization). No shared DB, no shared app server. Per-principal dedicated Fly machine in managed.
 
 ## 6. Path-scoped rules
 

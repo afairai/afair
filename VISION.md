@@ -23,7 +23,7 @@ The product model is not SaaS. It is software anyone can self-host, with an opti
 Four non-negotiable principles:
 
 1. **User owns the substrate.** Self-hosting is first-class, not a fallback.
-2. **Single-tenant always.** Every instance belongs to exactly one user. Managed hosting is "managed self-hosting," not SaaS.
+2. **Single-tenant always.** Every instance belongs to exactly one principal (a person or a single organization). Managed hosting is "managed self-hosting," not SaaS.
 3. **Cross-vendor by default.** Claude, GPT, Gemini, Mistral, local models: equal citizens. If it only works with one provider, it has failed.
 4. **Schema is emergent.** Minimal bootstrap scaffold; everything else grows from interaction.
 
@@ -34,7 +34,7 @@ Four non-negotiable principles:
 Several converging conditions make this the right moment.
 
 - **MCP has become the universal protocol.** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/mcp), [Cursor](https://docs.cursor.com/context/mcp), Copilot, Windsurf, Cline: all speak MCP. The cross-vendor surface exists for the first time; a single server reaches everything.
-- **Per-user dedicated infrastructure is economically feasible.** Small virtual machines, durable volumes, encrypted SQLite, and automated snapshots make one isolated instance per user practical at consumer prices. A shared control plane can operate the fleet without holding any user substrate.
+- **Per-principal dedicated infrastructure is economically feasible.** Small virtual machines, durable volumes, encrypted SQLite, and automated snapshots make one isolated instance per principal practical at consumer prices. A shared control plane can operate the fleet without holding any user substrate.
 - **Model-native memory makes ownership more urgent.** Memory stored inside an application or trained into model weights can be fast and deeply integrated, but it is difficult to inspect, move, or correct. Better native memory increases the value of a portable substrate instead of removing it.
 - **EU regulatory tailwind.** GDPR's right-to-be-forgotten and the AI Act (fully applicable August 2026, 10-year audit-trail requirement for high-risk systems) create a structural advantage for EU-native, user-owned architectures. Per-user dedicated instances make compliance physically obvious rather than legally complex.
 - **The technical problem remains open.** Long-term memory still has to resolve identity across sessions, replace stale high-confidence beliefs, control the noise floor, preserve evidence, and know when it lacks enough support to answer.
@@ -69,7 +69,7 @@ No fixed ontology of memory types ships with the system. A minimal bootstrap sca
 The system may revise its own extraction rules, retrieval strategies, and agent compositions at runtime. Every modification is recorded in the substrate. Every modification is reversible. Invariants I1-I6 are exempt, they are the irreducible kernel.
 
 ### I8. Single-Tenant by Design
-Every deployed instance, self-hosted or managed, belongs to exactly one user. No shared database, no shared application server, no row-level user separation. The hosted offering provisions a dedicated machine per paying user. Multi-tenancy is forbidden architecturally, not just practically. The orchestration layer that manages billing and provisioning may be shared; user data and application state never are.
+Every deployed instance, self-hosted or managed, belongs to exactly one principal: a person or a single organization. No shared database, no shared application server, no row-level principal separation. The hosted offering provisions a dedicated machine per paying principal. Multi-tenancy is forbidden architecturally, not just practically: one instance never serves two principals. An organization's instance is one tenant with many writers, its members and agents, which is an attribution concern, never an isolation boundary. The orchestration layer that manages billing and provisioning may be shared; principal data and application state never are.
 
 > **Why these eight, and where their real risks are:** the reasoning behind the invariants, each as the negation of a specific failure mode, how they reinforce one another, and the accepted long-term bets they carry, is recorded in [ADR-0001](docs/adr/ADR-0001-constitutional-invariants.md). This text stays authoritative; the ADR explains it.
 
@@ -386,7 +386,7 @@ What this is explicitly not.
 - **Not vector-only retrieval.** Vector similarity is necessary but radically insufficient. Hybrid (semantic + keyword + entity + graph) from the start.
 - **Not a fixed schema as default.** Bootstrap scaffold yes; permanent ontology no. A fixed schema fails Invariant I6.
 - **Not a memory framework "for developers."** Developers are the first users because they have the tool stack. The product is for users.
-- **Not economically dependent on multi-tenancy.** Pricing, infrastructure, and growth choices must preserve one isolated instance per user. A business model that requires abandoning Invariant I8 is the wrong business model.
+- **Not economically dependent on multi-tenancy.** Pricing, infrastructure, and growth choices must preserve one isolated instance per principal. A business model that requires abandoning Invariant I8 is the wrong business model.
 
 ---
 
