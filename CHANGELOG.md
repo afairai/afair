@@ -10,6 +10,26 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.27](https://github.com/afairai/afair/compare/v0.1.26...v0.1.27) (2026-07-28)
+
+
+### Features
+
+* **mcp:** actor attribution on remember and observe (ADR-0010) ([2e7ddae](https://github.com/afairai/afair/commit/2e7ddaecaec930e1b77e155dbf8b6506d4b7a19a))
+* **principal:** settings + prompt framing for person or organization vaults ([fc049e7](https://github.com/afairai/afair/commit/fc049e7aee597bb38844eca89f8a0a680f19591f))
+
+
+### Bug Fixes
+
+* **principal:** org wire-contract tripwire + review nits ([ae93d61](https://github.com/afairai/afair/commit/ae93d6143b9ad46a75ef6fb517d67ccc7322145a))
+* **settings:** bind AFAIR_PRINCIPAL_KIND/NAME env vars via AliasChoices ([af745bd](https://github.com/afairai/afair/commit/af745bdcbc1cc402a0cc2855bcdb3168f66b394c))
+
+
+### Documentation
+
+* **adr:** ADR-0010 principal generalization + I8 constitutional amendment ([c01434a](https://github.com/afairai/afair/commit/c01434a744de6cfb73507bb7d5775c751cd731f8))
+* principal env vars + shared-agent client note ([88db244](https://github.com/afairai/afair/commit/88db2447133ce49074d4bff1e5d9bc528632caf6))
+
 ## [0.1.26](https://github.com/afairai/afair/compare/v0.1.25...v0.1.26) (2026-07-22)
 
 
