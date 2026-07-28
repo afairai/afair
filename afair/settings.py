@@ -65,12 +65,30 @@ class Settings(BaseSettings):
     # into system prompts). This is NOT multi-tenancy: one instance still serves
     # one principal; an org's many members/agents are an attribution concern
     # (see the ``actor`` field on remember/observe), never an isolation boundary.
-    principal_kind: Literal["person", "organization"] = "person"
+    # Bind the documented ``AFAIR_PRINCIPAL_KIND`` env var explicitly, matching
+    # how every other AFAIR_-prefixed setting binds (AliasChoices). Without this
+    # only the bare ``PRINCIPAL_KIND`` bound, so the documented env var silently
+    # did nothing and an org vault would boot in person mode.
+    principal_kind: Literal["person", "organization"] = Field(
+        default="person",
+        validation_alias=AliasChoices(
+            "principal_kind",
+            "AFAIR_PRINCIPAL_KIND",
+            "afair_principal_kind",
+        ),
+    )
     # Display name of the organization when ``principal_kind="organization"``.
     # Ignored (may be blank) for a person principal. Interpolated into system
     # prompts, so it is sanitized (strip + collapse control chars/newlines,
     # capped) at boot; a blank-after-sanitize org name fails to start.
-    principal_name: str = ""
+    principal_name: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "principal_name",
+            "AFAIR_PRINCIPAL_NAME",
+            "afair_principal_name",
+        ),
+    )
 
     # ── Substrate
     vault_dir: Path = Field(

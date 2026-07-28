@@ -340,11 +340,22 @@ def test_invalid_principal_kind_rejected() -> None:
         Settings(_env_file=None, principal_kind="team")  # type: ignore[call-arg]
 
 
-def test_afair_prefixed_principal_env_binds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """case_sensitive=False auto-binds the AFAIR_* env vars (no AliasChoices
-    needed for these two)."""
+def test_bare_principal_env_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bare ``PRINCIPAL_KIND`` / ``PRINCIPAL_NAME`` names bind (case-insensitive)."""
     monkeypatch.setenv("PRINCIPAL_KIND", "organization")
     monkeypatch.setenv("PRINCIPAL_NAME", "Globex")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.principal_kind == "organization"
     assert s.principal_name == "Globex"
+
+
+def test_afair_prefixed_principal_env_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DOCUMENTED ``AFAIR_PRINCIPAL_KIND`` / ``AFAIR_PRINCIPAL_NAME`` env vars
+    bind via AliasChoices, exactly like AFAIR_VAULT_KEY / AFAIR_AUTH_TOKEN. Without
+    the alias only the bare name bound, so the documented var silently did nothing
+    and an org vault booted in person mode. Regression guard for that."""
+    monkeypatch.setenv("AFAIR_PRINCIPAL_KIND", "organization")
+    monkeypatch.setenv("AFAIR_PRINCIPAL_NAME", "Acme Corp")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.principal_kind == "organization"
+    assert s.principal_name == "Acme Corp"
