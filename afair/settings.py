@@ -17,6 +17,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # the AES-256 / SQLCipher key the salt-less HKDF derives from it.
 _MIN_VAULT_KEY_BYTES = 32
 
+# Cap for the organization display name (ADR-0010). It is interpolated into
+# LLM system prompts, so it is kept short and control-char-free.
+_MAX_PRINCIPAL_NAME_CHARS = 120
+
+
+def _sanitize_principal_name(raw: str) -> str:
+    """Collapse control chars/newlines to single spaces, strip, and cap.
+
+    ``principal_name`` reaches LLM system prompts, so a newline or control
+    character in it could reshape the prompt. Replace every C0/C1 control
+    character (including tab/newline) with a space, collapse runs of
+    whitespace, strip the ends, and cap the length.
+    """
+    cleaned = "".join(" " if ch.isspace() or ord(ch) < 0x20 else ch for ch in raw)
+    return " ".join(cleaned.split())[:_MAX_PRINCIPAL_NAME_CHARS]
+
 
 def _normalize_allowlist(raw: str) -> tuple[str, ...]:
     """Comma-separated allowlist → lowercase tuple. Empty entries dropped."""
@@ -39,6 +55,22 @@ class Settings(BaseSettings):
     # ── Runtime
     environment: Literal["local", "fly"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARN", "ERROR"] = "INFO"
+
+    # ── Principal (ADR-0010 — person OR single organization)
+    # A deployed instance belongs to exactly one principal (I8). "person" is
+    # the default and byte-identical to every prior release: the framing helper
+    # renders today's strings verbatim, ``principal_name`` is ignored. An
+    # "organization" principal reframes the AI-facing prompts + surface prose
+    # ("the organization's vault") and REQUIRES ``principal_name`` (interpolated
+    # into system prompts). This is NOT multi-tenancy: one instance still serves
+    # one principal; an org's many members/agents are an attribution concern
+    # (see the ``actor`` field on remember/observe), never an isolation boundary.
+    principal_kind: Literal["person", "organization"] = "person"
+    # Display name of the organization when ``principal_kind="organization"``.
+    # Ignored (may be blank) for a person principal. Interpolated into system
+    # prompts, so it is sanitized (strip + collapse control chars/newlines,
+    # capped) at boot; a blank-after-sanitize org name fails to start.
+    principal_name: str = ""
 
     # ── Substrate
     vault_dir: Path = Field(
@@ -364,6 +396,33 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def _validate_principal(self) -> Settings:
+        """Sanitize the principal name and enforce the org-requires-name rule.
+
+        - A person principal ignores ``principal_name`` entirely (byte-identity
+          with every prior release): a stray name is dropped to blank so it can
+          never leak into a rendered prompt.
+        - An organization principal REQUIRES a non-blank name after sanitation;
+          a blank/whitespace/control-only org name fails boot loudly rather than
+          rendering "'s vault" with an empty possessive.
+        """
+        if self.principal_kind == "organization":
+            sanitized = _sanitize_principal_name(self.principal_name)
+            if not sanitized:
+                msg = (
+                    "PRINCIPAL_NAME must be a non-blank name when "
+                    "PRINCIPAL_KIND=organization (it names the organization the "
+                    "vault belongs to and appears in the AI-facing prompts)."
+                )
+                raise ValueError(msg)
+            self.principal_name = sanitized
+        else:
+            # Person principal: the name is unused; blank it so it can never
+            # reach a rendered prompt (v1 byte-identity contract, ADR-0010).
+            self.principal_name = ""
+        return self
 
     @model_validator(mode="after")
     def _resolve_per_agent_models(self) -> Settings:

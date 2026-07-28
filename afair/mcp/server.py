@@ -41,6 +41,8 @@ from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.expectation_checker import ExpectationChecker
 from ..agents.extraction_retry import ExtractionRetryWorker
+from ..agents.framing import framing_from_settings
+from ..agents.framing import set_current as set_framing
 from ..agents.living_syntheses import LivingSynthesisWorker
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
@@ -107,6 +109,13 @@ def build_server(settings: Settings) -> FastMCP:
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
+    # Install the active principal framing FIRST (ADR-0010), before any prompt
+    # or MCP-surface string is rendered below. Person default is byte-identical
+    # to every prior release; an organization principal reframes the AI-facing
+    # cognition. One process = one principal (I8), so a boot-time singleton is
+    # the right delivery — every prompt builder reads framing.current().
+    set_framing(framing_from_settings(settings))
+
     # Install the vault encryption key first, before ANY open_db call
     # (set_context below itself does not open a connection, but the
     # warmup thread and cold-path scheduler will). Production refuses
@@ -212,11 +221,11 @@ def build_server(settings: Settings) -> FastMCP:
     # so the first real recall isn't penalized.
     _spawn_warmup(settings)
 
-    mcp: FastMCP = FastMCP("afair", instructions=descriptions.SERVER_INSTRUCTIONS)
+    mcp: FastMCP = FastMCP("afair", instructions=descriptions.server_instructions())
 
     # ── tools — descriptions are AI-facing prompts, see descriptions.py ─────
 
-    @mcp.tool(description=descriptions.REMEMBER, version="1")
+    @mcp.tool(description=descriptions.remember_description(), version="1")
     def remember(
         content: schemas.RememberContentInput,
         context: str | None = None,
@@ -243,7 +252,11 @@ def build_server(settings: Settings) -> FastMCP:
             asserted_by=asserted_by,
         )
 
-    @mcp.tool(description=descriptions.RECALL, version="1", output_schema=_RECALL_OUTPUT_SCHEMA)
+    @mcp.tool(
+        description=descriptions.recall_description(),
+        version="1",
+        output_schema=_RECALL_OUTPUT_SCHEMA,
+    )
     def recall(
         query: str | None = None,
         scope: str | None = None,
@@ -300,7 +313,7 @@ def build_server(settings: Settings) -> FastMCP:
             structured_content=result.model_dump(exclude_none=True),
         )
 
-    @mcp.tool(description=descriptions.OBSERVE, version="1")
+    @mcp.tool(description=descriptions.observe_description(), version="1")
     def observe(event: schemas.ObserveEventInput) -> schemas.ObserveResult:
         enforce_write_scope()
         # Narrow the widened ``ObserveEvent | str`` alias back to the concrete
@@ -313,7 +326,7 @@ def build_server(settings: Settings) -> FastMCP:
     @mcp.resource(
         resources.SESSION_START_URI,
         name=resources.SESSION_START_NAME,
-        description=resources.SESSION_START_DESCRIPTION,
+        description=resources.session_start_description(),
         mime_type="application/json",
     )
     def session_start() -> dict[str, Any]:

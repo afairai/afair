@@ -39,10 +39,10 @@ from .interpretation import (
 from .llm import LLMError, LLMResponseError, call_tool
 from .prompts import (
     EXTRACTOR_SCHEMA_VERSION,
-    EXTRACTOR_SYSTEM_PROMPT,
-    EXTRACTOR_TOOL_DESCRIPTION,
     EXTRACTOR_TOOL_NAME,
     build_user_message,
+    extractor_system_prompt,
+    extractor_tool_description,
     extractor_tool_schema,
 )
 
@@ -424,9 +424,9 @@ def _run_extraction(
                 path=object_path(vault_dir, blob_hash),
                 mime=mime,
                 user_message=build_user_message(event),
-                system_prompt=EXTRACTOR_SYSTEM_PROMPT,
+                system_prompt=extractor_system_prompt(),
                 tool_name=EXTRACTOR_TOOL_NAME,
-                tool_description=EXTRACTOR_TOOL_DESCRIPTION,
+                tool_description=extractor_tool_description(),
                 tool_schema=extractor_tool_schema(db),
                 model=vision_model,
                 api_key=vision_api_key,
@@ -450,10 +450,10 @@ def _run_extraction(
         try:
             result = call_tool(
                 model=model,
-                system=EXTRACTOR_SYSTEM_PROMPT,
+                system=extractor_system_prompt(),
                 user=build_user_message(event, extracted_text=extracted_text),
                 tool_name=EXTRACTOR_TOOL_NAME,
-                tool_description=EXTRACTOR_TOOL_DESCRIPTION,
+                tool_description=extractor_tool_description(),
                 tool_schema=extractor_tool_schema(db),
                 api_key=api_key,
                 timeout=EXTRACTION_LLM_TIMEOUT_SECONDS,

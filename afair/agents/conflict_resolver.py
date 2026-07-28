@@ -33,6 +33,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_hash
 from .binder import BINDER_PRODUCED_BY
 from .cold_path import ColdPathWorker
+from .framing import PrincipalFraming, current
 from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
 from .llm import LLMError, call_tool
@@ -242,9 +243,17 @@ def read_conflict_resolutions_batch(
 
 
 _TOOL_NAME = "record_relation_verdict"
-_TOOL_DESCRIPTION = (
-    "Record how two events from the user's personal memory relate. Call exactly once per request."
-)
+
+
+def tool_description(framing: PrincipalFraming | None = None) -> str:
+    """The conflict-resolver tool description, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"Record how two events from {f.memory_phrase} relate. Call exactly once per request."
+
+
 _TOOL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -282,8 +291,15 @@ _TOOL_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "reason", "confidence"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You judge how two events in a PERSONAL MEMORY vault relate. The single most
+
+def system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The conflict-resolver system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"""\
+You judge how two events in a {f.vault_descriptor_caps} vault relate. The single most
 important rule: most apparent contradictions are TIME-UPDATES, not errors. A
 person's role, status, location, and numbers change. Do not call a change over
 time a conflict — classify it in the time family instead. Reserve "conflicts"
@@ -484,10 +500,10 @@ def _judge_pair(*, event_a: Event, event_b: Event, model: str, api_key: str | No
     )
     result = call_tool(
         model=model,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt(),
         user=user_msg,
         tool_name=_TOOL_NAME,
-        tool_description=_TOOL_DESCRIPTION,
+        tool_description=tool_description(),
         tool_schema=_TOOL_SCHEMA,
         api_key=api_key,
         max_tokens=400,

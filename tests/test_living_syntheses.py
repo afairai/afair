@@ -474,7 +474,7 @@ def test_b3_no_steering_prompt_is_byte_identical(conn, monkeypatch) -> None:
     user_empty = captured["user"]
 
     # System is exactly today's prompt; no _STEERING_RULE appended.
-    assert system_none == ls._SYSTEM_PROMPT
+    assert system_none == ls.system_prompt()
     assert ls._STEERING_RULE not in system_none
     # Empty steering list behaves identically to None (falsy → no-steering path).
     assert system_empty == system_none
@@ -612,5 +612,5 @@ def test_b3_steering_carries_forward_through_run(conn, monkeypatch) -> None:
     captured.clear()
     ls.LivingSynthesisWorker().run(conn, Settings())
     # No steering this cycle: system is the plain prompt, user has no steering block.
-    assert captured["system"] == ls._SYSTEM_PROMPT
+    assert captured["system"] == ls.system_prompt()
     assert "marked the following prior claims WRONG" not in captured["user"]

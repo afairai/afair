@@ -300,7 +300,7 @@ def test_unified_kind_guidance_present_in_prompt_and_schema() -> None:
     for marker in ("email address", "changelog", "null", "referent"):
         assert marker in desc
     for marker in ("email address", "referent", "Null is the correct answer"):
-        assert marker in ed._SYSTEM_PROMPT
+        assert marker in ed.system_prompt()
 
 
 def test_valid_unified_kind_still_discards_non_shown_kind() -> None:

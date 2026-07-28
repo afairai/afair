@@ -82,19 +82,19 @@ def test_escape_for_log_truncates() -> None:
 
 
 def test_extractor_system_prompt_carries_directive() -> None:
-    assert UNTRUSTED_CONTENT_DIRECTIVE in prompts.EXTRACTOR_SYSTEM_PROMPT
+    assert UNTRUSTED_CONTENT_DIRECTIVE in prompts.extractor_system_prompt()
 
 
 def test_entity_canonicalizer_system_prompt_carries_directive() -> None:
-    assert UNTRUSTED_CONTENT_DIRECTIVE in entity_canonicalizer._MATCH_SYSTEM_PROMPT
+    assert UNTRUSTED_CONTENT_DIRECTIVE in entity_canonicalizer.match_system_prompt()
 
 
 def test_conflict_resolver_system_prompt_carries_directive() -> None:
-    assert UNTRUSTED_CONTENT_DIRECTIVE in conflict_resolver._SYSTEM_PROMPT
+    assert UNTRUSTED_CONTENT_DIRECTIVE in conflict_resolver.system_prompt()
 
 
 def test_consolidator_system_prompt_carries_directive() -> None:
-    assert UNTRUSTED_CONTENT_DIRECTIVE in consolidator._SYSTEM_PROMPT
+    assert UNTRUSTED_CONTENT_DIRECTIVE in consolidator.system_prompt()
 
 
 # ── extractor's user message uses the wrapper ───────────────────────────────

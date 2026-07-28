@@ -42,8 +42,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ..agents.framing import current
+
 if TYPE_CHECKING:
     import sqlite3
+
+    from ..agents.framing import PrincipalFraming
 
 
 log = structlog.get_logger(__name__)
@@ -51,11 +55,29 @@ log = structlog.get_logger(__name__)
 
 SESSION_START_URI = "afair://session-start"
 SESSION_START_NAME = "Session start context"
-SESSION_START_DESCRIPTION = (
+
+_SESSION_START_DESCRIPTION_PERSON = (
     "Snapshot of the user's current vault state. Read at session "
     "start so the AI knows what's been on the user's mind without "
     "having to recall first."
 )
+
+
+def session_start_description(framing: PrincipalFraming | None = None) -> str:
+    """The session-start resource description, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant; an
+    organization principal reframes the owner language.
+    """
+    f = framing or current()
+    if f.kind == "person":
+        return _SESSION_START_DESCRIPTION_PERSON
+    return (
+        f"Snapshot of {f.name}'s current vault state. Read at session "
+        "start so the AI knows what's been on the organization's mind without "
+        "having to recall first."
+    )
+
 
 # Cache TTL — 60 s is a comfortable balance between freshness (a
 # remember that just happened shows up on next connect) and the cost
@@ -220,8 +242,10 @@ def build_session_start_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         non_conflict_high_value_total=non_conflict_high_value_total,
     )
 
+    framing = current()
+    vault_owner = "the user's" if framing.kind == "person" else f"{framing.name}'s"
     instructions = (
-        "These are the top recent salient events from the user's vault "
+        f"These are the top recent salient events from {vault_owner} vault "
         "plus any unresolved threads. Treat them as already-known "
         "context for this session. For more specific questions, call "
         "afair.recall(query=...). After a recall, the next time you "

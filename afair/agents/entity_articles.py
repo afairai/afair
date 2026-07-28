@@ -52,6 +52,7 @@ from ..substrate.edge_confidence import latest_edge_confidence_batch
 from ..substrate.entities import iter_edges_for_entity, read_entity_by_id
 from ..substrate.events import read_event_by_hash
 from .cold_path import ColdPathWorker
+from .framing import PrincipalFraming, current
 from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
@@ -155,16 +156,22 @@ _TOOL_SCHEMA: dict[str, Any] = {
     "required": ["summary"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You maintain a personal vault's per-entity articles. Given everything the
+
+def system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The entity-articles system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"""\
+You maintain a {f.vault_possessive} per-entity articles. Given everything the
 vault has recorded about ONE entity, you write a single coherent article
 that captures what is currently known about it. The article replaces the
 previous version, so write the current truth, not a changelog.
 
 {UNTRUSTED_CONTENT_DIRECTIVE}
 
-Plain language, present tense, second person where the user is involved
-("you decided", "you and Sajinth shipped X"). Synthesize across the
+{f.articles_voice_rule} Synthesize across the
 mentions — resolve duplication, prefer the most recent state. Don't pad.
 
 Ground every statement in the provided records. Do not invent facts the
@@ -455,7 +462,7 @@ def _synthesize(
     )
     result = call_tool(
         model=model,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt(),
         user=user_msg,
         tool_name=_TOOL_NAME,
         tool_description=_TOOL_DESCRIPTION,

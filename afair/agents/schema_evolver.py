@@ -88,6 +88,7 @@ from ulid import ULID
 from ..substrate import pipeline_events as pe
 from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX, live_kinds, resolve_kind_batch
 from .cold_path import ColdPathWorker
+from .framing import PrincipalFraming, current
 from .llm import LLMError, call_tool
 from .tunable_registry import TunableRegistry
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, escape_for_log, wrap_untrusted
@@ -502,10 +503,20 @@ def detect_unused_kinds(
 # ── LLM drafting (fenced) ───────────────────────────────────────────────────
 
 _TOOL_NAME = "propose_kind"
-_TOOL_DESCRIPTION = (
-    "Draft one ontology-revision proposal: a new entity kind for the user's "
-    "personal memory vault. Call exactly once."
-)
+
+
+def tool_description(framing: PrincipalFraming | None = None) -> str:
+    """The schema-evolver tool description, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return (
+        f"Draft one ontology-revision proposal: a new entity kind for "
+        f"{f.kind_owner_vault_phrase}. Call exactly once."
+    )
+
+
 _TOOL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -547,9 +558,16 @@ _TOOL_SCHEMA: dict[str, Any] = {
     "required": ["slug", "label", "description", "rationale", "reassign_entity_ids", "confidence"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You draft ontology-revision proposals for a PERSONAL MEMORY vault. The vault's
-entity kinds are emergent: they should reflect how THIS user's data actually
+
+def system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The schema-evolver system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"""\
+You draft ontology-revision proposals for a {f.vault_descriptor_caps} vault. The vault's
+entity kinds are emergent: they should reflect how {f.data_owner_phrase} actually
 clusters, not a textbook taxonomy. You are shown a deterministic usage signal
 plus a sample of entity names; your job is to name the kind the signal points
 at — a good slug, a clear label, a one-paragraph description — and to say
@@ -598,10 +616,10 @@ def _draft_add_proposal(
     )
     result = call_tool(
         model=model,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt(),
         user="\n".join(parts),
         tool_name=_TOOL_NAME,
-        tool_description=_TOOL_DESCRIPTION,
+        tool_description=tool_description(),
         tool_schema=_TOOL_SCHEMA,
         api_key=api_key,
         max_tokens=800,

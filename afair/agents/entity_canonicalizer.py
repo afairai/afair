@@ -106,6 +106,7 @@ from ..substrate.kinds import (
 from ..substrate.temporal import read_event_temporal
 from .cold_path import ColdPathWorker
 from .entity_articles import ENTITY_ARTICLE_KIND
+from .framing import PrincipalFraming, current
 from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
 from .llm import LLMError, call_tool
@@ -230,8 +231,15 @@ _MATCH_TOOL_SCHEMA: dict[str, Any] = {
     "required": ["matched_entity_id", "reason", "confidence"],
 }
 
-_MATCH_SYSTEM_PROMPT = f"""\
-You are an entity-canonicalization judge for a personal memory vault.
+
+def match_system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The entity-canonicalizer match system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"""\
+You are an entity-canonicalization judge for a {f.vault_descriptor}.
 Given a surface form (e.g., "Sajinth") plus the surrounding text from the
 event where it appeared, decide whether it refers to one of the candidate
 entities the system already knows about, or to a NEW entity not yet
@@ -1212,7 +1220,7 @@ def _llm_judge_match(
     )
     result = call_tool(
         model=model,
-        system=_MATCH_SYSTEM_PROMPT,
+        system=match_system_prompt(),
         user=user_msg,
         tool_name=_MATCH_TOOL_NAME,
         tool_description=_MATCH_TOOL_DESCRIPTION,
