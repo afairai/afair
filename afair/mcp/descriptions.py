@@ -401,6 +401,11 @@ def _org_reframe(text: str, framing: PrincipalFraming) -> str:
         ("the user's history", "the organization's history"),
         ("the user's current", "the organization's current"),
         ("the user's", "the organization's"),
+        # Sentence-initial capitalized variant ("The user's salience worker and
+        # mode-switcher ..."): str.replace is case-sensitive, so the lowercase
+        # catch-all above misses it. The org-render guard in test_framing.py
+        # fails if any cased variant ever slips through again.
+        ("The user's", "The organization's"),
         ("The user installed afair", f"{org} installed afair"),
         ("The user explicitly installed afair", f"{org} explicitly installed afair"),
         ("the user re-explaining themselves", "a member re-explaining themselves"),

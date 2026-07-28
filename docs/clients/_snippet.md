@@ -39,7 +39,7 @@ Default to more, not less. Forgetting costs me time; an extra remember
 costs nothing. Optionally pass `asserted_by: "user"` when I stated the
 fact directly, or `"model"` when you inferred it. Self-reported and
 advisory: it records provenance, never raises trust. Omit if unsure.
-*(Organization vaults only — ignore for a personal vault: if one shared
+*(Organization vaults only; ignore for a personal vault: if one shared
 credential relays for several people, pass `actor` with the person on
 whose behalf you're writing, e.g. `actor: "slack:U0BKXTGBWLD"`. It is
 attribution content, distinct from the tool-derived `client`, and never

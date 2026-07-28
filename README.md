@@ -85,8 +85,8 @@ run in the cloud (Claude.ai, ChatGPT) instead need a public HTTPS deployment and
 a quick OAuth setup, covered in [docs/self-hosting.md](docs/self-hosting.md).
 Every environment variable is documented inline in `.env.example`; per-client
 connection guides live in [docs/clients](docs/clients). afair is personal by
-default; a vault can instead belong to a single organization — one instance, one
-team — via two env vars (see [docs/self-hosting.md](docs/self-hosting.md)).
+default; a vault can instead belong to a single organization (one instance, one
+team) via two env vars (see [docs/self-hosting.md](docs/self-hosting.md)).
 
 ## Install it with your coding agent
 

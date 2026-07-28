@@ -253,7 +253,7 @@ Guidance:
   for what this event IS (constitution, decision, meeting_notes, email,
   code_snippet, etc.). The system learns its own ontology over time;
   don't restrict yourself to a fixed enum.
-- ``confidence`` reflects your own self-assessment, not the user's.
+- ``confidence`` reflects your own self-assessment, not {f.owner_possessive}.
 - If the event payload was truncated (you'll see a TRUNCATED marker),
   extract from what you can see; mention truncation only if a salient
   fact obviously lies in the elided portion.

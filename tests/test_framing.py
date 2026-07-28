@@ -124,25 +124,27 @@ def test_person_framing_default_is_active_singleton() -> None:
 
 # ── Layer 2: grep-based completeness (a missed site fails loudly) ─────────────
 
-# Person-only phrases that must NOT appear hardcoded in a module-level prompt
-# constant / builder outside a registered framing builder. Lowercased match.
+# Person-only phrases that must NOT appear hardcoded in a prompt-carrying string
+# literal unless that literal is provably part of a registered framing builder's
+# person render. Lowercased match. Includes the broad "personal vault" (no
+# possessive) and the bare "the user's" so an unregistered owner-phrase in any
+# prompt string is caught, not just the exact vault idioms.
 _BANNED_PERSON_PHRASES = (
     "personal memory vault",
     "the user's substrate",
     "personal memory",  # catches "PERSONAL MEMORY vault", "the user's personal memory"
     "personal vault's",
+    "personal vault",
     "personal-vault",
+    "the user's",
 )
 
-# Modules that legitimately carry the person phrases inside a REGISTERED builder,
-# so a raw source grep will (correctly) still see them. These are the framing
-# builders' own home modules — the grep guard asserts the phrase lives inside a
-# registered builder, which for these it does.
+# Modules that host REGISTERED framing builders (or, for framing.py, the person
+# phrase VALUES themselves). Being listed here does NOT whitelist the module:
+# every banned-phrase-bearing literal in these modules must still be a verbatim
+# (case-insensitive) substring of some registered builder's person render — so a
+# NEW hardcoded person phrase inside an already-registered module fails too.
 _REGISTERED_BUILDER_MODULES = {
-    # framing.py is the definitional home of the person phrase VALUES (the
-    # frozen ``person_framing()`` fields + explanatory docstrings). The
-    # byte-identity + org-reframe tests prove those values are actually
-    # parametrized, so their presence here is expected, not a leak.
     "afair/agents/framing.py",
     "afair/agents/prompts.py",
     "afair/agents/consolidator.py",
@@ -158,8 +160,9 @@ _REGISTERED_BUILDER_MODULES = {
 
 # The tuner judge criteria are the ONLY intentional person-flavored prompt text
 # left unparametrized (frozen with JUDGE_PROMPT_VERSION for judge
-# reproducibility — ADR-0010). It does not contain a banned phrase today, but if
-# a future edit added one this exemption would need revisiting. Documented here.
+# reproducibility — ADR-0010); llm_judge and temporal are neutral. Explicitly
+# exempt, and asserted CLEAN of banned phrases below so the exemption stays a
+# conscious decision rather than a hole.
 _EXEMPT_MODULES = {
     "afair/agents/tuner.py",
     "afair/agents/llm_judge.py",
@@ -172,56 +175,64 @@ def _repo_root() -> Path:
 
 
 def _prompt_string_literals(source: str) -> list[tuple[int, str]]:
-    """Every string literal in ``source`` that is NOT a docstring — i.e. genuine
-    LLM-prompt-carrying text (an assigned constant, an f-string, a builder
-    return), which is where a hardcoded person phrase would be a real leak.
+    """Every string literal in ``source`` that could feed an LLM prompt or an
+    AI-facing surface — where a hardcoded person phrase would be a real leak.
 
-    Uses the AST so engineering prose in module/class/function DOCSTRINGS (an
-    ``Expr`` whose value is a bare string, which the spec explicitly leaves
-    alone) is excluded. Constant + JoinedStr (f-string) literals are included;
-    their line numbers are reported for a readable failure.
+    Excluded via the AST: every bare-string ``Expr`` statement. That covers
+    module/class/function docstrings AND attribute docstrings (the string
+    statement after a field assignment) — a bare string statement has no runtime
+    effect, so it can never reach a prompt; it is engineering prose the spec
+    explicitly leaves alone. Included: plain string constants and each CONSTANT
+    SEGMENT of an f-string individually (segment granularity lets the
+    registered-module substring check below stay exact across placeholders).
     """
     import ast
 
     tree = ast.parse(source)
 
-    # Collect the id() of every docstring node so we can skip it below.
-    docstring_ids: set[int] = set()
+    # Every bare-string expression statement is documentation, not prompt text.
+    doc_ids: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            body = getattr(node, "body", [])
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                docstring_ids.add(id(body[0].value))
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            doc_ids.add(id(node.value))
 
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if id(node) in docstring_ids:
+        if id(node) in doc_ids:
             continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # NB: an f-string's constant segments are Constant nodes inside a
+            # JoinedStr and are collected here individually by the walk.
             out.append((node.lineno, node.value))
-        elif isinstance(node, ast.JoinedStr):
-            # f-string: reconstruct the literal (non-interpolated) segments.
-            literal = "".join(part.value for part in node.values if isinstance(part, ast.Constant))
-            out.append((node.lineno, literal))
     return out
 
 
-def test_no_unregistered_person_framing_site() -> None:
-    """Scan every agents/ + mcp/ module's LLM-prompt string literals (NOT
-    docstrings) for the banned person phrases. Any hit must be in a module that
-    hosts a REGISTERED framing builder — a hardcoded person phrase anywhere else
-    (or in an exempt module) fails loudly.
+def _person_renders_lower() -> list[str]:
+    """Every registered builder's person render, lowercased, from the golden."""
+    return [v.lower() for v in _golden().values()]
 
-    This is the plan-review amendment: a registry cannot catch what the curation
-    missed, so we prove exhaustiveness from the source (AST over prompt-carrying
-    string literals), not from a hand list. Docstrings — engineering prose that
-    the spec leaves alone — are excluded via the AST."""
+
+def test_no_unregistered_person_framing_site() -> None:
+    """Scan every agents/ + mcp/ module's prompt string literals (docstrings
+    excluded) for the banned person phrases. A hit is legitimate ONLY when the
+    literal is a verbatim (case-insensitive) substring of some registered
+    builder's person render — i.e. it IS part of a parametrized builder's person
+    branch. Everything else fails loudly, including:
+
+      - a hardcoded person phrase in an UNREGISTERED module, and
+      - a NEW hardcoded person phrase inside an already-REGISTERED module (a
+        literal that is not part of any registered person render), which a
+        module-presence check would have silently waved through.
+
+    This is the plan-review amendment: exhaustiveness is proven from the source
+    (AST over prompt-carrying literals) against the frozen person golden, not
+    from a hand-curated list."""
     root = _repo_root()
+    renders = _person_renders_lower()
     offenders: list[str] = []
     for module in sorted(
         (*(root / "afair" / "agents").glob("*.py"), *(root / "afair" / "mcp").glob("*.py"))
@@ -230,36 +241,74 @@ def test_no_unregistered_person_framing_site() -> None:
         source = module.read_text(encoding="utf-8")
         for lineno, literal in _prompt_string_literals(source):
             low = literal.lower()
-            for phrase in _BANNED_PERSON_PHRASES:
-                if phrase in low:
-                    if rel in _REGISTERED_BUILDER_MODULES:
-                        # Expected: the phrase lives in a registered builder's
-                        # person branch. (The byte-identity + org tests prove the
-                        # builder is actually parametrized.)
-                        continue
-                    snippet = literal.strip().replace("\n", " ")[:80]
-                    offenders.append(f"{rel}:{lineno}: {snippet!r} (phrase {phrase!r})")
+            if not any(phrase in low for phrase in _BANNED_PERSON_PHRASES):
+                continue
+            hits = [p for p in _BANNED_PERSON_PHRASES if p in low]
+            if rel in _REGISTERED_BUILDER_MODULES and any(low in r for r in renders):
+                # The literal is verbatim part of a registered builder's person
+                # render (a framing field value, a person-branch constant, or an
+                # org-reframe source phrase). The byte-identity + org tests
+                # prove that builder is actually parametrized.
+                continue
+            snippet = literal.strip().replace("\n", " ")[:80]
+            offenders.append(f"{rel}:{lineno}: {snippet!r} (phrases {hits})")
     assert not offenders, (
-        "hardcoded person-framing phrase(s) outside a registered framing builder "
-        "(ADR-0010 completeness guard). Route the string through a framing "
-        "builder:\n" + "\n".join(offenders)
+        "hardcoded person-framing phrase(s) not covered by a registered framing "
+        "builder (ADR-0010 completeness guard). Route the string through a "
+        "framing builder:\n" + "\n".join(offenders)
     )
 
 
-def test_exempt_modules_are_declared_not_accidental() -> None:
-    """The tuner/judge/temporal exemptions are intentional (ADR-0010). This test
-    documents them: if one of these ever grows a banned person phrase, the
-    exemption should be re-examined — this test flags it so the decision is
-    conscious rather than silent."""
-    root = _repo_root()
-    for rel in _EXEMPT_MODULES:
-        source = (root / rel).read_text(encoding="utf-8")
-        low = source.lower()
-        hits = [p for p in _BANNED_PERSON_PHRASES if p in low]
+def test_org_renders_contain_no_person_owner_phrases() -> None:
+    """Every builder's ORG render is free of the person owner-phrases. Closes
+    the one gap the source-scan cannot see: a person phrase hardcoded INSIDE a
+    builder body is a verbatim part of the person render (so the
+    substring-allowance above accepts the literal), but it would also survive
+    into the org render — which this test fails. Together with the source scan,
+    a new hardcoded person phrase in a registered module is always caught.
+
+    "personal vault" (broad, no possessive) is excluded here ONLY because the
+    actor guidance legitimately says "Omit for a personal vault" in every mode
+    (it tells an agent when NOT to pass actor); the possessive/vault idioms and
+    "the user's" must never appear in an org render.
+    """
+    banned_in_org = (
+        "personal memory vault",
+        "the user's substrate",
+        "personal memory",
+        "personal vault's",
+        "personal-vault",
+        "the user's",
+    )
+    org = _org_framing()
+    for name, builder in sorted(_BUILDERS.items()):
+        rendered = builder(org).lower()
+        hits = [p for p in banned_in_org if p in rendered]
         assert not hits, (
-            f"{rel} is an ADR-0010 framing-exempt module but now contains "
-            f"person phrase(s) {hits}; re-examine the exemption (frozen judge "
-            f"criteria vs. principal framing)."
+            f"{name} org render still carries person owner-phrase(s) {hits} — "
+            "a hardcoded person phrase inside the builder body; route it through "
+            "a framing field."
+        )
+
+
+def test_exempt_modules_are_declared_not_accidental() -> None:
+    """The tuner/judge/temporal exemptions are intentional (ADR-0010). Their
+    PROMPT literals (docstrings excluded, same scan as the main guard) must stay
+    clean of banned person phrases — if one ever grows one, the frozen-judge
+    exemption must be re-examined consciously rather than silently absorbed."""
+    root = _repo_root()
+    for rel in sorted(_EXEMPT_MODULES):
+        source = (root / rel).read_text(encoding="utf-8")
+        hits = [
+            (lineno, phrase)
+            for lineno, literal in _prompt_string_literals(source)
+            for phrase in _BANNED_PERSON_PHRASES
+            if phrase in literal.lower()
+        ]
+        assert not hits, (
+            f"{rel} is an ADR-0010 framing-exempt module but its prompt literals "
+            f"now contain person phrase(s) {hits}; re-examine the exemption "
+            f"(frozen judge criteria vs. principal framing)."
         )
 
 
