@@ -72,6 +72,38 @@ MAX_TYPE_HINT_CHARS = 200
 MAX_MIME_CHARS = 200
 MAX_FILENAME_HINT_CHARS = 500
 
+# ADR-0010 actor attribution: "on whose behalf" a SHARED credential wrote
+# (an org agent relaying many humans). Bounded but NOT slugged — fidelity
+# matters, since a real actor is an identifier like "slack:U0BKXTGBWLD"
+# whose ':' is outside any slug charset. Caller-supplied = CONTENT, so it
+# rides in the payload / content hash (exactly like asserted_by, W3).
+MAX_ACTOR_CHARS = 120
+
+
+def sanitize_actor(raw: str | None) -> str | None:
+    """Normalize a caller-supplied ``actor`` string, or None when effectively
+    absent.
+
+    Strips surrounding whitespace and drops C0/C1 control characters (they add
+    no attribution value and could disrupt the extractor's rendered view), but
+    does NOT slug or lowercase — the actor is an opaque identifier whose exact
+    form ("slack:U0BKXTGBWLD", "email@corp") is content and must survive
+    verbatim. A blank-after-strip value is treated as absent (None). Length
+    capping is applied by the caller via truncate-preserve so the full original
+    is retained under ``actor_full`` (same convention as context/type_hint).
+
+    NB: actor's injection safety comes from the extractor emitting it INSIDE
+    ``wrap_untrusted`` (prompts.build_user_message), NOT from this cap — see the
+    maintenance contract in ADR-0010.
+    """
+    if raw is None:
+        return None
+    cleaned = "".join(ch for ch in raw if ord(ch) >= 0x20 or ch in "\t").strip()
+    # Collapse any surviving internal tabs to spaces so the extractor view is
+    # clean; keep everything else verbatim (colons, dots, slashes are content).
+    cleaned = cleaned.replace("\t", " ").strip()
+    return cleaned or None
+
 
 # ── remember ────────────────────────────────────────────────────────────────
 
@@ -856,6 +888,7 @@ _OBSERVE_FIELD_CAPS = {
     "action": MAX_OBSERVE_ACTION_CHARS,
     "subject": MAX_OBSERVE_SUBJECT_CHARS,
     "result": MAX_OBSERVE_RESULT_CHARS,
+    "actor": MAX_ACTOR_CHARS,
 }
 """Per-field character caps for the write-first truncation in
 ``ObserveEvent._accept_first``. Over-long values are truncated to the cap
@@ -961,6 +994,11 @@ class ObserveEvent(BaseModel):
     action: str = Field(min_length=1, max_length=MAX_OBSERVE_ACTION_CHARS)
     subject: str | None = Field(default=None, max_length=MAX_OBSERVE_SUBJECT_CHARS)
     result: str | None = Field(default=None, max_length=MAX_OBSERVE_RESULT_CHARS)
+    # ADR-0010: on whose behalf a shared credential logged this observe. Advisory
+    # attribution CONTENT (in-payload, in-hash), never a substitute for the
+    # server-derived ``client``. Bounded + control-char-stripped like the others;
+    # blank-after-sanitize serializes as absent (see ``_accept_first``).
+    actor: str | None = Field(default=None, max_length=MAX_ACTOR_CHARS)
 
     @model_validator(mode="before")
     @classmethod
@@ -997,6 +1035,16 @@ class ObserveEvent(BaseModel):
             action = coerced.get("action")
             if not isinstance(action, str) or not action.strip():
                 coerced["action"] = "observed"
+            # Sanitize ``actor`` (ADR-0010): strip control chars, blank → absent.
+            # NOT slugged — the identifier ("slack:U123") is content, kept
+            # verbatim. Length capping happens in _truncate_long_fields below.
+            if "actor" in coerced:
+                actor = coerced.get("actor")
+                cleaned = sanitize_actor(actor) if isinstance(actor, str) else None
+                if cleaned is None:
+                    coerced.pop("actor", None)
+                else:
+                    coerced["actor"] = cleaned
             return cls._truncate_long_fields(coerced)
         dump = json.dumps(data, ensure_ascii=False, default=str)
         return cls._truncate_long_fields({"action": "observed", "result": dump})

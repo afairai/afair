@@ -315,10 +315,14 @@ def _payload_summary(
             parts_summary.append(part_view)
         summary["parts"] = parts_summary
 
-    # Common metadata across content types. ``asserted_by`` (W3) rides here so
-    # the caller-supplied assertion label survives the truncated summary view,
-    # not just full_payload/by_id — same passthrough treatment as type_hint.
-    for k in ("context", "type_hint", "asserted_by", "language", "target_hash", "reason"):
+    # Common metadata across content types. ``asserted_by`` (W3) and ``actor``
+    # (ADR-0010) ride here so the caller-supplied assertion label and the
+    # on-whose-behalf attribution survive the truncated summary view, not just
+    # full_payload/by_id — same passthrough treatment as type_hint. actor is
+    # served at EVERY verbosity (it's already in the payload, zero extra cost;
+    # note the asymmetry vs ``client``, which is dropped at compact because it
+    # costs a sidecar query).
+    for k in ("context", "type_hint", "asserted_by", "actor", "language", "target_hash", "reason"):
         if payload.get(k) is not None:
             value = payload[k]
             if k == "context" and context_cap is not None and isinstance(value, str):
@@ -1107,6 +1111,7 @@ def remember(
     parent_hashes: list[str] | None = None,
     invalidates: list[str] | None = None,
     asserted_by: schemas.AssertedBy | None = None,
+    actor: str | None = None,
 ) -> RememberResult:
     """Write a fact to the substrate, optionally invalidating prior facts.
 
@@ -1130,6 +1135,12 @@ def remember(
     # at the handler boundary.
     context, context_full = _truncate_preserve(context, schemas.MAX_CONTEXT_CHARS)
     type_hint, type_hint_full = _truncate_preserve(type_hint, schemas.MAX_TYPE_HINT_CHARS)
+    # actor (ADR-0010): sanitize (strip control chars, blank → absent; NOT
+    # slugged — the identifier is content), then truncate-preserve to actor_full
+    # exactly like context/type_hint. A None/blank actor leaves the payload
+    # byte-identical to a pre-actor write (the dedup / content-hash guard).
+    actor = schemas.sanitize_actor(actor)
+    actor, actor_full = _truncate_preserve(actor, schemas.MAX_ACTOR_CHARS)
     if parent_hashes is not None and len(parent_hashes) > schemas.MAX_PARENT_HASHES_PER_CALL:
         msg = (
             f"parent_hashes must be <= {schemas.MAX_PARENT_HASHES_PER_CALL} entries; "
@@ -1299,6 +1310,17 @@ def remember(
     # to a plain re-write is a new event; supersession handles the rest.
     if asserted_by is not None:
         payload["asserted_by"] = asserted_by
+    # actor (ADR-0010) is caller-supplied attribution = CONTENT, so it goes IN
+    # the payload and therefore IN the content hash (same boundary as
+    # asserted_by, and unlike the W1 server-derived ``client`` sidecar): the
+    # same sentence written on behalf of member A vs B is a DIFFERENT assertion,
+    # so dedup must keep them apart. A supplied actor rides through the extractor
+    # inside wrap_untrusted (build_user_message's extras loop), which is where
+    # its injection safety lives — see the ADR-0010 maintenance contract.
+    if actor is not None:
+        payload["actor"] = actor
+    if actor_full is not None:
+        payload["actor_full"] = actor_full
 
     # Single-pass write: ``write_event_with_status`` returns the row plus a
     # was_inserted bool, so we don't have to compute the content hash twice
@@ -2218,6 +2240,13 @@ def observe(event: ObserveEvent) -> ObserveResult:
     db = connect_for_thread()
 
     event_dict = event.model_dump(exclude_none=False)
+    # ADR-0010: ``actor`` is an ADDITIVE optional field. An absent actor must
+    # produce the byte-identical pre-change payload (and therefore the same
+    # content hash), so drop it when None — unlike subject/result, which were
+    # always present-as-null historically and stay that way. A supplied actor
+    # rides in the payload = in the content hash (advisory attribution content).
+    if event_dict.get("actor") is None:
+        event_dict.pop("actor", None)
     # Reserved payload keys always win over caller-supplied extras.
     # ObserveEvent allows arbitrary extras, so a caller could otherwise
     # smuggle content_type="text-large" + blob_hash=<existing hash> and

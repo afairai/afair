@@ -233,6 +233,7 @@ def build_server(settings: Settings) -> FastMCP:
         parent_hashes: schemas.StringListInput = None,
         invalidates: schemas.StringListInput = None,
         asserted_by: schemas.AssertedBy | None = None,
+        actor: str | None = None,
     ) -> schemas.RememberResult:
         enforce_write_scope()
         # Narrow the widened ``RememberContent | str`` alias back to the concrete
@@ -250,6 +251,7 @@ def build_server(settings: Settings) -> FastMCP:
             parent_hashes=parent_hashes,
             invalidates=invalidates,
             asserted_by=asserted_by,
+            actor=actor,
         )
 
     @mcp.tool(

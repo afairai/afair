@@ -129,6 +129,21 @@ ARGUMENTS:
     "user" can NEVER raise the trust of a derived fact above the normal
     agent-derived level — operator-grade trust is earned only through the
     recall(decide=...) review loop. Omit if you're unsure.
+  - actor: Optional. On WHOSE BEHALF this memory is written, when a single
+    credential relays for many people (an organization's shared agent
+    writing for different members). A free-form identifier kept verbatim —
+    "slack:U0BKXTGBWLD", "alice@corp", "Alice from Sales". Omit for a
+    personal vault or when the credential already identifies the writer.
+
+  DISAMBIGUATION — three different questions, don't conflate them:
+    - client (served on recall hits): WHICH TOOL wrote this, derived
+      server-side from the credential. You never set it.
+    - actor (this argument): ON WHOSE BEHALF, when the credential is
+      shared. You set it. Advisory only; it never substitutes for client
+      and never raises trust. If absent, client is the best attribution.
+    - asserted_by: whether a HUMAN or the MODEL asserted the fact.
+  Same content written on behalf of different actors is stored as distinct
+  events (attribution is content); identical content + same actor dedupes.
 
 RETURN:
   {"ok": true, "event_id": "...", "content_hash": "sha256:...",
@@ -328,6 +343,14 @@ ARGUMENTS:
     optional keys:
       "subject": what was acted upon (filename, person, ticket, ...)
       "result":  outcome ("success", "failed: X", free text)
+      "actor":   on WHOSE BEHALF this was logged, when a shared credential
+                 relays for many people (an org agent acting for a specific
+                 member). A free-form identifier kept verbatim
+                 ("slack:U123", "alice@corp"). Distinct from the
+                 server-derived ``client`` (which tool wrote it): actor is
+                 attribution content you set, client is derived. Omit for a
+                 personal vault. Same content on behalf of different actors
+                 is stored as distinct events.
     Beyond those, ANY additional fields are preserved verbatim. Use
     whatever shape fits your agent's natural mental model. A JSON-string-
     serialized object is also accepted and parsed, and a bare string
