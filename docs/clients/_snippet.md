@@ -39,6 +39,11 @@ Default to more, not less. Forgetting costs me time; an extra remember
 costs nothing. Optionally pass `asserted_by: "user"` when I stated the
 fact directly, or `"model"` when you inferred it. Self-reported and
 advisory: it records provenance, never raises trust. Omit if unsure.
+*(Organization vaults only — ignore for a personal vault: if one shared
+credential relays for several people, pass `actor` with the person on
+whose behalf you're writing, e.g. `actor: "slack:U0BKXTGBWLD"`. It is
+attribution content, distinct from the tool-derived `client`, and never
+raises trust.)*
 
 **Whenever you take an action:**
 Edit a file, run a query, call a tool, fetch a URL: call
@@ -146,3 +151,9 @@ Refinements here are append-only: note the date, what was added, why.
   `session-start` resource itemizes conflicts first and self-quiets the
   nudge (a conflict always shows; otherwise the high-value queue must grow
   by at least three since the last nudge and a week must have passed).
+- 2026-07-28: added the optional `actor` remember/observe field (ADR-0010).
+  Deliberately gated as organization-only conditional guidance so a personal
+  vault gets no extra noise: the parenthetical tells an org's shared-agent to
+  pass the on-whose-behalf identifier, while a solo user reads past it. actor
+  is attribution content (in-hash, distinct from the server-derived `client`)
+  and never raises trust.
