@@ -171,6 +171,9 @@ Re-open this ADR if any of these become true:
 
 - I8: per-user infra cost crosses the point where it threatens viability and
   `auto_stop` plus right-sizing no longer closes the gap.
+  [ADR-0011](ADR-0011-membership-federation.md) (membership federation)
+  registers itself as a trigger for this bet at enterprise scale: hundreds of
+  circles per org, thousands of sponsored seats.
 - I3: recall latency degrades and the cause traces to view-over-log growth
   that projections cannot absorb.
 - I7: a ground-truth eval set lands and the tuner can be promoted — at which
