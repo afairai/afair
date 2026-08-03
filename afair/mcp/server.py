@@ -257,6 +257,7 @@ def build_server(settings: Settings) -> FastMCP:
         pending_offset: int = 0,
         verbosity: schemas.RecallVerbosity = "compact",
         cursor: str | None = None,
+        as_of: str | None = None,
     ) -> ToolResult:
         # Narrow the decide arg back to the concrete union (and re-parse a
         # JSON-stringified payload), mirroring content/event. No-op when the
@@ -285,6 +286,7 @@ def build_server(settings: Settings) -> FastMCP:
             pending_offset=pending_offset,
             verbosity=verbosity,
             cursor=cursor,
+            as_of=as_of,
         )
         # Null-free serialization (P1-2 §4.3). fastmcp double-ships a TextContent
         # body + structuredContent; pydantic's default serializer includes every

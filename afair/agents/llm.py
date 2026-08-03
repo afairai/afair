@@ -19,9 +19,33 @@ Two call surfaces:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
+
+# ── Kosten-Wächter (lokaler Self-Host-Patch, Michael 2026-07-20) ────────────────
+# Schreibt je bezahltem API-Call die von litellm berechneten $-Kosten in eine
+# host-sichtbare JSONL. Lokale Modelle (ollama/*) kosten 0 und werden übersprungen.
+# Ziel: nie wieder still Guthaben verbrennen — ein Wächter-Job liest diese Datei.
+_COST_LOG = os.environ.get("AFAIR_COST_LOG", "/data/cost/afair-api-cost.jsonl")
+
+
+def _log_api_cost(response: Any, model: str) -> None:
+    try:
+        if str(model).startswith("ollama/"):
+            return  # lokal = gratis
+        import datetime
+        import litellm
+        cost = litellm.completion_cost(completion_response=response) or 0.0
+        os.makedirs(os.path.dirname(_COST_LOG), exist_ok=True)
+        with open(_COST_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "model": str(model), "usd": round(float(cost), 6),
+            }) + "\n")
+    except Exception:
+        pass  # Kostenmessung darf einen Lauf NIE scheitern lassen
 
 
 class LLMError(Exception):
@@ -63,7 +87,7 @@ def call_json(
     system: str,
     user: str,
     api_key: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = 180.0,  # lokales Ollama arbeitet seriell — 30s rissen bei paralleler Cold-Path-Last (Umstellung 20.07.2026, Claude Code)
     max_tokens: int = 1500,
 ) -> LLMResult:
     """Synchronously call the LLM and parse the JSON response.
@@ -97,6 +121,7 @@ def call_json(
     except Exception as e:
         raise _classify(e) from e
 
+    _log_api_cost(response, model)
     raw = _extract_text(response)
     data = _parse_json_loose(raw)
 
@@ -115,7 +140,7 @@ def call_tool(
     tool_description: str,
     tool_schema: dict[str, Any],
     api_key: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = 180.0,  # lokales Ollama arbeitet seriell — 30s rissen bei paralleler Cold-Path-Last (Umstellung 20.07.2026, Claude Code)
     max_tokens: int = 2000,
 ) -> LLMResult:
     """Call the LLM in tool-forcing mode, returning the (validated) tool arguments.
@@ -166,6 +191,7 @@ def call_tool(
     except Exception as e:
         raise _classify(e) from e
 
+    _log_api_cost(response, model)
     raw_args = _extract_tool_arguments(response, expected_name=tool_name)
     try:
         data = json.loads(raw_args)

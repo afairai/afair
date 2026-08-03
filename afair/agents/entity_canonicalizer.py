@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import sqlite3
 import time
 from typing import TYPE_CHECKING, Any
@@ -170,6 +171,23 @@ candidates. Pruned from the full pool by lexical similarity to the
 surface form so the LLM sees a small, relevant menu."""
 
 SONNET_ESCALATION_THRESHOLD = 0.7
+
+# Schalter fuer die Sonnet-Eskalation (Self-Host-Zusatz 2026-07-27).
+# Default "an" — der Upstream verhaelt sich unveraendert, solange niemand
+# etwas setzt. Wird zur LAUFZEIT gelesen (nicht beim Import), damit die
+# Cold-Path-Steuerdatei sie ohne Container-Neustart umlegen kann; der
+# Scheduler spiegelt das Feld ``sonnet_escalation`` in diese Variable.
+# Alles ausser den Aus-Werten gilt als "an", damit ein Tippfehler die
+# Genauigkeit nicht stillschweigend senkt.
+ESCALATION_ENV = "AFAIR_SONNET_ESCALATION"
+_ESCALATION_OFF = {"0", "off", "false", "no", "aus", "nein"}
+
+
+def escalation_enabled() -> bool:
+    """Whether an uncertain match may be re-asked with the pricier model."""
+    return os.environ.get(ESCALATION_ENV, "on").strip().lower() not in _ESCALATION_OFF
+
+
 """Decision #3: if Haiku returns a verdict with confidence below this,
 re-judge with Sonnet using the same prompt + candidates."""
 
@@ -1503,7 +1521,16 @@ def _sonnet_for(haiku_model: str) -> str | None:
     Anthropic-only. The Sonnet model name follows the same versioning
     convention as the Haiku default (see CLAUDE.md for the supported
     Claude 4.X family).
+
+    Returns None as well when escalation is switched off (see
+    ``escalation_enabled``). Self-host addition 2026-07-27: on Michael's
+    vault the escalation was 40% of the daily API spend while accounting
+    for only 11% of the calls — every uncertain name match cost a second,
+    3x pricier round trip. The first Haiku verdict still stands, and a
+    wrong merge surfaces in the edge-review queue he confirms anyway.
     """
+    if not escalation_enabled():
+        return None
     if not haiku_model.startswith("anthropic/"):
         return None
     if "haiku-4-5" in haiku_model:

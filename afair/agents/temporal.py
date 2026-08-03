@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
 from ..substrate import watermarks
+from ..substrate.edge_validity import sync_event_edge_validity
 from ..substrate.events import read_event_by_hash
 from ..substrate.temporal import TEMPORAL_CLASSES, write_event_temporal
 from .cold_path import ColdPathWorker
@@ -152,6 +153,7 @@ class TemporalWorker(ColdPathWorker):
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         stats: dict[str, Any] = {
             "events_classified": 0,
+            "edge_validity_spans": 0,
             "llm_calls": 0,
             "llm_errors": 0,
             "by_class": {},
@@ -202,6 +204,15 @@ class TemporalWorker(ColdPathWorker):
             )
             if row is not None:
                 stats["events_classified"] += 1
+                stats["edge_validity_spans"] += sync_event_edge_validity(
+                    conn,
+                    event_id=event.id,
+                    temporal_class=verdict.temporal_class,
+                    event_time=verdict.event_time,
+                    relevance_horizon=verdict.relevance_horizon,
+                    confidence=verdict.confidence,
+                    computed_by=TEMPORAL_VERSION,
+                )
                 by_class = stats["by_class"]
                 by_class[verdict.temporal_class] = by_class.get(verdict.temporal_class, 0) + 1
 

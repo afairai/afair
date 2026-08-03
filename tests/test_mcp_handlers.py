@@ -199,12 +199,49 @@ def test_recall_normal_depth_with_semantic_disabled_returns_shallow(
     assert r.depth_used == "shallow"
 
 
-def test_recall_deep_depth_degrades_with_note(ctx: ServerContext) -> None:
-    """Deep is not yet richer than normal; should always note that."""
+def test_recall_deep_reports_the_effective_mode(ctx: ServerContext) -> None:
+    """Deep remains deep when semantic recall is off: graph/MMR still run."""
     handlers.remember(content=TextContent(type="text", text="anything"))
     r = handlers.recall(query="anything", depth="deep")
-    # With semantic_recall disabled, deep also falls to shallow.
-    assert r.depth_used == "shallow"
+    assert r.depth_used == "deep"
+
+
+def test_recall_as_of_promotes_auto_to_deep_and_passes_clock(
+    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit world-time lens should be useful without also knowing the
+    internal depth switch, and the normalized instant must reach the graph
+    walker unchanged."""
+    handlers.remember(content=TextContent(type="text", text="Graphiti timeline anchor"))
+    seen: dict[str, str | None] = {}
+
+    def fake_expand(events, db, *, limit, as_of=None):
+        seen["as_of"] = as_of
+        return events, "graph test"
+
+    monkeypatch.setattr(handlers, "_expand_via_graph", fake_expand)
+    r = handlers.recall(
+        query="Graphiti timeline anchor",
+        as_of="2026-04-03T12:30:00+02:00",
+    )
+
+    assert r.depth_used == "deep"
+    assert seen["as_of"] == "2026-04-03T10:30:00+00:00"
+    assert r.note and "world-time lens" in r.note
+
+
+def test_recall_as_of_rejects_an_explicit_non_deep_mode(ctx: ServerContext) -> None:
+    with pytest.raises(ValueError, match='as_of requires depth="deep"'):
+        handlers.recall(
+            query="history",
+            depth="normal",
+            as_of="2026-04-03T12:30:00Z",
+        )
+
+
+def test_recall_as_of_rejects_a_malformed_timestamp(ctx: ServerContext) -> None:
+    with pytest.raises(ValueError, match="valid ISO 8601"):
+        handlers.recall(query="history", as_of="last Tuesday")
 
 
 def test_recall_normal_depth_with_mocked_embedding_uses_hybrid(

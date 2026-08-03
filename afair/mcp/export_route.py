@@ -10,6 +10,7 @@ Record shape:
   {"kind": "entity",        ...canonical entity (its own kind column as "entity_kind")}
   {"kind": "entity_mention", ...mention linking an event to an entity}
   {"kind": "entity_edge",   ...directed edge between two entities}
+  {"kind": "edge_validity_span", ...append-only fact-time interpretation}
   {"kind": "edge_confidence_score", ...append-only served-confidence overlay row}
   {"kind": "entity_merge",  ...merge decision between two entities}
   {"kind": "edge_invalidation",  ...an edge withdrawn from the live graph}
@@ -216,9 +217,10 @@ def _iter_export(
         # everything; entities precede their dependents (mentions, edges,
         # merges, retractions, identities, kind assignments, observations,
         # corrections); entity_merges precede merge_invalidations;
-        # entity_edges precede edge_confidence_scores, edge_invalidations and
-        # edge_reviews; kind_registry precedes kind_revisions. An importer that
-        # inserts in stream order never sees a dangling reference.
+        # entity_edges precede edge_validity_spans, edge_confidence_scores,
+        # edge_invalidations and edge_reviews; kind_registry precedes
+        # kind_revisions. An importer that inserts in stream order never sees a
+        # dangling reference.
         #
         # edge_confidence_scores is technically re-derivable by the cold-path
         # scorer, but the rows are small and the belief history ("what did the
@@ -248,6 +250,10 @@ def _iter_export(
             ("entities", "entity"),
             ("entity_mentions", "entity_mention"),
             ("entity_edges", "entity_edge"),
+            # ADR-0008: corrected fact-time spans are append-only belief
+            # history. Some rows are re-derivable, but explicit corrections are
+            # not; export all of them to preserve the user's complete record.
+            ("edge_validity_spans", "edge_validity_span"),
             ("edge_confidence_scores", "edge_confidence_score"),
             ("entity_merges", "entity_merge"),
             ("edge_invalidations", "edge_invalidation"),

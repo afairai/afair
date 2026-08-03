@@ -1079,6 +1079,52 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'event_provenance is append-only (ADR-0006 / Invariant I2)');
     END
     """,
+    # ── edge_validity_spans: fact-time overlay (ADR-0008) ─────────────────
+    # ``entity_edges.valid_from/valid_to`` are the immutable at-discovery
+    # snapshot.  Temporal interpretation can improve later, so corrected
+    # validity belongs in an append-only sidecar: newest recorded_at wins while
+    # every earlier belief remains auditable.  This gives each fact two clocks:
+    # valid_from/valid_to = when it was true in the world; recorded_at = when
+    # afair learned that interval.  No Graphiti/Neo4j runtime is introduced.
+    """
+    CREATE TABLE IF NOT EXISTS edge_validity_spans (
+        id              TEXT PRIMARY KEY,
+        edge_id         TEXT NOT NULL REFERENCES entity_edges(id),
+        valid_from      TEXT,
+        valid_to        TEXT,
+        recorded_at     TEXT NOT NULL,
+        recorded_by     TEXT NOT NULL,
+        source_event_id TEXT REFERENCES events(id),
+        confidence      REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+        reason          TEXT NOT NULL,
+        CHECK (valid_from IS NOT NULL OR valid_to IS NOT NULL)
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS edge_validity_spans_edge_idx "
+    "ON edge_validity_spans(edge_id, recorded_at DESC)",
+    "CREATE INDEX IF NOT EXISTS edge_validity_spans_source_event_idx "
+    "ON edge_validity_spans(source_event_id)",
+    # SQLite treats NULLs as distinct inside a regular UNIQUE constraint.  The
+    # expression index keeps a repeated worker run idempotent even for an open
+    # interval while a bumped recorded_by version can append a re-derivation.
+    "CREATE UNIQUE INDEX IF NOT EXISTS edge_validity_spans_dedupe_idx "
+    "ON edge_validity_spans("
+    "edge_id, COALESCE(valid_from, ''), COALESCE(valid_to, ''), "
+    "recorded_by, COALESCE(source_event_id, ''))",
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_validity_spans_no_update
+    BEFORE UPDATE ON edge_validity_spans
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_validity_spans is append-only (ADR-0008 / Invariant I2)');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS edge_validity_spans_no_delete
+    BEFORE DELETE ON edge_validity_spans
+    BEGIN
+        SELECT RAISE(ABORT, 'edge_validity_spans is append-only (ADR-0008 / Invariant I2)');
+    END
+    """,
 )
 
 
