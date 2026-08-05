@@ -30,7 +30,7 @@ dependencies = [
     # AES-256-GCM for the filesystem blob store (Stufe 1 encryption).
     # cryptography is widely audited, BSD-licensed; includes Python
     # bindings to the system-or-bundled OpenSSL.
-    "cryptography>=44.0.0",
+    "cryptography>=50.0.0",
     # Time-sortable identifiers for substrate events
     "python-ulid>=3.0.0",
     # GitHub OAuth client (for the identity-backend dance)
