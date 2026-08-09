@@ -459,6 +459,33 @@ class EntityCanonicalizer(ColdPathWorker):
 # ── Phase A: canonicalize new events ──────────────────────────────────────
 
 
+def backlog_count(conn: sqlite3.Connection) -> int:
+    """How many successfully extracted events still lack entity matching.
+
+    Same predicate as ``_find_uncanonicalized_events`` minus watermark and
+    limit (see temporal.backlog_count for why). Count only; never payloads.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT i.event_hash)
+        FROM interpretations i
+        WHERE i.produced_by LIKE 'extractor:%'
+          AND json_extract(i.extraction, '$.status') = 'success'
+          AND NOT EXISTS (
+              SELECT 1 FROM entity_mentions m
+              WHERE m.event_hash = i.event_hash
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM interpretations m
+              WHERE m.event_hash = i.event_hash
+                AND m.produced_by = :no_mentions
+          )
+        """,
+        {"no_mentions": NO_MENTIONS_PRODUCED_BY},
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def _find_uncanonicalized_events(
     conn: sqlite3.Connection, max_events: int, *, wm_id: str | None = None
 ) -> list[tuple[Event, dict[str, Any]]]:

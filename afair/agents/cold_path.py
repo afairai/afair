@@ -282,6 +282,11 @@ class ColdPathScheduler:
         self._last_run: dict[str, float] = {w.name: float("-inf") for w in self._workers}
         # A second tracker for SUCCESSFUL completion; used for diagnostics.
         self._last_success: dict[str, float] = dict.fromkeys(self._last_run, float("-inf"))
+        # Outcome of each worker's most recent cycle. "Completed" is not the
+        # same as "clean": a cycle can finish while individual LLM calls
+        # failed (llm_errors in the stats dict). /health surfaces this so a
+        # green scheduler cannot hide red calls.
+        self._last_stats: dict[str, dict[str, Any]] = {}
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -401,6 +406,8 @@ class ColdPathScheduler:
                 stats = worker.run(conn, self._settings)
             except Exception as e:
                 log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
+                with self._lock:
+                    self._last_stats[worker.name] = {"cycle_failed": True, "llm_errors": None}
                 # Roll back any open transaction so a worker that raised
                 # between a bare execute and its commit doesn't leak an
                 # open tx that the NEXT worker's commit would absorb
@@ -410,6 +417,11 @@ class ColdPathScheduler:
                     conn.rollback()
                 continue
             self._last_success[worker.name] = time.monotonic()
+            with self._lock:
+                self._last_stats[worker.name] = {
+                    "cycle_failed": False,
+                    "llm_errors": int(stats.get("llm_errors") or 0),
+                }
             log.info("cold_path.worker_done", worker=worker.name, **stats)
 
     @property
@@ -426,6 +438,8 @@ class ColdPathScheduler:
                 w.name: {
                     "interval_seconds": w.interval_seconds,
                     "parked": w.name in self._parked,
+                    "last_cycle_failed": self._last_stats.get(w.name, {}).get("cycle_failed"),
+                    "last_llm_errors": self._last_stats.get(w.name, {}).get("llm_errors"),
                     "seconds_since_last_run": (
                         None
                         if self._last_run[w.name] == float("-inf")

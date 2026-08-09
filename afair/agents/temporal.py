@@ -250,6 +250,29 @@ class TemporalWorker(ColdPathWorker):
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
+def backlog_count(conn: sqlite3.Connection) -> int:
+    """How many extracted events still lack a temporal classification.
+
+    Same predicate as ``_find_events_needing_temporal`` minus watermark and
+    limit — the watermark is a scan optimization, not a truth criterion, and
+    /health wants the truth. Count only; never payloads.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT i.event_hash)
+        FROM interpretations i
+        WHERE i.produced_by LIKE 'extractor:%'
+          AND NOT EXISTS (
+              SELECT 1 FROM event_temporal t
+              WHERE t.event_hash = i.event_hash
+                AND t.computed_by = :version
+          )
+        """,
+        {"version": TEMPORAL_VERSION},
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def _find_events_needing_temporal(
     conn: sqlite3.Connection, max_events: int, *, wm_id: str | None = None
 ) -> list[tuple[Event, dict[str, Any]]]:

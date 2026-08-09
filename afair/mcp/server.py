@@ -363,10 +363,19 @@ def build_server(settings: Settings) -> FastMCP:
             if snapshot is not None:
                 body["pipeline"] = _health_pipeline_block(snapshot)
             if scheduler is not None:
+                worker_status = scheduler.status()
                 body["workers"] = {
-                    name: {"seconds_since_last_success": st["seconds_since_last_success"]}
-                    for name, st in scheduler.status().items()
+                    name: {
+                        "seconds_since_last_success": st["seconds_since_last_success"],
+                        "parked": st["parked"],
+                        "last_cycle_failed": st["last_cycle_failed"],
+                        "last_llm_errors": st["last_llm_errors"],
+                    }
+                    for name, st in worker_status.items()
                 }
+                body["cold_path"] = _health_cold_path_block(
+                    db, worker_status, scheduler.paused, body.get("pipeline")
+                )
         except Exception as e:
             # Same path-hygiene rule as the degraded branch: log the class
             # only, never str(e) (it can carry the vault path).
@@ -403,6 +412,71 @@ def _health_pipeline_block(snapshot: dict[str, Any]) -> dict[str, Any]:
         "retry_exhausted": counters.get("retry_exhausted"),
         "permanent_failures": counters.get("permanent_failures"),
         "oldest_stuck_age_seconds": counters.get("oldest_stuck_age_seconds"),
+    }
+
+
+# Above this many unprocessed events the cold path reports itself degraded.
+# The point is honesty, not alarm precision: a parked worker or a growing
+# backlog must not hide behind a green pipeline_ok (which only tracks
+# expectation violations).
+_BACKLOG_WARN = 50
+
+
+def _health_cold_path_block(
+    db: Any,
+    worker_status: dict[str, dict[str, Any]],
+    paused: bool,
+    pipeline: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Honest cold-path health: parked/paused state, last-cycle LLM errors,
+    and the real processing backlogs. Counts/booleans only — same hygiene
+    rule as the pipeline block. Any failure yields a block that says so
+    instead of silently reporting green.
+    """
+    from ..agents import entity_canonicalizer, temporal
+
+    try:
+        entity_backlog = entity_canonicalizer.backlog_count(db)
+        temporal_backlog = temporal.backlog_count(db)
+    except Exception as e:
+        log.warning("health.cold_path_backlog_failed", exc_type=type(e).__name__)
+        entity_backlog = temporal_backlog = None
+
+    parked = sorted(n for n, st in worker_status.items() if st.get("parked"))
+    errors = {
+        n: st.get("last_llm_errors")
+        for n, st in worker_status.items()
+        if st.get("last_cycle_failed") or (st.get("last_llm_errors") or 0) > 0
+    }
+    permanent_failures = (pipeline or {}).get("permanent_failures") or 0
+
+    reasons: list[str] = []
+    if paused:
+        reasons.append("cold_path_paused")
+    if parked:
+        reasons.append("workers_parked")
+    if errors:
+        reasons.append("worker_errors_last_cycle")
+    if entity_backlog is None:
+        reasons.append("backlog_unknown")
+    else:
+        if entity_backlog > _BACKLOG_WARN:
+            reasons.append("entity_backlog")
+        if temporal_backlog > _BACKLOG_WARN:
+            reasons.append("temporal_backlog")
+    if permanent_failures > 0:
+        reasons.append("permanent_failures")
+
+    return {
+        "cold_path_ok": not reasons,
+        "reasons": reasons,
+        "paused": paused,
+        "parked_workers": parked,
+        "last_cycle_errors": errors,
+        "entity_backlog": entity_backlog,
+        "temporal_backlog": temporal_backlog,
+        "permanent_failures": permanent_failures,
+        "backlog_warn_threshold": _BACKLOG_WARN,
     }
 
 
