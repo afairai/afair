@@ -19,7 +19,9 @@ explicit control can still pass ``vault_key=...`` per call.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3 as _stdlib_sqlite
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import sqlite_vec  # type: ignore[import-untyped]
@@ -127,7 +129,22 @@ def open_db(
     # second opener simply waits its turn. Was the source of an
     # occasional CI flake on test_observe_via_mcp_protocol.
     conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    # The delete→WAL flip needs a moment with no other active connection,
+    # and it only ever happens on a vault's very FIRST open — once the file
+    # is WAL, this PRAGMA is a lock-free read-back. Two concurrent first
+    # opens (boot-warmup thread next to the first request) can both attempt
+    # the flip, and SQLite reports the loser immediately: the busy handler
+    # doesn't cover every lock acquisition inside the journal-mode
+    # transition. Bounded retry — by the next attempt the winner has
+    # flipped the file and this degrades to the read-back.
+    for attempt in range(10):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            break
+        except Exception as e:  # sqlcipher3 raises its own OperationalError class
+            if "database is locked" not in str(e) or attempt == 9:
+                raise
+            time.sleep(0.01 * (attempt + 1))
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA temp_store = MEMORY")
@@ -245,13 +262,28 @@ def init_db(
     the embedding_dim passed here AFTER initial creation, queries against
     the existing table still work but stored vectors are at the original
     dimension. To change dim mid-life, manually drop and recreate the table.
+
+    The DDL transaction enters as a WRITER (BEGIN IMMEDIATE), not deferred:
+    two concurrent first opens of the same vault (the boot-warmup thread
+    next to the first request; an admin backfill next to the server) race
+    deferred transactions into an instant "database is locked" — SQLite
+    skips the busy handler on a read→write lock upgrade because waiting
+    could deadlock, so busy_timeout never gets a say. Declaring write
+    intent up front parks the second opener in the busy handler until the
+    first commits; its DDL then no-ops on IF NOT EXISTS.
     """
-    with conn:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         for stmt in SCHEMA_DDL:
             conn.execute(stmt)
         # Vector DDL is parameterized by embedding_dim — render once at boot.
         for stmt_template in VEC_DDL:
             conn.execute(stmt_template.format(dim=embedding_dim))
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
     # ADR-0004: widen the proposed_corrections.kind CHECK on pre-existing vaults
     # so 'edge_review' proposals can be inserted. Guarded + idempotent; a no-op
     # on fresh vaults (SCHEMA_DDL already ships the widened CHECK) and on

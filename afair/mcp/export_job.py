@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import json
+import threading
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -191,19 +192,24 @@ def _notify_export_ready(
         log.warning("export.notify.failed", error=str(exc))
 
 
-def start_purge_loop(settings: Settings, *, interval_seconds: int = 3600) -> None:
+def start_purge_loop(
+    settings: Settings,
+    *,
+    interval_seconds: int = 3600,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread:
     """Spawn a daemon thread that purges expired export artifacts hourly.
 
     Cheap (one indexed SELECT + a few unlinks), bounded, and self-healing —
-    a failed cycle logs and retries next interval. Started from the server
-    boot path alongside the checkpoint loop.
+    a failed cycle logs and retries next interval. Started from the app
+    lifespan alongside the checkpoint loop. Setting ``stop_event`` wakes
+    the loop out of its sleep and ends it so the returned thread can be
+    joined; without one it runs for the life of the process.
     """
-    import threading
-    import time
+    stop = stop_event if stop_event is not None else threading.Event()
 
     def _loop() -> None:
-        while True:
-            time.sleep(interval_seconds)
+        while not stop.wait(interval_seconds):
             try:
                 conn = open_db(settings.vault_dir)
                 try:
@@ -213,8 +219,10 @@ def start_purge_loop(settings: Settings, *, interval_seconds: int = 3600) -> Non
             except Exception as exc:
                 log.warning("export.purge.cycle_failed", error=str(exc))
 
-    threading.Thread(target=_loop, daemon=True, name="export-purge").start()
+    thread = threading.Thread(target=_loop, daemon=True, name="export-purge")
+    thread.start()
     log.info("export.purge.loop_started", interval_seconds=interval_seconds)
+    return thread
 
 
 def purge_expired(vault_dir: Path, conn: sqlite3.Connection) -> int:
