@@ -509,3 +509,44 @@ def test_objects_directory_created(tmp_path: Path) -> None:
         assert (tmp_path / "objects").is_dir()
     finally:
         db.close()
+
+
+def test_first_open_is_safe_under_concurrency(tmp_path: Path) -> None:
+    """Concurrent FIRST opens of the same fresh vault must all succeed.
+
+    This is the boot reality since the app lifespan starts the daemons:
+    the warmup thread and the first request race open_db on a vault that
+    doesn't exist yet. Deferred DDL transactions and the delete→WAL flip
+    used to lose that race with an instant "database is locked" (the busy
+    handler is skipped on read→write upgrades); BEGIN IMMEDIATE plus the
+    bounded WAL-flip retry make it deterministic. Pre-fix this failed in
+    ~2 of 3 rounds, so a handful of rounds is a strong detector.
+    """
+    import threading
+
+    for round_no in range(5):
+        vault = tmp_path / f"round-{round_no}"
+        barrier = threading.Barrier(3)
+        errors: list[str] = []
+
+        def open_and_probe(
+            target: Path = vault,
+            gate: threading.Barrier = barrier,
+            sink: list[str] = errors,
+        ) -> None:
+            gate.wait()
+            try:
+                conn = open_db(target)
+                try:
+                    conn.execute("SELECT 1").fetchone()
+                finally:
+                    conn.close()
+            except Exception as e:  # collected for the assert
+                sink.append(f"{type(e).__name__}: {e}")
+
+        threads = [threading.Thread(target=open_and_probe) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []

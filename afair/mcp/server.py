@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -97,13 +98,86 @@ if TYPE_CHECKING:
     from ..settings import Settings
 
 
-def build_server(settings: Settings) -> FastMCP:
+def _build_scheduler(settings: Settings) -> ColdPathScheduler | None:
+    """Construct — but do NOT start — the Phase 3 sleep swarm scheduler.
+
+    Daemon thread (once started by the app lifespan) runs Pruner +
+    Conflict-Resolver + Consolidator + the rest on their own intervals.
+    Each worker is independently tested + bounded so a single bad cycle
+    can't crash the scheduler. The instance is handed to ``build_server``
+    so /health can read per-worker liveness via ``scheduler.status()``.
+    None when the cold path is disabled (self-hosters may run read-only).
+    """
+    if not settings.cold_path_enabled:
+        return None
+    return ColdPathScheduler(
+        vault_dir=settings.vault_dir,
+        embedding_dim=settings.embedding_dim,
+        settings=settings,
+        workers=[
+            Pruner(),
+            OrphanBlobSweeper(),
+            # Bounded re-extraction of events whose latest extractor
+            # interpretation is a transient failure (llm_timeout /
+            # llm_rate_limit). Closes the silent-permanent-gap failure
+            # mode where a timed-out extraction was never re-attempted.
+            ExtractionRetryWorker(),
+            # Phase 0.5 observability — detection-only. Counts silent
+            # pipeline failures (event.written with no terminal
+            # extraction stage, retry-exhausted, permanent failures)
+            # into an append-only snapshot that /health surfaces.
+            ExpectationChecker(),
+            EntityAuditWorker(),
+            ConflictResolver(),
+            Consolidator(),
+            EntityCanonicalizer(),
+            EntityDeduplicator(),
+            EdgeConfidenceScorer(),
+            LivingSynthesisWorker(),
+            TemporalWorker(),
+            SalienceWorker(),
+            # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
+            # kind-usage + kind_observations signals daily and drafts
+            # bounded ontology-revision proposals into the quarantine
+            # queue; nothing is applied without the operator (Phase 5).
+            SchemaEvolver(),
+            ModeSwitcher(),
+            # Self-improvement tuner — observation mode (Phase B
+            # held at promote_enabled=False until a ground-truth
+            # eval-set lands, per the audit pass on 2026-06-03).
+            # Without an eval-set, the LLM judge is the only gate,
+            # and judge-judging-judge is research-grade dubious.
+            # In observe mode the tuner still generates hypotheses
+            # and runs replay + invariant guards, writing
+            # hypothesis/observation rows to tuner_state — but it
+            # returns BEFORE the judge panel, so no judge verdicts
+            # (and no 3-vendor LLM cost) accumulate, and no tuned
+            # value is ever mutated in production. Flip to True
+            # once the eval framework is wired in.
+            # RollbackMonitor stays registered but is effectively
+            # vestigial while no promotes happen.
+            Tuner(promote_enabled=False),
+            RollbackMonitor(),
+        ],
+    )
+
+
+def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = None) -> FastMCP:
     """Construct a FastMCP instance wired to the substrate.
 
     Production no longer holds a single shared sqlite3.Connection on
     ServerContext — handlers acquire per-thread connections via
     ``connect_for_thread()`` so SQLite WAL's concurrent-reader model
     is actually exercised when multiple AI clients hit the server.
+
+    Building a server is side-effect-free thread-wise: the background
+    daemons (cold-path scheduler, WAL checkpoint, export purge, warmup)
+    are started by the app lifespan in ``build_app``, not here, so tests
+    and the golden-surface dump can construct servers for inspection
+    without spawning process-long threads. ``scheduler`` is the
+    already-constructed (not started) cold-path scheduler, passed in so
+    /health can serve worker liveness; ``None`` means no cold path
+    (disabled, or a caller that never runs background daemons).
 
     The server name "afair" is the codename surface visible to MCP
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
@@ -118,8 +192,9 @@ def build_server(settings: Settings) -> FastMCP:
 
     # Install the vault encryption key first, before ANY open_db call
     # (set_context below itself does not open a connection, but the
-    # warmup thread and cold-path scheduler will). Production refuses
-    # to start without one — see settings._vault_key_required_in_prod.
+    # background daemons started later by the app lifespan will).
+    # Production refuses to start without one — see
+    # settings._vault_key_required_in_prod.
     if settings.vault_key is not None:
         set_vault_key(settings.vault_key.get_secret_value().encode("utf-8"))
 
@@ -141,85 +216,6 @@ def build_server(settings: Settings) -> FastMCP:
             surprise_context_window=settings.surprise_context_window,
         )
     )
-
-    # Phase 3 sleep swarm. Daemon thread runs Pruner + Conflict-Resolver
-    # + Consolidator on their own intervals. Each worker is independently
-    # tested + bounded so a single bad cycle can't crash the scheduler.
-    # Retained so /health can read per-worker liveness via scheduler.status().
-    # None when the cold path is disabled (self-hosters may run read-only).
-    scheduler: ColdPathScheduler | None = None
-    if settings.cold_path_enabled:
-        scheduler = ColdPathScheduler(
-            vault_dir=settings.vault_dir,
-            embedding_dim=settings.embedding_dim,
-            settings=settings,
-            workers=[
-                Pruner(),
-                OrphanBlobSweeper(),
-                # Bounded re-extraction of events whose latest extractor
-                # interpretation is a transient failure (llm_timeout /
-                # llm_rate_limit). Closes the silent-permanent-gap failure
-                # mode where a timed-out extraction was never re-attempted.
-                ExtractionRetryWorker(),
-                # Phase 0.5 observability — detection-only. Counts silent
-                # pipeline failures (event.written with no terminal
-                # extraction stage, retry-exhausted, permanent failures)
-                # into an append-only snapshot that /health surfaces.
-                ExpectationChecker(),
-                EntityAuditWorker(),
-                ConflictResolver(),
-                Consolidator(),
-                EntityCanonicalizer(),
-                EntityDeduplicator(),
-                EdgeConfidenceScorer(),
-                LivingSynthesisWorker(),
-                TemporalWorker(),
-                SalienceWorker(),
-                # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
-                # kind-usage + kind_observations signals daily and drafts
-                # bounded ontology-revision proposals into the quarantine
-                # queue; nothing is applied without the operator (Phase 5).
-                SchemaEvolver(),
-                ModeSwitcher(),
-                # Self-improvement tuner — observation mode (Phase B
-                # held at promote_enabled=False until a ground-truth
-                # eval-set lands, per the audit pass on 2026-06-03).
-                # Without an eval-set, the LLM judge is the only gate,
-                # and judge-judging-judge is research-grade dubious.
-                # In observe mode the tuner still generates hypotheses
-                # and runs replay + invariant guards, writing
-                # hypothesis/observation rows to tuner_state — but it
-                # returns BEFORE the judge panel, so no judge verdicts
-                # (and no 3-vendor LLM cost) accumulate, and no tuned
-                # value is ever mutated in production. Flip to True
-                # once the eval framework is wired in.
-                # RollbackMonitor stays registered but is effectively
-                # vestigial while no promotes happen.
-                Tuner(promote_enabled=False),
-                RollbackMonitor(),
-            ],
-        )
-        scheduler.start()
-
-    # Background WAL-checkpoint loop — folds back the WAL file every 5
-    # minutes so it doesn't grow unbounded on long-running servers.
-    start_checkpoint_loop(
-        settings.vault_dir,
-        embedding_dim=settings.embedding_dim,
-        interval_seconds=300,
-    )
-
-    # Auto-purge expired async-export artifacts (a full plaintext-equivalent
-    # vault dump must not linger past its 72h download window).
-    from .export_job import start_purge_loop
-
-    start_purge_loop(settings, interval_seconds=3600)
-
-    # Pre-warm in a background thread so boot stays fast but the first
-    # user request hits an already-open SQLite connection AND an already-
-    # warm OpenAI HTTPS connection. Pays ~1-2s of cold-start cost upfront
-    # so the first real recall isn't penalized.
-    _spawn_warmup(settings)
 
     mcp: FastMCP = FastMCP("afair", instructions=descriptions.server_instructions())
 
@@ -432,7 +428,8 @@ def build_app(settings: Settings) -> Starlette:
     /health is the only exempt path: Fly's orchestrator probes it to
     determine liveness and cannot present the auth token.
     """
-    mcp = build_server(settings)
+    scheduler = _build_scheduler(settings)
+    mcp = build_server(settings, scheduler=scheduler)
     mcp_app = mcp.http_app()
     static_token = (
         settings.auth_token.get_secret_value() if settings.auth_token is not None else None
@@ -675,11 +672,22 @@ def build_app(settings: Settings) -> Starlette:
     # StreamableHTTPSessionManager initializes correctly. We wrap it so the
     # anyio thread-limiter cap is applied INSIDE the event loop at startup
     # (P2a — memory ceiling; see _apply_thread_limiter_cap) before delegating.
+    # The background daemons are lifespan-scoped: started here (not as a
+    # build-time side effect) and stopped on the way out, so a TestClient
+    # context exit — or a SIGTERM'd production server — leaves no daemon
+    # polling a vault that no longer exists. The stop is a deliberately
+    # synchronous, per-thread-bounded join (sleeping loops wake off their
+    # Event immediately); by teardown time the session manager has already
+    # shut down, so briefly blocking the loop costs nothing.
     @contextlib.asynccontextmanager
     async def lifespan(app_: Starlette) -> Any:
         _apply_thread_limiter_cap(settings)
-        async with mcp_app.lifespan(app_):
-            yield
+        background = _start_background(settings, scheduler)
+        try:
+            async with mcp_app.lifespan(app_):
+                yield
+        finally:
+            background.stop()
 
     app = Starlette(
         routes=routes,
@@ -709,7 +717,81 @@ def _apply_thread_limiter_cap(settings: Settings) -> None:
         log.warning("thread_limiter.cap_failed", error=str(e))
 
 
-def _spawn_warmup(settings: Settings) -> None:
+@dataclass
+class _BackgroundThreads:
+    """Handles for the daemons the app lifespan starts — and stops.
+
+    ``stop_event`` is shared by the checkpoint + purge loops (the
+    scheduler owns its own event behind ``stop()``); ``threads`` also
+    carries the one-shot warmup thread, whose join is best-effort.
+    """
+
+    stop_event: threading.Event
+    scheduler: ColdPathScheduler | None
+    threads: list[threading.Thread]
+
+    def stop(self, *, join_timeout: float = 2.0) -> None:
+        """Signal every loop and join each thread (bounded per thread).
+
+        Sleeping loops wake immediately off their Event, so in practice
+        the joins return in microseconds; the timeout only bites when a
+        cycle is mid-work (LLM call, embedding warmup). Every thread is
+        a daemon, so a blown timeout degrades to exactly the pre-teardown
+        behavior: the thread dies with the process.
+        """
+        self.stop_event.set()
+        if self.scheduler is not None:
+            self.scheduler.stop(timeout=join_timeout)
+        for thread in self.threads:
+            thread.join(timeout=join_timeout)
+        leaked = [t.name for t in self.threads if t.is_alive()]
+        if leaked:
+            log.warning("background.stop_timeout", still_running=leaked)
+        else:
+            log.info("background.stopped")
+
+
+def _start_background(
+    settings: Settings, scheduler: ColdPathScheduler | None
+) -> _BackgroundThreads:
+    """Start the background daemons. Called from the app lifespan startup;
+    the matching ``.stop()`` runs at lifespan shutdown, so a TestClient
+    context (or a SIGTERM'd production server) leaves no threads behind
+    working on a vault that may already be gone.
+    """
+    stop_event = threading.Event()
+    threads: list[threading.Thread] = []
+
+    if scheduler is not None:
+        scheduler.start()
+
+    # Background WAL-checkpoint loop — folds back the WAL file every 5
+    # minutes so it doesn't grow unbounded on long-running servers.
+    threads.append(
+        start_checkpoint_loop(
+            settings.vault_dir,
+            embedding_dim=settings.embedding_dim,
+            interval_seconds=300,
+            stop_event=stop_event,
+        )
+    )
+
+    # Auto-purge expired async-export artifacts (a full plaintext-equivalent
+    # vault dump must not linger past its 72h download window).
+    from .export_job import start_purge_loop
+
+    threads.append(start_purge_loop(settings, interval_seconds=3600, stop_event=stop_event))
+
+    # Pre-warm in a background thread so boot stays fast but the first
+    # user request hits an already-open SQLite connection AND an already-
+    # warm OpenAI HTTPS connection. Pays ~1-2s of cold-start cost upfront
+    # so the first real recall isn't penalized.
+    threads.append(_spawn_warmup(settings))
+
+    return _BackgroundThreads(stop_event=stop_event, scheduler=scheduler, threads=threads)
+
+
+def _spawn_warmup(settings: Settings) -> threading.Thread:
     """Pre-warm SQLite + the embedding provider in a background thread.
 
     Sequenced:
@@ -722,7 +804,8 @@ def _spawn_warmup(settings: Settings) -> None:
          cached) and ONNX session creation.
 
     Runs as a daemon thread so boot stays fast and a slow/failed warmup
-    doesn't block server startup.
+    doesn't block server startup. One-shot: ends on its own; the returned
+    thread lets the lifespan teardown join it (best-effort, bounded).
     """
 
     def warmup() -> None:
@@ -756,7 +839,9 @@ def _spawn_warmup(settings: Settings) -> None:
         except Exception as e:
             log.warning("warmup.embedding_failed", error=str(e))
 
-    threading.Thread(target=warmup, name="boot-warmup", daemon=True).start()
+    thread = threading.Thread(target=warmup, name="boot-warmup", daemon=True)
+    thread.start()
+    return thread
 
 
 def run(settings: Settings) -> None:
