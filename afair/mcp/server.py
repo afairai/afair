@@ -820,12 +820,14 @@ def _start_background(
     # user request hits an already-open SQLite connection AND an already-
     # warm OpenAI HTTPS connection. Pays ~1-2s of cold-start cost upfront
     # so the first real recall isn't penalized.
-    threads.append(_spawn_warmup(settings))
+    threads.append(_spawn_warmup(settings, stop_event=stop_event))
 
     return _BackgroundThreads(stop_event=stop_event, scheduler=scheduler, threads=threads)
 
 
-def _spawn_warmup(settings: Settings) -> threading.Thread:
+def _spawn_warmup(
+    settings: Settings, *, stop_event: threading.Event | None = None
+) -> threading.Thread:
     """Pre-warm SQLite + the embedding provider in a background thread.
 
     Sequenced:
@@ -840,14 +842,24 @@ def _spawn_warmup(settings: Settings) -> threading.Thread:
     Runs as a daemon thread so boot stays fast and a slow/failed warmup
     doesn't block server startup. One-shot: ends on its own; the returned
     thread lets the lifespan teardown join it (best-effort, bounded).
+    ``stop_event`` is checked between phases: a lifespan that ends before
+    the embedding phase (a short-lived TestClient context) skips it —
+    warming a provider for a server that is already shutting down would
+    only drag expensive imports (litellm) into the teardown window.
     """
+    stop = stop_event if stop_event is not None else threading.Event()
 
     def warmup() -> None:
+        if stop.is_set():
+            return
         try:
             db = connect_for_thread()
             db.execute("SELECT 1").fetchone()
         except Exception as e:
             log.warning("warmup.db_failed", error=str(e))
+
+        if stop.is_set():
+            return
 
         # Skip embedding warmup if we have no API key for the configured
         # model — in dev without keys this would just log a warning.
