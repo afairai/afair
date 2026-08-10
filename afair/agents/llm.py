@@ -36,14 +36,22 @@ def _log_api_cost(response: Any, model: str) -> None:
         if str(model).startswith("ollama/"):
             return  # lokal = gratis
         import datetime
+
         import litellm
+
         cost = litellm.completion_cost(completion_response=response) or 0.0
         os.makedirs(os.path.dirname(_COST_LOG), exist_ok=True)
         with open(_COST_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                "model": str(model), "usd": round(float(cost), 6),
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                        "model": str(model),
+                        "usd": round(float(cost), 6),
+                    }
+                )
+                + "\n"
+            )
     except Exception:
         pass  # Kostenmessung darf einen Lauf NIE scheitern lassen
 

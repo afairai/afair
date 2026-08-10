@@ -431,6 +431,8 @@ def _health_cold_path_block(
     """
     from ..agents import entity_canonicalizer, temporal
 
+    entity_backlog: int | None
+    temporal_backlog: int | None
     try:
         entity_backlog = entity_canonicalizer.backlog_count(db)
         temporal_backlog = temporal.backlog_count(db)
@@ -453,7 +455,7 @@ def _health_cold_path_block(
         reasons.append("workers_parked")
     if errors:
         reasons.append("worker_errors_last_cycle")
-    if entity_backlog is None:
+    if entity_backlog is None or temporal_backlog is None:
         reasons.append("backlog_unknown")
     else:
         if entity_backlog > _BACKLOG_WARN:
