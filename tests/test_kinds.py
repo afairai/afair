@@ -146,6 +146,10 @@ def test_existing_vault_gains_registry_without_touching_entities(tmp_path: Path)
         conn.execute("DROP TABLE kind_observations")
         conn.execute("DROP TABLE kind_revisions")
         conn.execute("DROP TABLE kind_registry")
+        # A real pre-registry vault carries SQLite's default user_version 0;
+        # resetting the schema fingerprint is part of faking one, else the
+        # next open fast-paths past the DDL and never recreates the tables.
+        conn.execute("PRAGMA user_version = 0")
     conn.close()
 
     conn = open_db(tmp_path)

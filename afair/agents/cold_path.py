@@ -123,14 +123,20 @@ class ColdPathScheduler:
         self._last_success: dict[str, float] = dict.fromkeys(self._last_run, float("-inf"))
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Set by stop(): wakes the poll sleep immediately and ends the loop
+        # so the daemon can be joined at lifespan shutdown instead of being
+        # abandoned mid-sleep (it would otherwise keep polling a vault that
+        # a test teardown already deleted).
+        self._stop = threading.Event()
 
     def start(self) -> threading.Thread:
         """Spawn the daemon. Idempotent — repeat calls return the same
-        thread. The scheduler is intended to be process-global; only
-        ``build_server`` should call this."""
+        thread. The scheduler is intended to be process-global; only the
+        app lifespan (via ``_start_background``) should call this."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return self._thread
+            self._stop.clear()
             self._thread = threading.Thread(
                 target=self._loop, name="cold-path-scheduler", daemon=True
             )
@@ -142,12 +148,27 @@ class ColdPathScheduler:
             )
             return self._thread
 
+    def stop(self, timeout: float = 5.0) -> None:
+        """Signal the daemon to exit and join it (bounded).
+
+        Sleeping loops wake immediately; a worker mid-cycle finishes its
+        current step and the batch aborts at the next between-worker check.
+        The thread stays a daemon, so a join that outlasts ``timeout``
+        (e.g. an LLM call in flight) never blocks process exit — the
+        daemon then dies with the process exactly as before.
+        """
+        self._stop.set()
+        with self._lock:
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        log.info("cold_path.scheduler_stopped", joined=thread is None or not thread.is_alive())
+
     def _loop(self) -> None:
         # Connection is opened lazily inside the loop so a startup-time
         # filesystem hiccup doesn't crash before the daemon's first poll.
         conn: sqlite3.Connection | None = None
-        while True:
-            time.sleep(self._poll_seconds)
+        while not self._stop.wait(self._poll_seconds):
             now = time.monotonic()
             due = [w for w in self._workers if now - self._last_run[w.name] >= w.interval_seconds]
             if not due:
@@ -159,6 +180,15 @@ class ColdPathScheduler:
                     log.warning("cold_path.db_open_failed", error=str(e))
                     continue
             for worker in due:
+                # Re-check between workers, not just between cycles: a batch
+                # of due workers can occupy the thread for minutes (a single
+                # living_syntheses pass writes several syntheses), and a stop
+                # that only lands after the batch finished is not a stop
+                # button. One Event check per worker is a rounding error
+                # next to an LLM call.
+                if self._stop.is_set():
+                    log.info("cold_path.batch_interrupted_by_stop", remaining=len(due))
+                    return
                 self._last_run[worker.name] = time.monotonic()
                 try:
                     stats = worker.run(conn, self._settings)
