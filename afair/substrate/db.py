@@ -20,8 +20,10 @@ explicit control can still pass ``vault_key=...`` per call.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import sqlite3 as _stdlib_sqlite
 import time
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
 
 import sqlite_vec  # type: ignore[import-untyped]
@@ -252,6 +254,23 @@ def _open_connection(
     return plain_conn
 
 
+@lru_cache(maxsize=8)
+def _schema_fingerprint(embedding_dim: int) -> int:
+    """31-bit digest of the exact DDL this build would execute.
+
+    Stored in ``PRAGMA user_version`` after a successful DDL pass so later
+    opens can skip the pass entirely (see :func:`init_db`). Computed from
+    the DDL strings themselves (with the vec templates rendered at the
+    given dim), so ANY schema change — a new table in an upgrade, a
+    different embedding dim — changes the digest and re-arms the guarded
+    path automatically; nothing to remember to bump. Never 0: 0 is
+    SQLite's default user_version, i.e. "no pass recorded yet".
+    """
+    rendered = "\n".join([*SCHEMA_DDL, *(t.format(dim=embedding_dim) for t in VEC_DDL)])
+    digest = hashlib.sha256(rendered.encode("utf-8")).digest()
+    return (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF) or 1
+
+
 def init_db(
     conn: _stdlib_sqlite.Connection,
     *,
@@ -264,27 +283,40 @@ def init_db(
     the existing table still work but stored vectors are at the original
     dimension. To change dim mid-life, manually drop and recreate the table.
 
-    The DDL transaction enters as a WRITER (BEGIN IMMEDIATE), not deferred:
-    two concurrent first opens of the same vault (the boot-warmup thread
-    next to the first request; an admin backfill next to the server) race
+    Fast path: a vault whose ``PRAGMA user_version`` already carries this
+    build's schema fingerprint skips the DDL pass — no write lock, no
+    dozens of no-op IF NOT EXISTS statements — so routine per-thread
+    connects on a live vault stay read-only here.
+
+    Slow path (fingerprint mismatch: fresh vault, upgraded build, changed
+    dim) runs the DDL as a WRITER (BEGIN IMMEDIATE), not deferred: two
+    concurrent first opens of the same vault (the boot-warmup thread next
+    to the first request; an admin backfill next to the server) race
     deferred transactions into an instant "database is locked" — SQLite
     skips the busy handler on a read→write lock upgrade because waiting
     could deadlock, so busy_timeout never gets a say. Declaring write
     intent up front parks the second opener in the busy handler until the
-    first commits; its DDL then no-ops on IF NOT EXISTS.
+    first commits; its DDL then no-ops on IF NOT EXISTS. The fingerprint
+    is stamped inside the same transaction, so a failed pass re-runs in
+    full on the next open.
     """
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for stmt in SCHEMA_DDL:
-            conn.execute(stmt)
-        # Vector DDL is parameterized by embedding_dim — render once at boot.
-        for stmt_template in VEC_DDL:
-            conn.execute(stmt_template.format(dim=embedding_dim))
-    except BaseException:
-        with contextlib.suppress(Exception):
-            conn.execute("ROLLBACK")
-        raise
-    conn.execute("COMMIT")
+    fingerprint = _schema_fingerprint(embedding_dim)
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current != fingerprint:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for stmt in SCHEMA_DDL:
+                conn.execute(stmt)
+            # Vector DDL is parameterized by embedding_dim — render once at boot.
+            for stmt_template in VEC_DDL:
+                conn.execute(stmt_template.format(dim=embedding_dim))
+            # PRAGMA accepts no bind parameters; fingerprint is our own int.
+            conn.execute(f"PRAGMA user_version = {fingerprint}")
+        except BaseException:
+            with contextlib.suppress(Exception):
+                conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
     # ADR-0004: widen the proposed_corrections.kind CHECK on pre-existing vaults
     # so 'edge_review' proposals can be inserted. Guarded + idempotent; a no-op
     # on fresh vaults (SCHEMA_DDL already ships the widened CHECK) and on

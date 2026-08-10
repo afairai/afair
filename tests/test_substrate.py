@@ -511,6 +511,35 @@ def test_objects_directory_created(tmp_path: Path) -> None:
         db.close()
 
 
+def test_schema_fingerprint_gates_the_ddl_pass(tmp_path: Path) -> None:
+    """A successful DDL pass stamps its fingerprint into user_version, so
+    routine re-opens skip the pass; clearing the stamp re-arms it."""
+    from afair.substrate.db import _schema_fingerprint
+
+    expected = _schema_fingerprint(1536)
+    assert expected != 0  # 0 means "no pass recorded" and must never collide
+
+    db = open_db(tmp_path)
+    try:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == expected
+        # Simulate a pre-fingerprint vault (every vault created before this
+        # change carries SQLite's default 0).
+        db.execute("PRAGMA user_version = 0")
+    finally:
+        db.close()
+
+    db = open_db(tmp_path)
+    try:
+        # The full DDL pass re-ran (all no-ops) and restamped the marker.
+        assert db.execute("PRAGMA user_version").fetchone()[0] == expected
+        tables = {
+            r["name"] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "events" in tables
+    finally:
+        db.close()
+
+
 def test_first_open_is_safe_under_concurrency(tmp_path: Path) -> None:
     """Concurrent FIRST opens of the same fresh vault must all succeed.
 
