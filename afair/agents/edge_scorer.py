@@ -74,7 +74,12 @@ completes in two cycles; steady-state re-scoring is far smaller."""
 
 EDGE_REVIEW_PROPOSAL_THRESHOLD = 0.6
 """Served confidence below which a live, unreviewed, `proposed` edge becomes a
-candidate for the operator's review queue (ADR-0004 C4)."""
+candidate for the operator's review queue (ADR-0004 C4). The queue draws ONLY
+from the band ``[EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_
+THRESHOLD)``: an edge below the expiry floor is noise, not a question — it
+either auto-expires (never served) or lives on with its low-confidence caveat
+(served), but it never costs the operator a review (2026-08-10 operator
+decision after sub-0.5 vague edges kept surfacing as questions)."""
 
 MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE = 3
 """Only the K lowest-confidence uncertain edges are queued per cycle —
@@ -108,7 +113,10 @@ with ``LOW_CONFIDENCE_EDGE_CAVEAT_THRESHOLD`` (handlers.py) — an edge recall
 would only ever surface WITH a low-confidence caveat, and that never actually
 got served, is noise worth retiring. Strictly below the 0.6 review threshold:
 a served edge in [0.5, 0.6) is worth a human glance (queued), while an edge
-under 0.5 that recall never even surfaced is not."""
+under 0.5 is not — never served it auto-expires here; served it lives on with
+its caveat but is excluded from the review queue (the ``>=`` floor in
+``_fetch_review_candidate_page``), so a sub-0.5 derivation never becomes an
+operator question either way."""
 
 EDGE_EXPIRY_MIN_AGE_DAYS = 14
 """Grace period before a never-served low-confidence edge can be auto-expired.
@@ -161,7 +169,7 @@ class EdgeConfidenceScorer(ColdPathWorker):
             "edges_skipped_unchanged": 0,
             "legacy_backfilled": 0,
         }
-        base_rate, corroboration_weight = _resolve_weights(conn)
+        base_rate, corroboration_weight, vague_penalty = _resolve_weights(conn)
 
         edges = _select_edges_to_score(conn, MAX_EDGES_PER_CYCLE)
         if edges:
@@ -177,6 +185,7 @@ class EdgeConfidenceScorer(ColdPathWorker):
                     _recover_signals(conn, edge, corroborating=corroborating.get(edge.id, 0)),
                     base_rate=base_rate,
                     corroboration_weight=corroboration_weight,
+                    vague_penalty=vague_penalty,
                 )
                 prev_v1 = latest_v1.get(edge.id)
                 if prev_v1 is not None and abs(new_conf - prev_v1) < EDGE_CONFIDENCE_EPSILON:
@@ -243,30 +252,29 @@ class EdgeConfidenceScorer(ColdPathWorker):
 # ── weight resolution (registry, S8) ───────────────────────────────────────
 
 
-def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float]:
-    """Resolve base_rate + corroboration_weight through the tuner registry,
-    falling back to the module defaults (surprise-window pattern). A registry
-    hiccup must never break scoring, so a narrowed error serves the pure-model
-    defaults; a genuine bug propagates."""
-    from ..substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION
+def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float, float]:
+    """Resolve base_rate + corroboration_weight + vague_penalty through the
+    tuner registry, falling back to the module defaults (surprise-window
+    pattern). A registry hiccup must never break scoring, so a narrowed error
+    serves the pure-model defaults; a genuine bug propagates."""
+    from ..substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
 
-    base_rate = DEFAULT_BASE_RATE
-    corroboration_weight = W_CORROBORATION
     try:
         from .tunable_registry import TunableRegistry
 
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
+        vague_penalty = float(registry.get("edge_confidence", "vague_penalty"))
     except _TUNABLE_FALLBACK_ERRORS as exc:
         log.warning(
             "tunable_registry.fallback",
             worker="edge_scorer",
-            tunable="edge_confidence.base_rate/corroboration_weight",
+            tunable="edge_confidence.base_rate/corroboration_weight/vague_penalty",
             error=str(exc),
         )
-        return DEFAULT_BASE_RATE, W_CORROBORATION
-    return base_rate, corroboration_weight
+        return DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
+    return base_rate, corroboration_weight, vague_penalty
 
 
 # ── selection ───────────────────────────────────────────────────────────────
@@ -432,9 +440,12 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     Selects live (non-invalidated), unreviewed, and ACTUALLY-SERVED edges
     (``EXISTS edge_serves`` — an edge recall never surfaced is not worth the
     operator's attention; that reversal is the core of the serve-gated review
-    design) whose SERVED confidence is below the threshold — those resolve to
-    `proposed` (served < threshold < the auto-confirm floor). Lowest confidence
-    first. Each is inserted into
+    design) whose SERVED confidence sits in the review band
+    ``[EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_THRESHOLD)`` —
+    those resolve to `proposed` (served < threshold < the auto-confirm floor).
+    Below the band an edge is noise, not a question: it never queues, however
+    often recall served it (it keeps its low-confidence caveat instead).
+    Lowest confidence first. Each is inserted into
     ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE``,
     which under the partial unique index ``proposed_corrections_open_unique``
     (one OPEN row per (kind, subject)) means a re-run never duplicates an open
@@ -499,8 +510,9 @@ def _fetch_review_candidate_page(
     cursor: tuple[float, str, str] | None,
     page_size: int,
 ) -> list[Any]:
-    """One keyset page of low-confidence, live, unreviewed edge candidates,
-    ordered ``(served_confidence, discovered_at, id)`` ascending.
+    """One keyset page of live, unreviewed edge candidates inside the review
+    band ``[expiry floor, review threshold)``, ordered
+    ``(served_confidence, discovered_at, id)`` ascending.
 
     ``cursor`` is the last row of the previous page; None for the first page.
     The keyset predicate repeats the ``COALESCE`` expression (a SELECT alias
@@ -523,9 +535,10 @@ def _fetch_review_candidate_page(
         WHERE i.id IS NULL
           AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
           AND EXISTS (SELECT 1 FROM edge_serves sv WHERE sv.edge_id = e.id)
+          AND COALESCE(ls.confidence, e.confidence) >= ?
           AND COALESCE(ls.confidence, e.confidence) < ?
     """
-    params: list[Any] = [EDGE_REVIEW_PROPOSAL_THRESHOLD]
+    params: list[Any] = [EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_THRESHOLD]
     if cursor is not None:
         sql += " AND (COALESCE(ls.confidence, e.confidence), e.discovered_at, e.id) > (?, ?, ?)"
         params.extend(cursor)

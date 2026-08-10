@@ -276,11 +276,26 @@ def _spec(worker: str, tunable: str) -> TunableSpec:
 
 def test_edge_confidence_tunables_registered_with_module_defaults() -> None:
     from afair.substrate.belief import _MIN_AUTO_CONFIRM_CONFIDENCE
-    from afair.substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION
+    from afair.substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
 
     assert _spec("edge_confidence", "base_rate").default == DEFAULT_BASE_RATE
     assert _spec("edge_confidence", "corroboration_weight").default == W_CORROBORATION
+    assert _spec("edge_confidence", "vague_penalty").default == W_VAGUE
     assert _spec("belief", "auto_confirm_floor").default == _MIN_AUTO_CONFIRM_CONFIDENCE
+
+
+def test_vague_penalty_bounds_keep_the_penalty_effective() -> None:
+    """The hard floor (0.9) keeps the bare vague case below the 0.5 expiry
+    threshold — a tuner drift can soften the penalty but never neuter it."""
+    spec = _spec("edge_confidence", "vague_penalty")
+    assert spec.min_value == 0.9
+    with pytest.raises(ChangeRejected):
+        validate_change(spec=spec, current=1.0, proposed=0.8)  # below hard floor
+    with pytest.raises(ChangeRejected):
+        validate_change(spec=spec, current=2.4, proposed=2.6)  # above max 2.5
+    with pytest.raises(ChangeRejected):
+        validate_change(spec=spec, current=1.4, proposed=1.8)  # > 20% per promote
+    validate_change(spec=spec, current=1.4, proposed=1.6)  # bounded move passes
 
 
 def test_edge_confidence_bounds_reject_out_of_range() -> None:

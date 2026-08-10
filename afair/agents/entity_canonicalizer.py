@@ -80,6 +80,7 @@ from ..substrate.belief import predicate_is_durable
 from ..substrate.confidence import (
     DEFAULT_BASE_RATE,
     W_CORROBORATION,
+    W_VAGUE,
     EdgeConfidenceSignals,
     compute_edge_confidence,
 )
@@ -321,7 +322,7 @@ class EntityCanonicalizer(ColdPathWorker):
 
         # Edge-confidence weights (tuner-resolvable, ADR-0004 S8) — resolved once
         # per cycle and threaded into the write-time scoring below.
-        base_rate, corroboration_weight = _resolve_edge_confidence_weights(conn)
+        base_rate, corroboration_weight, vague_penalty = _resolve_edge_confidence_weights(conn)
 
         # Phase A — canonicalize new events. Watermark (P2a): frontier captured
         # BEFORE selection; cursor keys on the success-interpretation id.
@@ -358,6 +359,7 @@ class EntityCanonicalizer(ColdPathWorker):
                 gazetteer=gazetteer,
                 base_rate=base_rate,
                 corroboration_weight=corroboration_weight,
+                vague_penalty=vague_penalty,
             )
             stats["events_canonicalized"] += 1
             stats["entities_created"] += result["created"]
@@ -629,6 +631,7 @@ def _canonicalize_one_event(
     gazetteer: dict[str, str] | None = None,
     base_rate: float = DEFAULT_BASE_RATE,
     corroboration_weight: float = W_CORROBORATION,
+    vague_penalty: float = W_VAGUE,
 ) -> tuple[dict[str, int], float | None]:
     """Resolve entities + relations for one event into substrate rows.
 
@@ -1040,7 +1043,10 @@ def _canonicalize_one_event(
             source_conflicted=False,
         )
         prior, components = compute_edge_confidence(
-            signals, base_rate=base_rate, corroboration_weight=corroboration_weight
+            signals,
+            base_rate=base_rate,
+            corroboration_weight=corroboration_weight,
+            vague_penalty=vague_penalty,
         )
         edge = write_entity_edge(
             conn,
@@ -1509,26 +1515,28 @@ def _normalize_kind(kind_raw: str, conn: sqlite3.Connection | None = None) -> st
     return _normalize_kind_with_novelty(kind_raw, conn)[0]
 
 
-def _resolve_edge_confidence_weights(conn: sqlite3.Connection) -> tuple[float, float]:
-    """Resolve the edge-confidence base_rate + corroboration_weight through the
-    tuner registry, falling back to the module defaults (surprise-window
-    pattern). A registry hiccup must never break canonicalization, so any error
-    serves the pure-model defaults (ADR-0004 S8)."""
+def _resolve_edge_confidence_weights(conn: sqlite3.Connection) -> tuple[float, float, float]:
+    """Resolve the edge-confidence base_rate + corroboration_weight +
+    vague_penalty through the tuner registry, falling back to the module
+    defaults (surprise-window pattern). A registry hiccup must never break
+    canonicalization, so any error serves the pure-model defaults (ADR-0004
+    S8)."""
     try:
         from .tunable_registry import TunableRegistry
 
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
+        vague_penalty = float(registry.get("edge_confidence", "vague_penalty"))
     except _TUNABLE_FALLBACK_ERRORS as exc:
         log.warning(
             "tunable_registry.fallback",
             worker="entity_canonicalizer",
-            tunable="edge_confidence.base_rate/corroboration_weight",
+            tunable="edge_confidence.base_rate/corroboration_weight/vague_penalty",
             error=str(exc),
         )
-        return DEFAULT_BASE_RATE, W_CORROBORATION
-    return base_rate, corroboration_weight
+        return DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
+    return base_rate, corroboration_weight, vague_penalty
 
 
 def _api_key_for_model(model: str, settings: Settings) -> str | None:

@@ -323,14 +323,36 @@ def test_calibration_report_bucket_and_brier_math(
 
 
 def _seed_weak_edge(conn: sqlite3.Connection, i: int, *, serve: bool = True) -> Any:
-    """A low-confidence edge (vague predicate, new endpoints, no extraction) on
-    a DISTINCT subject so the UNIQUE(kind, subject) doesn't collapse proposals.
-    Its computed served confidence is ~0.365 — below both the 0.5 expiry floor
-    and the 0.6 review threshold.
+    """A weak-but-reviewable edge (crisp predicate, new endpoints, no
+    extraction) on a DISTINCT subject so the UNIQUE(kind, subject) doesn't
+    collapse proposals. Its computed served confidence is ~0.56 — inside the
+    ``[0.5, 0.6)`` review band (above the expiry floor, below the review
+    threshold).
 
     Stamped as SERVED by default — the serve-gated review query only proposes
     edges recall actually surfaced. Pass ``serve=False`` to model an edge recall
-    never returned (a candidate for auto-expiry)."""
+    never returned."""
+    _ev, _subj, _obj, edge = _seed_edge(
+        conn,
+        text=f"Person{i} is loosely tied to Org{i}",
+        predicate="is loosely tied to",
+        extraction_confidence=None,
+        with_interpretation=False,
+        subj_conf=0.5,
+        obj_conf=0.5,
+        subject_name=f"Person{i}",
+        object_name=f"Org{i}",
+    )
+    if serve:
+        record_edge_serves(conn, [edge.id])
+    return edge
+
+
+def _seed_sub_expiry_edge(conn: sqlite3.Connection, i: int, *, serve: bool = False) -> Any:
+    """An edge BELOW the 0.5 expiry floor (~0.18): vague predicate + new
+    endpoints + no extraction. Never a review question (the review band has a
+    ``>=`` floor); never served it is an auto-expiry candidate, served it lives
+    on with its low-confidence caveat."""
     _ev, _subj, _obj, edge = _seed_edge(
         conn,
         text=f"Person{i} is loosely connected to the Org{i}",
@@ -416,8 +438,8 @@ def test_calibration_growth_resumes_after_decide_same_subject(
     def _weak_edge_on_x(obj_name: str) -> Any:
         _e, _s, _o, edge = _seed_edge(
             db,
-            text=f"Xsubject is loosely connected to the {obj_name}",
-            predicate="is loosely connected to the",
+            text=f"Xsubject is loosely tied to {obj_name}",
+            predicate="is loosely tied to",
             extraction_confidence=None,
             with_interpretation=False,
             subj=subj_x,
@@ -570,6 +592,48 @@ def test_served_low_conf_is_queued_unserved_same_conf_is_not(
     assert unserved.id not in edge_ids
 
 
+def test_sub_expiry_confidence_edge_is_never_a_review_question(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION (operator, 2026-08-10): a vague intent derivation ("wants to
+    install components on ...") scored below the 0.5 expiry floor, got served
+    once with its caveat, and then surfaced as an edge_review question. Below
+    the floor an edge is noise, not a question: served it stays live with its
+    caveat (never queued, never expired — expiry is never-served-only); only a
+    never-served one is silently retired."""
+    from afair.substrate import iter_edges_for_entity, read_pending_corrections
+
+    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)  # grace elapsed
+    served = _seed_sub_expiry_edge(db, 1, serve=True)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+
+    reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert all(p.detail["edge_id"] != served.id for p in reviews)  # never a question
+    assert stats["edges_expired_unserved"] == 0  # served → not expirable
+    live = iter_edges_for_entity(db, served.subject_id)
+    assert any(e.id == served.id for e in live)  # lives on, caveat-served
+
+
+def test_intent_predicate_edge_scores_below_expiry_floor(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The 2026-08-10 predicate shape itself: "wants to install components on"
+    is vague (intent language), so even with a present extraction and exact
+    mentions the derived confidence lands under 0.5."""
+    _ev, _subj, _obj, edge = _seed_edge(
+        db,
+        text="Michael wants to install components on jarvis-mini",
+        predicate="wants to install components on",
+        extraction_confidence=0.9,
+        subject_name="Michael",
+        object_name="jarvis-mini",
+    )
+    EdgeConfidenceScorer().run(db, settings)
+    score = latest_edge_scores_batch(db, [edge.id])[edge.id]
+    assert score.confidence < es.EDGE_EXPIRY_CONFIDENCE_THRESHOLD
+
+
 def test_never_served_low_conf_old_edge_is_auto_expired(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -579,7 +643,7 @@ def test_never_served_low_conf_old_edge_is_auto_expired(
     from afair.substrate import iter_edges_for_entity, read_pending_corrections
 
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)  # treat the fresh edge as old
-    edge = _seed_weak_edge(db, 1, serve=False)
+    edge = _seed_sub_expiry_edge(db, 1, serve=False)
 
     stats = EdgeConfidenceScorer().run(db, settings)
     assert stats["edges_expired_unserved"] == 1
@@ -602,7 +666,7 @@ def test_never_served_low_conf_old_edge_is_auto_expired(
 def test_fresh_never_served_edge_is_not_expired(db: sqlite3.Connection, settings: Settings) -> None:
     """The 14-day grace holds: a never-served low-conf edge younger than the
     grace is left alone (recall still has a chance to surface it)."""
-    edge = _seed_weak_edge(db, 1, serve=False)
+    edge = _seed_sub_expiry_edge(db, 1, serve=False)
     stats = EdgeConfidenceScorer().run(db, settings)
     assert stats["edges_expired_unserved"] == 0
     assert (
@@ -619,7 +683,7 @@ def test_reviewed_edge_is_never_auto_expired(
     """An edge the operator touched (a review row) is entrenched (ADR-0002) and
     never auto-expired, even if never served + old + low confidence."""
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
-    edge = _seed_weak_edge(db, 1, serve=False)
+    edge = _seed_sub_expiry_edge(db, 1, serve=False)
     record_edge_review(db, edge_id=edge.id, verdict="confirm", reviewed_by="op")
 
     stats = EdgeConfidenceScorer().run(db, settings)
@@ -640,7 +704,7 @@ def test_auto_expiry_is_capped_and_drains(
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
     monkeypatch.setattr(es, "MAX_EDGE_EXPIRIES_PER_CYCLE", 5)
     for i in range(7):
-        _seed_weak_edge(db, i, serve=False)
+        _seed_sub_expiry_edge(db, i, serve=False)
 
     first = EdgeConfidenceScorer().run(db, settings)
     assert first["edges_expired_unserved"] == 5  # capped
@@ -659,7 +723,7 @@ def test_auto_expiry_leaves_calibration_report_pure(
 
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
     for i in range(3):
-        _seed_weak_edge(db, i, serve=False)
+        _seed_sub_expiry_edge(db, i, serve=False)
     EdgeConfidenceScorer().run(db, settings)
     assert calibration_report(db)["reviewed"] == 0
 
@@ -669,9 +733,9 @@ def test_auto_expiry_leaves_calibration_report_pure(
 
 def _insert_backdated_weak_edge(conn: sqlite3.Connection, i: int, *, days_old: float) -> Any:
     """A never-served edge whose ``discovered_at`` is backdated ``days_old``
-    days, with the same weak signal profile as ``_seed_weak_edge`` (0.5 mentions
-    + a loose-but-DURABLE predicate) so the scorer computes ~0.365 (< the 0.5
-    expiry floor) and the noise sweep leaves it alone. Inserted directly
+    days, with the same weak signal profile as ``_seed_sub_expiry_edge`` (0.5
+    mentions + a vague-but-DURABLE predicate) so the scorer computes ~0.18 (<
+    the 0.5 expiry floor) and the noise sweep leaves it alone. Inserted directly
     (entity_edges accepts a chosen discovered_at on INSERT; only UPDATE/DELETE
     are trigger-blocked) so we model a pre-deploy legacy edge that the
     discovered_at grace alone would have wiped."""
@@ -1076,8 +1140,8 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     # they fill the first page but collapse to one proposal via UNIQUE(subject).
     _ev, subj0, _obj0, _e0 = _seed_edge(
         db,
-        text="Person0 is loosely connected to the Thing0",
-        predicate="is loosely connected to the",
+        text="Person0 is loosely tied to Thing0",
+        predicate="is loosely tied to",
         extraction_confidence=None,
         with_interpretation=False,
         subj_conf=0.5,
@@ -1089,8 +1153,8 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     for j in range(1, 4):
         _e, _s, _o, edge_j = _seed_edge(
             db,
-            text=f"Person0 is loosely connected to the Thing{j}",
-            predicate="is loosely connected to the",
+            text=f"Person0 is loosely tied to Thing{j}",
+            predicate="is loosely tied to",
             extraction_confidence=None,
             with_interpretation=False,
             subj=subj0,
