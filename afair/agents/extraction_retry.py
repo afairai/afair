@@ -80,6 +80,116 @@ MAX_RETRIES_PER_RUN = 5
 wall time (the extraction LLM call is synchronous here) and LLM spend;
 any backlog beyond the cap is picked up on subsequent cycles."""
 
+PROVIDER_HEALTH_ENV = "AFAIR_PROVIDER_HEALTH_URL"
+"""Optional health endpoint of the LLM provider/bridge (e.g. the local
+abo-bridge). When set and the response carries a non-null ``cooldown_bis``
+in the future, the retry cycle SKIPS instead of burning attempts.
+
+Incident 2026-08-10: the bridge hit its daily/usage limit and entered a
+45-minute cooldown; this worker kept retrying INTO the cooldown, burned
+all MAX_EXTRACTION_RETRIES attempts per event within the outage window,
+and 17 events ended up permanently ``retry_exhausted`` even though the
+provider recovered an hour later. A retry attempt only counts as evidence
+against the EVENT when the provider was actually willing to serve it.
+
+Fail-open by design: endpoint unset, unreachable, or malformed → behave
+exactly as before this guard existed."""
+
+REAPER_GRACE_SECONDS = 3600
+"""An extraction with no terminal pipeline stage after this long is
+considered orphaned (its extractor thread died mid-flight) and gets
+re-enqueued. Well above any legitimate single-extraction duration
+(warm-path p99 is seconds-to-minutes), so live work is never stolen."""
+
+MAX_REAPS_PER_RUN = 3
+"""Per-cycle cap on reaped (re-driven) orphaned extractions. Orphans are
+rare — the cap only guards against a pathological flood re-running the
+LLM budget dry."""
+
+_REAPER_LOOKBACK_DAYS = 7
+"""Same scan horizon the expectation_checker uses; anything older is
+pre-observability history and stays untouched."""
+
+
+def provider_in_cooldown() -> bool:
+    """True iff the configured provider health endpoint reports an active
+    cooldown. Fail-open: no endpoint / any error / no parseable field → False.
+
+    Read via a plain 2s urllib call, not the LLM client stack — this must
+    never block or throw into the worker loop.
+    """
+    import json as _json
+    import os
+    import urllib.request
+    from datetime import datetime
+
+    url = os.environ.get(PROVIDER_HEALTH_ENV, "").strip()
+    if not url:
+        return False
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            data = _json.loads(r.read().decode("utf-8", errors="replace"))
+        bis = data.get("cooldown_bis")
+        if not isinstance(bis, str) or not bis:
+            return False
+        # The bridge writes naive local ISO timestamps; compare naively.
+        return datetime.now().isoformat() < bis
+    except Exception:
+        return False
+
+
+_ORPHAN_SQL = """
+WITH written AS (
+    SELECT event_id, MIN(recorded_at) AS written_at
+    FROM pipeline_events
+    WHERE stage = :stage_written AND recorded_at >= :lookback_cutoff
+    GROUP BY event_id
+)
+SELECT w.event_id
+FROM written w
+WHERE NOT EXISTS (
+    SELECT 1 FROM pipeline_events t
+    WHERE t.event_id = w.event_id
+      AND t.stage IN (:stage_completed, :stage_failed)
+)
+  AND w.written_at <= :grace_cutoff
+ORDER BY w.written_at ASC
+LIMIT :limit
+"""
+
+
+def select_orphaned_extractions(
+    conn: sqlite3.Connection, *, limit: int = MAX_REAPS_PER_RUN
+) -> list[str]:
+    """Events whose extraction STARTED (or was written) but never reached a
+    terminal stage within the grace window — the extractor thread died
+    mid-flight, so no ``failed`` interpretation row exists and the normal
+    retry selection (which keys on failed rows) can never see them.
+
+    Before this reaper, such events sat in ``stuck_extractions`` forever;
+    the expectation_checker COUNTED them (detection-only by design) but
+    nothing ever re-drove them — two events from 2026-08-10 hung ~33h until
+    an operator reprocessed them by hand. Same open-events CTE as the
+    checker, so the two agree on what "stuck" means.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from ..substrate import pipeline_events as pe
+
+    now = datetime.now(UTC)
+    rows = conn.execute(
+        _ORPHAN_SQL,
+        {
+            "stage_written": pe.STAGE_EVENT_WRITTEN,
+            "stage_completed": pe.STAGE_EXTRACTION_COMPLETED,
+            "stage_failed": pe.STAGE_EXTRACTION_FAILED,
+            "lookback_cutoff": (now - timedelta(days=_REAPER_LOOKBACK_DAYS)).isoformat(),
+            "grace_cutoff": (now - timedelta(seconds=REAPER_GRACE_SECONDS)).isoformat(),
+            "limit": limit,
+        },
+    ).fetchall()
+    return [row["event_id"] for row in rows]
+
 
 def select_retry_candidates(
     conn: sqlite3.Connection, *, limit: int = MAX_RETRIES_PER_RUN, wm_id: str | None = None
@@ -165,11 +275,22 @@ class ExtractionRetryWorker(ColdPathWorker):
         frontier = watermarks.frontier_interpretations(conn)
         wm_id = watermarks.read_watermark_id(conn, watermarks.WORKER_EXTRACTION_RETRY)
 
+        # Cooldown guard: when the provider/bridge itself reports it is
+        # limit-throttled, retrying now would only burn the per-event attempt
+        # budget against a guaranteed failure (incident 2026-08-10: 17 events
+        # retry_exhausted inside one 45-min cooldown). Skip the whole cycle —
+        # the watermark stays put, candidates stay candidates.
+        if provider_in_cooldown():
+            log.info("extraction_retry.provider_cooldown_skip")
+            return {"candidates": 0, "succeeded": 0, "still_failing": 0,
+                    "reaped": 0, "skipped_provider_cooldown": True}
+
         candidates = select_retry_candidates(conn, wm_id=wm_id)
         stats: dict[str, Any] = {
             "candidates": len(candidates),
             "succeeded": 0,
             "still_failing": 0,
+            "reaped": 0,
         }
         # Count only the except-path failures separately: those append NO new
         # interpretation row, so the candidate's latest interp stays at/below
@@ -220,4 +341,18 @@ class ExtractionRetryWorker(ColdPathWorker):
                 through_created_at=frontier[0],
                 through_id=frontier[1],
             )
+
+        # Reaper: re-drive extractions whose thread died mid-flight (started/
+        # written but never terminal). extract_sync is append-only and records
+        # its own pipeline stages, so a reap is exactly a fresh extraction run;
+        # the watermark logic above is unaffected (orphans have no extractor
+        # interpretation row at all, so they were never retry candidates).
+        for event_id in select_orphaned_extractions(conn):
+            log.warning("extraction_retry.reaping_orphan", event_id=event_id)
+            try:
+                extract_sync(event_id)
+                stats["reaped"] += 1
+            except Exception as e:
+                log.warning("extraction_retry.reap_failed", event_id=event_id, error=str(e))
+
         return stats

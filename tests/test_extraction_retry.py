@@ -341,3 +341,97 @@ def test_worker_registered_in_server_lineup() -> None:
 
     source = inspect.getsource(server)
     assert "ExtractionRetryWorker()" in source
+
+
+# ── v2 additions: cooldown guard + orphan reaper (2026-08-11) ──────────────
+
+
+def test_cooldown_guard_fail_open_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No endpoint configured → never in cooldown (pre-guard behavior)."""
+    from afair.agents.extraction_retry import PROVIDER_HEALTH_ENV, provider_in_cooldown
+
+    monkeypatch.delenv(PROVIDER_HEALTH_ENV, raising=False)
+    assert provider_in_cooldown() is False
+
+
+def test_cooldown_guard_fail_open_on_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Endpoint set but dead → fail open, worker behaves as before."""
+    from afair.agents.extraction_retry import PROVIDER_HEALTH_ENV, provider_in_cooldown
+
+    monkeypatch.setenv(PROVIDER_HEALTH_ENV, "http://127.0.0.1:1/health")
+    assert provider_in_cooldown() is False
+
+
+def test_cooldown_skips_cycle_without_burning_attempts(
+    ctx: ServerContext,
+    settings_local: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active cooldown → cycle returns skipped, candidate keeps its attempt
+    budget and is still selectable afterwards."""
+    event = _write_text_event(ctx, "cooldown-guarded event")
+    _seed_failure(ctx, event, "llm_rate_limit")
+
+    monkeypatch.setattr(
+        "afair.agents.extraction_retry.provider_in_cooldown", lambda: True
+    )
+    stats = ExtractionRetryWorker().run(ctx.db, settings_local)
+    assert stats.get("skipped_provider_cooldown") is True
+    assert stats["candidates"] == 0
+    # Attempt budget untouched: exactly the one seeded failure row exists.
+    assert len(_extractor_rows(ctx, event.content_hash)) == 1
+    assert select_retry_candidates(ctx.db) == [(event.id, event.content_hash)]
+
+
+def test_orphan_reaper_selects_started_without_terminal(ctx: ServerContext) -> None:
+    """written+started but no terminal stage, older than grace → selected."""
+    from datetime import UTC, datetime, timedelta
+
+    from afair.agents.extraction_retry import select_orphaned_extractions
+    from afair.substrate import pipeline_events as pe
+
+    event = _write_text_event(ctx, "orphaned mid-flight event")
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    # substrate.write_event records no pipeline rows (the MCP handler does);
+    # seed written+started by hand, backdated past the grace window.
+    for rid, stage in (("t-orph-0", pe.STAGE_EVENT_WRITTEN),
+                       ("t-orph-1", pe.STAGE_EXTRACTION_STARTED)):
+        ctx.db.execute(
+            """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
+               producer, recorded_at) VALUES (?, ?, ?, ?, 'ok', 'test', ?)""",
+            (rid, event.id, event.content_hash, stage, old),
+        )
+    ctx.db.commit()
+    assert event.id in select_orphaned_extractions(ctx.db)
+
+
+def test_orphan_reaper_ignores_completed_and_fresh(ctx: ServerContext) -> None:
+    """Terminal stage present → not an orphan; fresh start → grace protects."""
+    from datetime import UTC, datetime, timedelta
+
+    from afair.agents.extraction_retry import select_orphaned_extractions
+    from afair.substrate import pipeline_events as pe
+
+    done = _write_text_event(ctx, "completed event")
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    for rid, stage in (("t-done-0", pe.STAGE_EVENT_WRITTEN),
+                       ("t-done-1", pe.STAGE_EXTRACTION_COMPLETED)):
+        ctx.db.execute(
+            """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
+               producer, recorded_at) VALUES (?, ?, ?, ?, 'ok', 'test', ?)""",
+            (rid, done.id, done.content_hash, stage, old),
+        )
+    fresh = _write_text_event(ctx, "fresh in-flight event")
+    # fresh: written just now → grace window protects it from the reaper.
+    # NB: production writes Python-isoformat ('T' separator); SQLite's
+    # datetime('now') uses a space and would sort BELOW every cutoff.
+    ctx.db.execute(
+        """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
+           producer, recorded_at) VALUES ('t-fresh-0', ?, ?, ?, 'ok', 'test', ?)""",
+        (fresh.id, fresh.content_hash, pe.STAGE_EVENT_WRITTEN,
+         datetime.now(UTC).isoformat()),
+    )
+    ctx.db.commit()
+    orphans = select_orphaned_extractions(ctx.db)
+    assert done.id not in orphans
+    assert fresh.id not in orphans
