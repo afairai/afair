@@ -95,6 +95,10 @@ def test_legacy_vault_telemetry_triggers_retired_on_open(tmp_path: Path) -> None
             f"CREATE TRIGGER {tbl}_no_delete BEFORE DELETE ON {tbl} "
             f"BEGIN SELECT RAISE(ABORT, '{tbl} is append-only (Invariant I2)'); END"
         )
+    # A real pre-ADR-0005 vault carries SQLite's default user_version 0;
+    # resetting the schema fingerprint is part of faking one, else the next
+    # open fast-paths past the DDL and the DROP TRIGGER statements never fire.
+    conn.execute("PRAGMA user_version = 0")
     conn.commit()
     assert _telemetry_trigger_count(conn) == 4
     conn.close()

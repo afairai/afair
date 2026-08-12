@@ -1338,3 +1338,22 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     assert "Person99" in subjects  # past-pool subject is NOT starved
     # The monopolizing subject gets exactly one open proposal, not four.
     assert sum(1 for p in reviews if p.detail["subject_name"] == "Person0") == 1
+
+
+def test_intent_predicate_edge_scores_below_expiry_floor(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The 2026-08-10 predicate shape itself: "wants to install components on"
+    is vague (intent language), so even with a present extraction and exact
+    mentions the derived confidence lands under 0.5."""
+    _ev, _subj, _obj, edge = _seed_edge(
+        db,
+        text="Michael wants to install components on jarvis-mini",
+        predicate="wants to install components on",
+        extraction_confidence=0.9,
+        subject_name="Michael",
+        object_name="jarvis-mini",
+    )
+    EdgeConfidenceScorer().run(db, settings)
+    score = latest_edge_scores_batch(db, [edge.id])[edge.id]
+    assert score.confidence < es.EDGE_EXPIRY_CONFIDENCE_THRESHOLD

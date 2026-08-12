@@ -517,6 +517,7 @@ def test_export_excludes_regenerable_and_credential_tables(vault_dir) -> None:
         "event",
         "entity",
         "entity_edge",
+        "edge_validity_span",
         "edge_confidence_score",
         "entity_merge",
         "edge_invalidation",
@@ -538,6 +539,21 @@ def test_export_excludes_regenerable_and_credential_tables(vault_dir) -> None:
     assert "pipe_test_1" not in text
     assert "tok_test_1" not in text
     assert "a" * 64 not in text  # no token hash leaks into the dump
+
+
+def test_export_edge_validity_follows_its_edge(vault_dir, tmp_path) -> None:
+    """ADR-0008 validity history is complete and FK-safe in the export."""
+    _build_vault_with_corrections_and_ontology(vault_dir)
+    records = [json.loads(line) for line in _iter_export(vault_dir, include_blobs=False)]
+
+    edge_positions = [i for i, r in enumerate(records) if r["kind"] == "entity_edge"]
+    span_positions = [i for i, r in enumerate(records) if r["kind"] == "edge_validity_span"]
+    assert edge_positions
+    assert span_positions
+    assert min(span_positions) > max(edge_positions)
+
+    edge_ids = {r["id"] for r in records if r["kind"] == "entity_edge"}
+    assert all(r["edge_id"] in edge_ids for r in records if r["kind"] == "edge_validity_span")
 
 
 def test_export_edge_confidence_score_follows_its_edge(vault_dir, tmp_path) -> None:

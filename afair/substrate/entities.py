@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 from ulid import ULID
 
+from .edge_validity import normalize_temporal_bound, write_initial_edge_validity
 from .kinds import resolve_kind_batch, resolve_kind_slug
 from .sqlutil import iter_param_chunks
 
@@ -374,8 +375,17 @@ def write_entity_edge(
     Idempotent on (subject_id, predicate, object_id, source_event_id) —
     re-running the canonicalizer on the same event never duplicates the
     same edge from the same source. Returns None when the UNIQUE
-    constraint absorbs the write.
+    constraint absorbs the write. Every edge also receives an append-only
+    bi-temporal validity sidecar: explicit bounds when supplied, otherwise the
+    source event's latest temporal interpretation (or its recorded time as a
+    low-confidence reference-time fallback). This works regardless of whether
+    the canonicalizer or temporal worker runs first.
     """
+    valid_from = normalize_temporal_bound(valid_from)
+    valid_to = normalize_temporal_bound(valid_to)
+    if valid_from is not None and valid_to is not None and valid_to < valid_from:
+        msg = "valid_to must not precede valid_from"
+        raise ValueError(msg)
     row_id = _new_row_id()
     discovered_at = _now_iso()
     try:
@@ -404,8 +414,33 @@ def write_entity_edge(
     except sqlite3.IntegrityError as exc:
         # UNIQUE violation = row already present → no-op; else propagate.
         if "UNIQUE constraint" in str(exc):
+            existing = conn.execute(
+                """
+                SELECT id, valid_from, valid_to FROM entity_edges
+                WHERE subject_id = ? AND predicate = ? AND object_id = ?
+                  AND source_event_id = ?
+                """,
+                (subject_id, predicate, object_id, source_event_id),
+            ).fetchone()
+            if existing is not None:
+                write_initial_edge_validity(
+                    conn,
+                    edge_id=existing["id"],
+                    source_event_id=source_event_id,
+                    discovered_by=discovered_by,
+                    explicit_valid_from=existing["valid_from"],
+                    explicit_valid_to=existing["valid_to"],
+                )
             return None
         raise
+    write_initial_edge_validity(
+        conn,
+        edge_id=row_id,
+        source_event_id=source_event_id,
+        discovered_by=discovered_by,
+        explicit_valid_from=valid_from,
+        explicit_valid_to=valid_to,
+    )
     return EntityEdge(
         id=row_id,
         subject_id=subject_id,

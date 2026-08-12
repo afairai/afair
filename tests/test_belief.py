@@ -60,6 +60,47 @@ def test_predicate_crispness_catches_verbose_profile_language() -> None:
     assert predicate_is_crisp("shares role with")  # 3 words: passes here
 
 
+def test_predicate_crispness_catches_intent_hedge_language() -> None:
+    """Intent/hedge predicates assert an aspiration, not a relation that
+    holds — vague even when short enough for the word-count check (the
+    2026-08-10 operator rejection: "wants to install components on")."""
+    assert not predicate_is_crisp("wants to install")  # 3 words, still intent
+    assert not predicate_is_crisp("wants")
+    assert not predicate_is_crisp("Wants To Install")  # case-insensitive
+    assert not predicate_is_crisp("plans to migrate to")
+    assert not predicate_is_crisp("intends to buy")
+    assert not predicate_is_crisp("is interested in")
+    assert not predicate_is_crisp("is considering")
+    assert not predicate_is_crisp("hopes to join")
+    assert not predicate_is_crisp("looking to hire")
+    # Real relations stay crisp — no over-matching.
+    assert predicate_is_crisp("runs on")
+    assert predicate_is_crisp("is founder of")
+    assert predicate_is_crisp("works at")
+    assert predicate_is_crisp("owns")
+
+
+def test_intent_predicates_stay_durable() -> None:
+    """The deliberate boundary: intent predicates are VAGUE (score low, never
+    auto-confirm) but NOT non-durable — they are neither write-gated nor
+    swept by the B4 noise sweep. An intent edge may exist and earn confidence
+    through corroboration; retiring existing ones stays a separate, capped
+    operator action."""
+    assert predicate_is_durable("wants to install components on")
+    assert predicate_is_durable("plans to migrate to")
+    assert predicate_is_durable("is interested in")
+
+
+def test_auto_confirm_rejects_intent_predicate_even_at_high_confidence() -> None:
+    from afair.substrate.belief import auto_confirm
+
+    assert not auto_confirm(
+        confidence=0.95,
+        predicate="wants to install",
+        source_entrenchment=Entrenchment.AGENT_DERIVED,
+    )
+
+
 @pytest.mark.parametrize(
     "predicate",
     [

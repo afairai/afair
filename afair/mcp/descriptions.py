@@ -207,12 +207,18 @@ ARGUMENTS (all optional; combine as needed):
                   → normal hybrid). Recommended default.
       "shallow" → FTS5 keyword only. Cheapest.
       "normal"  → Hybrid FTS5 + vector. Local embedding inference, ~120ms.
-      "deep"    → Hybrid like normal, but the flat history lens: temporal
-                  relevance decay is OFF, so past-dated and superseded
-                  memories rank by match strength alone. Use for history /
-                  as-of questions ("what did I know back then", "show me past
-                  appointments"). Default recall instead de-prioritizes
-                  memories whose moment has passed, without dropping them.
+      "deep"    → Hybrid retrieval plus a bounded one-to-two-hop walk over
+                  entity relations valid now or at an explicit as_of instant,
+                  plus MMR diversity. Temporal
+                  relevance decay is OFF, so direct past-dated and superseded
+                  memories rank by match strength alone. Use for broad history
+                  questions.
+                  Default recall instead de-prioritizes memories whose moment
+                  has passed, without dropping them.
+  - as_of: Optional ISO-8601 world-time lens for graph relations, e.g.
+      "2026-04-03T12:30:00+02:00". With depth="auto" this promotes recall to
+      deep. An explicit shallow/normal depth is rejected so the date is never
+      silently ignored. Knowledge-time invalidations remain authoritative.
   - limit: Max hits to return. Omitted → 10 in compact verbosity, 20
     otherwise. Server cap 100 (larger values are clamped, not rejected).
   - verbosity: "compact" (default), "standard", or "full". Controls how

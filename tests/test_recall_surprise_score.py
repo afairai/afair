@@ -306,7 +306,9 @@ def test_surprise_does_not_leak_into_recall_hit_top_level(
 # ── merge resolution affects surprise ────────────────────────────────────
 
 
-def test_supersession_makes_merged_entity_familiar(ctx: ServerContext, settings: Settings) -> None:
+def test_supersession_makes_merged_entity_familiar(
+    ctx: ServerContext, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When entity A is merged into B, recall hits mentioning A should
     treat A's canonical (= B) as the comparison key. So if B was recent,
     a hit mentioning A is NOT surprising."""
@@ -321,6 +323,20 @@ def test_supersession_makes_merged_entity_familiar(ctx: ServerContext, settings:
     EntityCanonicalizer().run(ctx.db, settings)
 
     # Establish "Sajinth" (the canonical) in recent context via newer events.
+    # This test owns a deliberate pre-merge split. Do not let the configured
+    # live model collapse the two fixture names before the merge under test.
+    from afair.agents import entity_canonicalizer as ec
+    from afair.agents.llm import LLMResult
+
+    monkeypatch.setattr(
+        ec,
+        "call_tool",
+        lambda **_kw: LLMResult(
+            data={"matched_entity_id": None, "reason": "test fixture split", "confidence": 1.0},
+            model="test/no-match",
+            raw="",
+        ),
+    )
     for i in range(3):
         _seed(
             ctx,

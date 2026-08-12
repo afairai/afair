@@ -186,7 +186,7 @@ class EdgeConfidenceScorer(ColdPathWorker):
             "edges_skipped_unchanged": 0,
             "legacy_backfilled": 0,
         }
-        base_rate, corroboration_weight = _resolve_weights(conn)
+        base_rate, corroboration_weight, vague_penalty = _resolve_weights(conn)
 
         edges = _select_edges_to_score(conn, MAX_EDGES_PER_CYCLE)
         if edges:
@@ -202,6 +202,7 @@ class EdgeConfidenceScorer(ColdPathWorker):
                     _recover_signals(conn, edge, corroborating=corroborating.get(edge.id, 0)),
                     base_rate=base_rate,
                     corroboration_weight=corroboration_weight,
+                    vague_penalty=vague_penalty,
                 )
                 prev_v1 = latest_v1.get(edge.id)
                 if prev_v1 is not None and abs(new_conf - prev_v1) < EDGE_CONFIDENCE_EPSILON:
@@ -276,30 +277,29 @@ class EdgeConfidenceScorer(ColdPathWorker):
 # ── weight resolution (registry, S8) ───────────────────────────────────────
 
 
-def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float]:
-    """Resolve base_rate + corroboration_weight through the tuner registry,
-    falling back to the module defaults (surprise-window pattern). A registry
-    hiccup must never break scoring, so a narrowed error serves the pure-model
-    defaults; a genuine bug propagates."""
-    from ..substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION
+def _resolve_weights(conn: sqlite3.Connection) -> tuple[float, float, float]:
+    """Resolve base_rate + corroboration_weight + vague_penalty through the
+    tuner registry, falling back to the module defaults (surprise-window
+    pattern). A registry hiccup must never break scoring, so a narrowed error
+    serves the pure-model defaults; a genuine bug propagates."""
+    from ..substrate.confidence import DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
 
-    base_rate = DEFAULT_BASE_RATE
-    corroboration_weight = W_CORROBORATION
     try:
         from .tunable_registry import TunableRegistry
 
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
+        vague_penalty = float(registry.get("edge_confidence", "vague_penalty"))
     except _TUNABLE_FALLBACK_ERRORS as exc:
         log.warning(
             "tunable_registry.fallback",
             worker="edge_scorer",
-            tunable="edge_confidence.base_rate/corroboration_weight",
+            tunable="edge_confidence.base_rate/corroboration_weight/vague_penalty",
             error=str(exc),
         )
-        return DEFAULT_BASE_RATE, W_CORROBORATION
-    return base_rate, corroboration_weight
+        return DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
+    return base_rate, corroboration_weight, vague_penalty
 
 
 # ── selection ───────────────────────────────────────────────────────────────

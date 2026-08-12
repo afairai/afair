@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import sqlite3
 import time
 from typing import TYPE_CHECKING, Any
@@ -79,6 +80,7 @@ from ..substrate.belief import predicate_is_durable
 from ..substrate.confidence import (
     DEFAULT_BASE_RATE,
     W_CORROBORATION,
+    W_VAGUE,
     EdgeConfidenceSignals,
     compute_edge_confidence,
 )
@@ -171,6 +173,23 @@ candidates. Pruned from the full pool by lexical similarity to the
 surface form so the LLM sees a small, relevant menu."""
 
 SONNET_ESCALATION_THRESHOLD = 0.7
+
+# Schalter fuer die Sonnet-Eskalation (Self-Host-Zusatz 2026-07-27).
+# Default "an" — der Upstream verhaelt sich unveraendert, solange niemand
+# etwas setzt. Wird zur LAUFZEIT gelesen (nicht beim Import), damit die
+# Cold-Path-Steuerdatei sie ohne Container-Neustart umlegen kann; der
+# Scheduler spiegelt das Feld ``sonnet_escalation`` in diese Variable.
+# Alles ausser den Aus-Werten gilt als "an", damit ein Tippfehler die
+# Genauigkeit nicht stillschweigend senkt.
+ESCALATION_ENV = "AFAIR_SONNET_ESCALATION"
+_ESCALATION_OFF = {"0", "off", "false", "no", "aus", "nein"}
+
+
+def escalation_enabled() -> bool:
+    """Whether an uncertain match may be re-asked with the pricier model."""
+    return os.environ.get(ESCALATION_ENV, "on").strip().lower() not in _ESCALATION_OFF
+
+
 """Decision #3: if Haiku returns a verdict with confidence below this,
 re-judge with Sonnet using the same prompt + candidates."""
 
@@ -311,7 +330,7 @@ class EntityCanonicalizer(ColdPathWorker):
 
         # Edge-confidence weights (tuner-resolvable, ADR-0004 S8) — resolved once
         # per cycle and threaded into the write-time scoring below.
-        base_rate, corroboration_weight = _resolve_edge_confidence_weights(conn)
+        base_rate, corroboration_weight, vague_penalty = _resolve_edge_confidence_weights(conn)
 
         # Phase A — canonicalize new events. Watermark (P2a): frontier captured
         # BEFORE selection; cursor keys on the success-interpretation id.
@@ -348,6 +367,7 @@ class EntityCanonicalizer(ColdPathWorker):
                 gazetteer=gazetteer,
                 base_rate=base_rate,
                 corroboration_weight=corroboration_weight,
+                vague_penalty=vague_penalty,
             )
             stats["events_canonicalized"] += 1
             stats["entities_created"] += result["created"]
@@ -447,6 +467,33 @@ class EntityCanonicalizer(ColdPathWorker):
 
 
 # ── Phase A: canonicalize new events ──────────────────────────────────────
+
+
+def backlog_count(conn: sqlite3.Connection) -> int:
+    """How many successfully extracted events still lack entity matching.
+
+    Same predicate as ``_find_uncanonicalized_events`` minus watermark and
+    limit (see temporal.backlog_count for why). Count only; never payloads.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT i.event_hash)
+        FROM interpretations i
+        WHERE i.produced_by LIKE 'extractor:%'
+          AND json_extract(i.extraction, '$.status') = 'success'
+          AND NOT EXISTS (
+              SELECT 1 FROM entity_mentions m
+              WHERE m.event_hash = i.event_hash
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM interpretations m
+              WHERE m.event_hash = i.event_hash
+                AND m.produced_by = :no_mentions
+          )
+        """,
+        {"no_mentions": NO_MENTIONS_PRODUCED_BY},
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def _find_uncanonicalized_events(
@@ -592,6 +639,7 @@ def _canonicalize_one_event(
     gazetteer: dict[str, str] | None = None,
     base_rate: float = DEFAULT_BASE_RATE,
     corroboration_weight: float = W_CORROBORATION,
+    vague_penalty: float = W_VAGUE,
 ) -> tuple[dict[str, int], float | None]:
     """Resolve entities + relations for one event into substrate rows.
 
@@ -1003,7 +1051,10 @@ def _canonicalize_one_event(
             source_conflicted=False,
         )
         prior, components = compute_edge_confidence(
-            signals, base_rate=base_rate, corroboration_weight=corroboration_weight
+            signals,
+            base_rate=base_rate,
+            corroboration_weight=corroboration_weight,
+            vague_penalty=vague_penalty,
         )
         edge = write_entity_edge(
             conn,
@@ -1472,26 +1523,28 @@ def _normalize_kind(kind_raw: str, conn: sqlite3.Connection | None = None) -> st
     return _normalize_kind_with_novelty(kind_raw, conn)[0]
 
 
-def _resolve_edge_confidence_weights(conn: sqlite3.Connection) -> tuple[float, float]:
-    """Resolve the edge-confidence base_rate + corroboration_weight through the
-    tuner registry, falling back to the module defaults (surprise-window
-    pattern). A registry hiccup must never break canonicalization, so any error
-    serves the pure-model defaults (ADR-0004 S8)."""
+def _resolve_edge_confidence_weights(conn: sqlite3.Connection) -> tuple[float, float, float]:
+    """Resolve the edge-confidence base_rate + corroboration_weight +
+    vague_penalty through the tuner registry, falling back to the module
+    defaults (surprise-window pattern). A registry hiccup must never break
+    canonicalization, so any error serves the pure-model defaults (ADR-0004
+    S8)."""
     try:
         from .tunable_registry import TunableRegistry
 
         registry = TunableRegistry(conn)
         base_rate = float(registry.get("edge_confidence", "base_rate"))
         corroboration_weight = float(registry.get("edge_confidence", "corroboration_weight"))
+        vague_penalty = float(registry.get("edge_confidence", "vague_penalty"))
     except _TUNABLE_FALLBACK_ERRORS as exc:
         log.warning(
             "tunable_registry.fallback",
             worker="entity_canonicalizer",
-            tunable="edge_confidence.base_rate/corroboration_weight",
+            tunable="edge_confidence.base_rate/corroboration_weight/vague_penalty",
             error=str(exc),
         )
-        return DEFAULT_BASE_RATE, W_CORROBORATION
-    return base_rate, corroboration_weight
+        return DEFAULT_BASE_RATE, W_CORROBORATION, W_VAGUE
+    return base_rate, corroboration_weight, vague_penalty
 
 
 def _api_key_for_model(model: str, settings: Settings) -> str | None:
@@ -1511,7 +1564,16 @@ def _sonnet_for(haiku_model: str) -> str | None:
     Anthropic-only. The Sonnet model name follows the same versioning
     convention as the Haiku default (see CLAUDE.md for the supported
     Claude 4.X family).
+
+    Returns None as well when escalation is switched off (see
+    ``escalation_enabled``). Self-host addition 2026-07-27: on Michael's
+    vault the escalation was 40% of the daily API spend while accounting
+    for only 11% of the calls — every uncertain name match cost a second,
+    3x pricier round trip. The first Haiku verdict still stands, and a
+    wrong merge surfaces in the edge-review queue he confirms anyway.
     """
+    if not escalation_enabled():
+        return None
     if not haiku_model.startswith("anthropic/"):
         return None
     if "haiku-4-5" in haiku_model:
