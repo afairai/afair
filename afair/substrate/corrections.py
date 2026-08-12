@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from .conflict_resolutions import CONFLICT_PROPOSAL_ID_PREFIX
 from .entities import (
     assign_entity_kind,
     record_edge_review,
@@ -163,6 +164,23 @@ def count_pending_corrections(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) FROM proposed_corrections WHERE status = 'proposed'"
     ).fetchone()
     return int(row[0])
+
+
+def count_pending_corrections_by_kind(conn: sqlite3.Connection) -> dict[str, int]:
+    """Open (``status='proposed'``) entity-audit proposal counts GROUPED BY kind.
+
+    Powers the value-ranked nudge (Fix 3): edge_review counts can be split from
+    the higher-value retype/merge/merge_review counts so a client can rank what
+    it surfaces. Cheap — a single GROUP BY over the status index. Returns a dict
+    keyed by ``kind`` (``'retype' | 'merge' | 'merge_review' | 'edge_review'``);
+    absent kinds mean zero. ``sum()`` of the values equals
+    :func:`count_pending_corrections`.
+    """
+    rows = conn.execute(
+        "SELECT kind, COUNT(*) AS n FROM proposed_corrections "
+        "WHERE status = 'proposed' GROUP BY kind"
+    ).fetchall()
+    return {r["kind"]: int(r["n"]) for r in rows}
 
 
 def _apply_correction(
@@ -475,6 +493,24 @@ def decide_correction(
         return CorrectionOutcome(
             proposal_id=outcome.proposal_id, status=outcome.status, note=outcome.note
         )
+    if proposal_id.startswith(CONFLICT_PROPOSAL_ID_PREFIX):
+        # Conflict-resolution queue (ADR-0008) — symmetric with the ontology
+        # dispatch above. Directional confirm/reject/retract map onto the frozen
+        # verdict enum (no widening, I1); revert / to_kind are meaningless for an
+        # event pair, so decide_conflict_proposal raises ValueError on them.
+        from .conflict_resolutions import decide_conflict_proposal
+
+        if to_kind is not None:
+            msg = "to_kind is not valid for a conflict-resolution proposal"
+            raise ValueError(msg)
+        conflict_outcome = decide_conflict_proposal(
+            conn, proposal_id=proposal_id, verdict=verdict, decided_by=decided_by
+        )
+        return CorrectionOutcome(
+            proposal_id=conflict_outcome.proposal_id,
+            status=conflict_outcome.status,
+            note=conflict_outcome.note,
+        )
     if verdict not in ("confirm", "reject", "retract"):
         msg = f"verdict must be 'confirm', 'reject' or 'retract', got {verdict!r}"
         raise ValueError(msg)
@@ -495,7 +531,14 @@ def decide_correction(
         return CorrectionOutcome(
             proposal_id=proposal_id, status="not_found", note=f"no proposal {proposal_id!r}"
         )
-    if row["status"] != "proposed":
+    # An OPEN proposal is decidable. So is an EXPIRED edge_review: the pending-TTL
+    # sweep (edge_scorer) retires the review SLOT to unclog the queue, but the
+    # edge stays served-with-caveat and NO verdict was recorded — so the operator
+    # can still decide it, routing to _decide_edge_review to write the real
+    # verdict. Every other non-proposed status is a real decision already made.
+    if row["status"] != "proposed" and not (
+        row["kind"] == "edge_review" and row["status"] == "expired"
+    ):
         return CorrectionOutcome(
             proposal_id=proposal_id,
             status="already_decided",

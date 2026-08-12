@@ -323,36 +323,14 @@ def test_calibration_report_bucket_and_brier_math(
 
 
 def _seed_weak_edge(conn: sqlite3.Connection, i: int, *, serve: bool = True) -> Any:
-    """A weak-but-reviewable edge (crisp predicate, new endpoints, no
-    extraction) on a DISTINCT subject so the UNIQUE(kind, subject) doesn't
-    collapse proposals. Its computed served confidence is ~0.56 — inside the
-    ``[0.5, 0.6)`` review band (above the expiry floor, below the review
-    threshold).
+    """A low-confidence edge (vague predicate, new endpoints, no extraction) on
+    a DISTINCT subject so the UNIQUE(kind, subject) doesn't collapse proposals.
+    Its computed served confidence is ~0.365 — below both the 0.5 expiry floor
+    and the 0.6 review threshold.
 
     Stamped as SERVED by default — the serve-gated review query only proposes
     edges recall actually surfaced. Pass ``serve=False`` to model an edge recall
-    never returned."""
-    _ev, _subj, _obj, edge = _seed_edge(
-        conn,
-        text=f"Person{i} is loosely tied to Org{i}",
-        predicate="is loosely tied to",
-        extraction_confidence=None,
-        with_interpretation=False,
-        subj_conf=0.5,
-        obj_conf=0.5,
-        subject_name=f"Person{i}",
-        object_name=f"Org{i}",
-    )
-    if serve:
-        record_edge_serves(conn, [edge.id])
-    return edge
-
-
-def _seed_sub_expiry_edge(conn: sqlite3.Connection, i: int, *, serve: bool = False) -> Any:
-    """An edge BELOW the 0.5 expiry floor (~0.18): vague predicate + new
-    endpoints + no extraction. Never a review question (the review band has a
-    ``>=`` floor); never served it is an auto-expiry candidate, served it lives
-    on with its low-confidence caveat."""
+    never returned (a candidate for auto-expiry)."""
     _ev, _subj, _obj, edge = _seed_edge(
         conn,
         text=f"Person{i} is loosely connected to the Org{i}",
@@ -438,8 +416,8 @@ def test_calibration_growth_resumes_after_decide_same_subject(
     def _weak_edge_on_x(obj_name: str) -> Any:
         _e, _s, _o, edge = _seed_edge(
             db,
-            text=f"Xsubject is loosely tied to {obj_name}",
-            predicate="is loosely tied to",
+            text=f"Xsubject is loosely connected to the {obj_name}",
+            predicate="is loosely connected to the",
             extraction_confidence=None,
             with_interpretation=False,
             subj=subj_x,
@@ -592,48 +570,6 @@ def test_served_low_conf_is_queued_unserved_same_conf_is_not(
     assert unserved.id not in edge_ids
 
 
-def test_sub_expiry_confidence_edge_is_never_a_review_question(
-    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """REGRESSION (operator, 2026-08-10): a vague intent derivation ("wants to
-    install components on ...") scored below the 0.5 expiry floor, got served
-    once with its caveat, and then surfaced as an edge_review question. Below
-    the floor an edge is noise, not a question: served it stays live with its
-    caveat (never queued, never expired — expiry is never-served-only); only a
-    never-served one is silently retired."""
-    from afair.substrate import iter_edges_for_entity, read_pending_corrections
-
-    monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)  # grace elapsed
-    served = _seed_sub_expiry_edge(db, 1, serve=True)
-
-    stats = EdgeConfidenceScorer().run(db, settings)
-
-    reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
-    assert all(p.detail["edge_id"] != served.id for p in reviews)  # never a question
-    assert stats["edges_expired_unserved"] == 0  # served → not expirable
-    live = iter_edges_for_entity(db, served.subject_id)
-    assert any(e.id == served.id for e in live)  # lives on, caveat-served
-
-
-def test_intent_predicate_edge_scores_below_expiry_floor(
-    db: sqlite3.Connection, settings: Settings
-) -> None:
-    """The 2026-08-10 predicate shape itself: "wants to install components on"
-    is vague (intent language), so even with a present extraction and exact
-    mentions the derived confidence lands under 0.5."""
-    _ev, _subj, _obj, edge = _seed_edge(
-        db,
-        text="Michael wants to install components on jarvis-mini",
-        predicate="wants to install components on",
-        extraction_confidence=0.9,
-        subject_name="Michael",
-        object_name="jarvis-mini",
-    )
-    EdgeConfidenceScorer().run(db, settings)
-    score = latest_edge_scores_batch(db, [edge.id])[edge.id]
-    assert score.confidence < es.EDGE_EXPIRY_CONFIDENCE_THRESHOLD
-
-
 def test_never_served_low_conf_old_edge_is_auto_expired(
     db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -643,7 +579,7 @@ def test_never_served_low_conf_old_edge_is_auto_expired(
     from afair.substrate import iter_edges_for_entity, read_pending_corrections
 
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)  # treat the fresh edge as old
-    edge = _seed_sub_expiry_edge(db, 1, serve=False)
+    edge = _seed_weak_edge(db, 1, serve=False)
 
     stats = EdgeConfidenceScorer().run(db, settings)
     assert stats["edges_expired_unserved"] == 1
@@ -666,7 +602,7 @@ def test_never_served_low_conf_old_edge_is_auto_expired(
 def test_fresh_never_served_edge_is_not_expired(db: sqlite3.Connection, settings: Settings) -> None:
     """The 14-day grace holds: a never-served low-conf edge younger than the
     grace is left alone (recall still has a chance to surface it)."""
-    edge = _seed_sub_expiry_edge(db, 1, serve=False)
+    edge = _seed_weak_edge(db, 1, serve=False)
     stats = EdgeConfidenceScorer().run(db, settings)
     assert stats["edges_expired_unserved"] == 0
     assert (
@@ -683,7 +619,7 @@ def test_reviewed_edge_is_never_auto_expired(
     """An edge the operator touched (a review row) is entrenched (ADR-0002) and
     never auto-expired, even if never served + old + low confidence."""
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
-    edge = _seed_sub_expiry_edge(db, 1, serve=False)
+    edge = _seed_weak_edge(db, 1, serve=False)
     record_edge_review(db, edge_id=edge.id, verdict="confirm", reviewed_by="op")
 
     stats = EdgeConfidenceScorer().run(db, settings)
@@ -704,7 +640,7 @@ def test_auto_expiry_is_capped_and_drains(
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
     monkeypatch.setattr(es, "MAX_EDGE_EXPIRIES_PER_CYCLE", 5)
     for i in range(7):
-        _seed_sub_expiry_edge(db, i, serve=False)
+        _seed_weak_edge(db, i, serve=False)
 
     first = EdgeConfidenceScorer().run(db, settings)
     assert first["edges_expired_unserved"] == 5  # capped
@@ -723,7 +659,7 @@ def test_auto_expiry_leaves_calibration_report_pure(
 
     monkeypatch.setattr(es, "EDGE_EXPIRY_MIN_AGE_DAYS", -1)
     for i in range(3):
-        _seed_sub_expiry_edge(db, i, serve=False)
+        _seed_weak_edge(db, i, serve=False)
     EdgeConfidenceScorer().run(db, settings)
     assert calibration_report(db)["reviewed"] == 0
 
@@ -733,9 +669,9 @@ def test_auto_expiry_leaves_calibration_report_pure(
 
 def _insert_backdated_weak_edge(conn: sqlite3.Connection, i: int, *, days_old: float) -> Any:
     """A never-served edge whose ``discovered_at`` is backdated ``days_old``
-    days, with the same weak signal profile as ``_seed_sub_expiry_edge`` (0.5
-    mentions + a vague-but-DURABLE predicate) so the scorer computes ~0.18 (<
-    the 0.5 expiry floor) and the noise sweep leaves it alone. Inserted directly
+    days, with the same weak signal profile as ``_seed_weak_edge`` (0.5 mentions
+    + a loose-but-DURABLE predicate) so the scorer computes ~0.365 (< the 0.5
+    expiry floor) and the noise sweep leaves it alone. Inserted directly
     (entity_edges accepts a chosen discovered_at on INSERT; only UPDATE/DELETE
     are trigger-blocked) so we model a pre-deploy legacy edge that the
     discovered_at grace alone would have wiped."""
@@ -818,6 +754,235 @@ def test_serve_tracking_epoch_is_set_once_and_stable(
     first = es._serve_tracking_epoch(db)
     EdgeConfidenceScorer().run(db, settings)
     assert es._serve_tracking_epoch(db) == first
+
+
+# ── Fix 2: pending edge_review TTL (retire the review SLOT, keep the edge) ────
+
+
+def _open_edge_review(db: sqlite3.Connection, settings: Settings, *, i: int = 1) -> Any:
+    """Seed one served weak edge (on a DISTINCT subject ``i``) and run a cycle so
+    it becomes an OPEN ('proposed') edge_review. Returns the newest proposed
+    edge_review row (id + edge_id in detail)."""
+    from afair.substrate import read_pending_corrections
+
+    edge = _seed_weak_edge(db, i)
+    EdgeConfidenceScorer().run(db, settings)
+    return next(
+        p
+        for p in read_pending_corrections(db)
+        if p.kind == "edge_review" and p.detail["edge_id"] == edge.id
+    )
+
+
+def _backdate_proposal(db: sqlite3.Connection, proposal_id: str, *, days_ago: float) -> None:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    with db:
+        db.execute(
+            "UPDATE proposed_corrections SET detected_at = ? WHERE id = ?", (when, proposal_id)
+        )
+
+
+def _set_review_expiry_epoch(db: sqlite3.Connection, *, days_ago: float) -> None:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    with db:
+        db.execute(
+            "INSERT INTO worker_watermarks (worker, through_created_at, through_id, updated_at) "
+            "VALUES (?, ?, '0', ?) "
+            "ON CONFLICT(worker) DO UPDATE SET through_created_at = excluded.through_created_at",
+            (es.EDGE_REVIEW_EXPIRY_EPOCH_KEY, when, when),
+        )
+
+
+def test_review_expiry_epoch_is_set_once_and_stable(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The pending-review-expiry epoch is created on the first cycle and never
+    moves on later cycles (mirrors the serve-tracking epoch)."""
+    EdgeConfidenceScorer().run(db, settings)
+    first = es._review_expiry_epoch(db)
+    EdgeConfidenceScorer().run(db, settings)
+    assert es._review_expiry_epoch(db) == first
+
+
+def test_fresh_deploy_does_not_expire_the_pending_backlog(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """ROLLOUT SAFETY: a long-open (90d) pending edge_review on a FRESH vault
+    (expiry epoch = now) is NOT expired on the first cycle — the epoch gives the
+    whole backlog a full TTL window before anything ages out."""
+    proposal = _open_edge_review(db, settings)
+    _backdate_proposal(db, proposal.id, days_ago=90)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 0
+    row = db.execute(
+        "SELECT status FROM proposed_corrections WHERE id = ?", (proposal.id,)
+    ).fetchone()
+    assert row["status"] == "proposed"  # still open, still on the queue
+
+
+def test_matured_epoch_lets_old_pending_review_expire(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """Once the expiry epoch is older than the TTL (epoch 40d old) a 90d-open
+    pending review is finally eligible — the epoch delays, not disables."""
+    proposal = _open_edge_review(db, settings)
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)  # tracking began past the 30d TTL
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 1
+    row = db.execute(
+        "SELECT status, decided_by FROM proposed_corrections WHERE id = ?", (proposal.id,)
+    ).fetchone()
+    assert row["status"] == "expired"
+    assert row["decided_by"] == es.EDGE_REVIEW_EXPIRY_PRODUCER
+
+
+def test_expiry_writes_no_invalidation_no_verdict_and_keeps_edge(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The core promise: expiry retires the review SLOT only. The edge is NOT
+    invalidated (I2 — entity_edges untouched, no edge_invalidations), NO
+    edge_reviews verdict row is written, and the edge stays LIVE."""
+    from afair.substrate import iter_edges_for_entity
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    subject_id = db.execute(
+        "SELECT subject_id FROM entity_edges WHERE id = ?", (edge_id,)
+    ).fetchone()["subject_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+
+    stats = EdgeConfidenceScorer().run(db, settings)
+    assert stats["edge_reviews_expired_pending"] == 1
+    # No invalidation, no verdict row.
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM edge_invalidations WHERE edge_id = ?", (edge_id,)
+        ).fetchone()[0]
+        == 0
+    )
+    assert db.execute("SELECT COUNT(*) FROM edge_reviews").fetchone()[0] == 0
+    # The edge is still LIVE (served-with-caveat, unchanged recall behavior).
+    live = iter_edges_for_entity(db, subject_id)
+    assert any(e.id == edge_id for e in live)
+
+
+def test_expired_review_is_never_re_proposed(db: sqlite3.Connection, settings: Settings) -> None:
+    """ANTI-CHURN: once expired, the same low-confidence edge is never re-proposed
+    (the candidate page excludes edges with an expired edge_review). No
+    retire→re-propose loop, even though the edge remains served + sub-threshold."""
+    from afair.substrate import read_pending_corrections
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)  # expires it
+
+    # Several more cycles: the edge is still served + sub-threshold, yet never
+    # re-proposed (the expired row is the durable guard).
+    for _ in range(3):
+        EdgeConfidenceScorer().run(db, settings)
+    open_reviews = [p for p in read_pending_corrections(db) if p.kind == "edge_review"]
+    assert all(p.detail["edge_id"] != edge_id for p in open_reviews)
+    # Exactly one proposed_corrections row for this edge, and it is expired.
+    rows = db.execute(
+        "SELECT status FROM proposed_corrections "
+        "WHERE kind = 'edge_review' AND json_extract(detail, '$.edge_id') = ?",
+        (edge_id,),
+    ).fetchall()
+    assert [r["status"] for r in rows] == ["expired"]
+
+
+def test_recall_still_serves_expired_edge_with_caveat(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """END-TO-END: after the review slot expires, recall STILL serves the edge
+    (it is live) — expiry is of the review, not the relation. The caveat is a
+    served-confidence property (handlers) unaffected by the queue state."""
+    from afair.substrate import iter_edges_for_entity
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    subject_id = db.execute(
+        "SELECT subject_id FROM entity_edges WHERE id = ?", (edge_id,)
+    ).fetchone()["subject_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)
+
+    # The edge is still returned by the live edge reader → recall still surfaces it.
+    live = iter_edges_for_entity(db, subject_id)
+    served = next(e for e in live if e.id == edge_id)
+    # And its served confidence is below the caveat threshold, so recall shows the
+    # low-confidence caveat rather than suppressing the edge.
+    from afair.substrate import latest_edge_scores_batch as _scores
+
+    scores = _scores(db, [edge_id])
+    served_conf = scores[edge_id].confidence if edge_id in scores else served.confidence
+    assert served_conf < 0.5
+
+
+def test_operator_can_decide_an_expired_review(db: sqlite3.Connection, settings: Settings) -> None:
+    """OPERATOR OVERRIDE: an expired edge_review is still decidable — it routes to
+    _decide_edge_review and writes the real verdict. A genuinely-decided
+    (confirmed) review reports already_decided."""
+    from afair.substrate import decide_correction, latest_edge_review
+
+    proposal = _open_edge_review(db, settings)
+    edge_id = proposal.detail["edge_id"]
+    _backdate_proposal(db, proposal.id, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+    EdgeConfidenceScorer().run(db, settings)  # → expired
+    assert (
+        db.execute(
+            "SELECT status FROM proposed_corrections WHERE id = ?", (proposal.id,)
+        ).fetchone()["status"]
+        == "expired"
+    )
+
+    # The operator can still confirm it — the real verdict lands.
+    outcome = decide_correction(db, proposal_id=proposal.id, verdict="confirm")
+    assert outcome.status == "applied"
+    assert latest_edge_review(db, edge_id) == "confirm"
+
+    # A truly-decided review is NOT re-decidable.
+    other = _open_edge_review(db, settings, i=2)
+    decide_correction(db, proposal_id=other.id, verdict="confirm")
+    again = decide_correction(db, proposal_id=other.id, verdict="reject")
+    assert again.status == "already_decided"
+
+
+def test_pending_expiry_is_capped_per_cycle(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE per run; the backlog drains
+    across cycles."""
+    monkeypatch.setattr(es, "MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE", 25)
+    # 30 distinct-subject served weak edges → 30 open reviews (raise the propose
+    # cap so they all queue up front in a couple of cycles).
+    monkeypatch.setattr(es, "MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE", 30)
+    for i in range(30):
+        _seed_weak_edge(db, i)
+    EdgeConfidenceScorer().run(db, settings)
+    open_ids = [
+        r["id"]
+        for r in db.execute(
+            "SELECT id FROM proposed_corrections WHERE kind = 'edge_review' AND status = 'proposed'"
+        ).fetchall()
+    ]
+    assert len(open_ids) == 30
+    for pid in open_ids:
+        _backdate_proposal(db, pid, days_ago=90)
+    _set_review_expiry_epoch(db, days_ago=40)
+
+    first = EdgeConfidenceScorer().run(db, settings)
+    assert first["edge_reviews_expired_pending"] == 25  # capped
+    second = EdgeConfidenceScorer().run(db, settings)
+    assert second["edge_reviews_expired_pending"] == 5  # remainder drains
 
 
 # ── retro-sweep: noise edges (observe / transient / vague predicate) — B4 ────
@@ -1140,8 +1305,8 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     # they fill the first page but collapse to one proposal via UNIQUE(subject).
     _ev, subj0, _obj0, _e0 = _seed_edge(
         db,
-        text="Person0 is loosely tied to Thing0",
-        predicate="is loosely tied to",
+        text="Person0 is loosely connected to the Thing0",
+        predicate="is loosely connected to the",
         extraction_confidence=None,
         with_interpretation=False,
         subj_conf=0.5,
@@ -1153,8 +1318,8 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     for j in range(1, 4):
         _e, _s, _o, edge_j = _seed_edge(
             db,
-            text=f"Person0 is loosely tied to Thing{j}",
-            predicate="is loosely tied to",
+            text=f"Person0 is loosely connected to the Thing{j}",
+            predicate="is loosely connected to the",
             extraction_confidence=None,
             with_interpretation=False,
             subj=subj0,
@@ -1173,3 +1338,22 @@ def test_paged_pool_does_not_starve_a_distinct_subject(
     assert "Person99" in subjects  # past-pool subject is NOT starved
     # The monopolizing subject gets exactly one open proposal, not four.
     assert sum(1 for p in reviews if p.detail["subject_name"] == "Person0") == 1
+
+
+def test_intent_predicate_edge_scores_below_expiry_floor(
+    db: sqlite3.Connection, settings: Settings
+) -> None:
+    """The 2026-08-10 predicate shape itself: "wants to install components on"
+    is vague (intent language), so even with a present extraction and exact
+    mentions the derived confidence lands under 0.5."""
+    _ev, _subj, _obj, edge = _seed_edge(
+        db,
+        text="Michael wants to install components on jarvis-mini",
+        predicate="wants to install components on",
+        extraction_confidence=0.9,
+        subject_name="Michael",
+        object_name="jarvis-mini",
+    )
+    EdgeConfidenceScorer().run(db, settings)
+    score = latest_edge_scores_batch(db, [edge.id])[edge.id]
+    assert score.confidence < es.EDGE_EXPIRY_CONFIDENCE_THRESHOLD

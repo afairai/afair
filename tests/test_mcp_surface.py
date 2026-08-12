@@ -105,6 +105,75 @@ async def test_advertised_surface_matches_golden(tmp_path: Path) -> None:
     )
 
 
+# ── Layer 1b: org principal can never fork the wire contract (ADR-0010) ──────
+
+
+@pytest.mark.asyncio
+async def test_org_surface_schemas_byte_identical_to_person_golden(tmp_path: Path) -> None:
+    """A server built under an ORGANIZATION principal advertises byte-identical
+    tool schemas to the person golden — only prose (descriptions, instructions,
+    resource description) may differ. This is the tripwire that an org vault can
+    never fork the wire contract (I1): the framing layer touches AI-facing
+    strings, never the schema.
+
+    ``principal_kind`` is pinned explicitly (not via env) per the amended spec,
+    so a stray PRINCIPAL_* env var in CI can't silently turn this test into a
+    person-vs-person no-op — while the golden helpers keep relying on the
+    default and would catch the inverse leak.
+    """
+    import json
+
+    golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    org_settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        environment="local",
+        vault_dir=tmp_path,
+        cold_path_enabled=False,
+        semantic_recall_enabled=False,
+        principal_kind="organization",
+        principal_name="Acme Corp",
+    )
+    surface = await advertised_surface(build_server(org_settings))
+
+    # Same tool set, and per-tool in/out schemas EQUAL to the person golden.
+    golden_tools = {t["name"]: t for t in golden["tools"]}
+    assert {t["name"] for t in surface["tools"]} == set(golden_tools)
+    for tool in surface["tools"]:
+        gt = golden_tools[tool["name"]]
+        assert tool["inputSchema"] == gt["inputSchema"], (
+            f"{tool['name']}: org inputSchema diverged from the person golden "
+            "(the framing layer must never touch the wire contract)"
+        )
+        assert tool.get("outputSchema") == gt.get("outputSchema"), (
+            f"{tool['name']}: org outputSchema diverged from the person golden"
+        )
+        # The reframe is real: org prose differs (person text would mean the
+        # framing silently stopped applying to the surface).
+        assert tool["description"] != gt["description"], (
+            f"{tool['name']}: org description is identical to person — reframe no-op"
+        )
+
+    # Resource identity (uri/name/mime) unchanged; description is prose.
+    golden_resources = {r["uri"]: r for r in golden["resources"]}
+    assert {r["uri"] for r in surface["resources"]} == set(golden_resources)
+    for resource in surface["resources"]:
+        gr = golden_resources[resource["uri"]]
+        assert resource["name"] == gr["name"]
+        assert resource["mimeType"] == gr["mimeType"]
+
+    # And the same shape lints that guard the person surface hold for org.
+    for name, which, schema in _in_out_schemas(surface):
+        offenders = _bare_string_pollution_paths(schema)
+        assert not offenders, f"org {name}.{which} has bare-string-union pollution: {offenders}"
+        Draft202012Validator.check_schema(schema)
+    for tool in surface["tools"]:
+        schema = tool["inputSchema"]
+        assert schema.get("type") == "object"
+        assert "properties" in schema
+        for forbidden in ("anyOf", "oneOf", "$ref"):
+            assert forbidden not in schema
+
+
 # ── Layer 2: schema-shape invariant lints (recursive, over every param) ──────
 
 

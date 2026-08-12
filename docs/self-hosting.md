@@ -186,6 +186,34 @@ database plus a filesystem object store for large/binary content. Back up that
 one directory and you have backed up the whole vault. There is no external
 database, queue, or cache to operate.
 
+## Organization vaults (person vs. organization)
+
+By default a vault belongs to a **person**: the AI speaks about "the user" and
+their memory, and nothing here changes for a personal deployment. To run a vault
+for a **team or company**, set two variables:
+
+```bash
+PRINCIPAL_KIND=organization
+PRINCIPAL_NAME="Acme Corp"        # required; names the org in the AI-facing prompts
+```
+
+That reframes the assistant's cognition ("Acme Corp's memory vault" instead of
+"the user's") across the extractor, the cold-path workers, and the tool
+descriptions. It does **not** change the wire contract, the storage format, or
+the invariants: an organization vault is still exactly ONE tenant, meaning one
+instance, one database, one machine (Invariant I8). It is not multi-tenancy; two
+organizations never share an instance.
+
+Members and agents of an organization are told apart by attribution, not
+isolation. Every member sees the whole vault, and each write can carry an
+optional **`actor`**: the person or agent on whose behalf a shared credential
+wrote it (e.g. `slack:U0BKXTGBWLD`, `alice@acme.com`). When each member connects
+with their own token, the server already records **which tool** wrote each event
+(the served `client`); pass `actor` only when one shared credential relays for
+many people. Partial visibility / per-member access control is deliberately out
+of scope (a future capability), so run an organization vault only where every
+member is trusted with the whole memory.
+
 ## Production checklist
 
 When you expose afair on the public internet, two settings become mandatory and

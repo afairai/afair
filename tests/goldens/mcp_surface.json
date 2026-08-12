@@ -14,7 +14,7 @@
   "tools": [
     {
       "annotations": null,
-      "description": "Log a structured event from your own agent activity to the user's vault.\n\nThis tool is for YOU (the AI agent) to record what YOU did. Different\nfrom ``remember`` (which is for content the USER chose to save). ``observe``\nis your auto-journal so that future sessions of you, or other AI agents\nthe user works with, know what happened. The user wants visibility\ninto what their AI does, partly so they can audit, partly so the\nnext session has continuity.\n\nDefault to verbose observation. The user's salience worker and\nmode-switcher read observe events to decide attention state; richer\nobserve data leads to better cognitive routing on subsequent recalls.\n\nWHEN TO CALL:\n  - After completing a substantive task: shipping code, sending an email,\n    making a decision, finishing a meeting, running an analysis, editing\n    a file.\n  - When you start a significant work session (\"started_task\").\n  - On any agent action whose existence the user might want to recall\n    later (\"what did Claude do yesterday in this project?\").\n  - On error or failure that's worth tracking for diagnosis.\n\nWHEN NOT TO CALL:\n  - For every micro-step, don't observe each individual file read.\n  - For purely conversational acks.\n  - For things the user explicitly typed (that's ``remember`` territory if\n    durable, nothing if not).\n\nARGUMENTS:\n  - event: A JSON object. The only REQUIRED key is \"action\" (a non-empty\n    string verb that names what kind of thing happened). Recognized\n    optional keys:\n      \"subject\": what was acted upon (filename, person, ticket, ...)\n      \"result\":  outcome (\"success\", \"failed: X\", free text)\n    Beyond those, ANY additional fields are preserved verbatim. Use\n    whatever shape fits your agent's natural mental model. A JSON-string-\n    serialized object is also accepted and parsed, and a bare string\n    becomes the action — the event is never rejected on shape.\n\n    Examples:\n      {\"action\": \"edit_file\", \"subject\": \"events.py\",\n       \"result\": \"added inline-vs-spill logic\"}\n      {\"action\": \"sent_email\", \"subject\": \"sajinth@example.com\",\n       \"result\": \"follow-up on roadmap\", \"thread_id\": \"...\"}\n      {\"action\": \"deployed\", \"subject\": \"afair-prod\",\n       \"result\": \"v0.1.3\", \"duration_s\": 47}\n      {\"action\": \"drafted_message\", \"subject\": \"Mara\",\n       \"result\": \"birthday note for Saturday\"}\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\"}\n",
+      "description": "Log a structured event from your own agent activity to the user's vault.\n\nThis tool is for YOU (the AI agent) to record what YOU did. Different\nfrom ``remember`` (which is for content the USER chose to save). ``observe``\nis your auto-journal so that future sessions of you, or other AI agents\nthe user works with, know what happened. The user wants visibility\ninto what their AI does, partly so they can audit, partly so the\nnext session has continuity.\n\nDefault to verbose observation. The user's salience worker and\nmode-switcher read observe events to decide attention state; richer\nobserve data leads to better cognitive routing on subsequent recalls.\n\nWHEN TO CALL:\n  - After completing a substantive task: shipping code, sending an email,\n    making a decision, finishing a meeting, running an analysis, editing\n    a file.\n  - When you start a significant work session (\"started_task\").\n  - On any agent action whose existence the user might want to recall\n    later (\"what did Claude do yesterday in this project?\").\n  - On error or failure that's worth tracking for diagnosis.\n\nWHEN NOT TO CALL:\n  - For every micro-step, don't observe each individual file read.\n  - For purely conversational acks.\n  - For things the user explicitly typed (that's ``remember`` territory if\n    durable, nothing if not).\n\nARGUMENTS:\n  - event: A JSON object. The only REQUIRED key is \"action\" (a non-empty\n    string verb that names what kind of thing happened). Recognized\n    optional keys:\n      \"subject\": what was acted upon (filename, person, ticket, ...)\n      \"result\":  outcome (\"success\", \"failed: X\", free text)\n      \"actor\":   on WHOSE BEHALF this was logged, when a shared credential\n                 relays for many people (an org agent acting for a specific\n                 member). A free-form identifier kept verbatim\n                 (\"slack:U123\", \"alice@corp\"). Distinct from the\n                 server-derived ``client`` (which tool wrote it): actor is\n                 attribution content you set, client is derived. Omit for a\n                 personal vault. Same content on behalf of different actors\n                 is stored as distinct events.\n    Beyond those, ANY additional fields are preserved verbatim. Use\n    whatever shape fits your agent's natural mental model. A JSON-string-\n    serialized object is also accepted and parsed, and a bare string\n    becomes the action — the event is never rejected on shape.\n\n    Examples:\n      {\"action\": \"edit_file\", \"subject\": \"events.py\",\n       \"result\": \"added inline-vs-spill logic\"}\n      {\"action\": \"sent_email\", \"subject\": \"sajinth@example.com\",\n       \"result\": \"follow-up on roadmap\", \"thread_id\": \"...\"}\n      {\"action\": \"deployed\", \"subject\": \"afair-prod\",\n       \"result\": \"v0.1.3\", \"duration_s\": 47}\n      {\"action\": \"drafted_message\", \"subject\": \"Mara\",\n       \"result\": \"birthday note for Saturday\"}\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\"}\n",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -26,6 +26,18 @@
                 "maxLength": 200,
                 "minLength": 1,
                 "type": "string"
+              },
+              "actor": {
+                "anyOf": [
+                  {
+                    "maxLength": 120,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               },
               "result": {
                 "anyOf": [
@@ -468,6 +480,18 @@
                         "title": "Reason",
                         "type": "string"
                       },
+                      "resolution": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Resolution"
+                      },
                       "verdict": {
                         "title": "Verdict",
                         "type": "string"
@@ -695,6 +719,41 @@
             "title": "Pending Corrections Count",
             "type": "integer"
           },
+          "pending_counts": {
+            "anyOf": [
+              {
+                "description": "Open-proposal counts split BY VALUE CLASS, so a client can value-rank what\nit surfaces instead of quoting one undifferentiated total.\n\n``conflicts`` are the highest-value class (a memory conflict needs the\noperator's call) and worth surfacing on sight. ``entity`` (retype / merge /\nmerge_review) and ``ontology`` are worth mentioning when they accumulate.\n``edge_reviews`` are low-value: low-confidence relation reviews that expire on\ntheir own (Fix 2) and are not worth the operator's attention unless asked.\n\n``pending_corrections_count`` on ``RecallResult`` stays the true grand total;\nthis is the same information split for ranking. Additive per I1.",
+                "properties": {
+                  "conflicts": {
+                    "default": 0,
+                    "title": "Conflicts",
+                    "type": "integer"
+                  },
+                  "edge_reviews": {
+                    "default": 0,
+                    "title": "Edge Reviews",
+                    "type": "integer"
+                  },
+                  "entity": {
+                    "default": 0,
+                    "title": "Entity",
+                    "type": "integer"
+                  },
+                  "ontology": {
+                    "default": 0,
+                    "title": "Ontology",
+                    "type": "integer"
+                  }
+                },
+                "title": "PendingCounts",
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "summary": {
             "anyOf": [
               {
@@ -753,10 +812,21 @@
     },
     {
       "annotations": null,
-      "description": "Save something to the user's persistent memory vault, afair, the\nsubstrate that travels across their sessions, AI tools, and years.\nUse it generously.\n\nThe user explicitly installed afair so their context doesn't reset.\nIf a fact crosses your attention and looks even slightly worth more\nthan the current message, save it. The cost of forgetting is the\nuser re-explaining themselves next session; the cost of an extra\nremember is one append-only row that dedupes if identical.\n\nWHEN TO CALL:\n  - The user explicitly says \"remember\", \"save\", \"note that\", \"keep this\",\n    \"don't forget\", \"make a note\", \"add to memory\", or any clear save-this\n    signal.\n  - The user shares a durable fact worth retaining across sessions, from\n    any part of life: a work decision or deadline, a colleague's role, a\n    friend's or family member's name and what matters to them, a birthday\n    or anniversary, a preference (food, travel, how they like to work), a\n    personal goal, something they are working through.\n  - The user shows you content (an email, a meeting note, a document, a\n    screenshot, a photo, a PDF, an audio clip) whose substance has reason\n    to outlive this conversation.\n  - You make a significant decision together with the user that should\n    survive into future sessions.\n  - The user corrects an earlier fact (\"actually Sajinth is at Athara,\n    not elvah\"). Write the new fact AND pass the old event's content_hash\n    in ``invalidates`` to mark it superseded.\n\nDEFAULT: when in doubt, remember. Don't ask for permission. Don't\nnarrate \"I'll remember this for you.\" Just call it.\n\nWHEN NOT TO CALL:\n  - Conversational filler (\"ok thanks\", \"got it\", \"sounds good\").\n  - Content the user is actively dictating to another destination.\n  - Things you can easily re-derive from current code or state.\n  - Personal details about other people that the user has not asked you\n    to track.\n\nARGUMENTS:\n  - content: A discriminated union. Either:\n      {\"type\": \"text\", \"text\": \"...\"}                          for any text, OR\n      {\"type\": \"binary\", \"data_b64\": \"...\", \"mime\": \"image/png\",\n       \"filename_hint\": \"screenshot.png\"}                       for binary.\n    Max 10 MB raw bytes. A JSON-string-serialized object (the same shape\n    sent as a string) is also accepted and parsed, and a bare string is\n    stored as text — the write is never rejected on shape.\n  - context: Optional. Where this came from or what it relates to.\n    Examples: \"email thread with Sajinth\", \"Tuesday standup\",\n    \"dinner with Mara\", \"Mum's birthday weekend\". Aids future\n    recall.\n  - type_hint: Optional. What kind of thing this is, if you have a guess.\n    Examples: \"email\", \"meeting_minutes\", \"decision\", \"screenshot\".\n    Advisory only. The system may classify differently.\n  - parent_hashes: Optional. Content hashes of events this one references\n    (corrections, replies, threads).\n  - invalidates: Optional. List of content_hashes that this new fact\n    supersedes. Each target gets its own append-only invalidation event\n    referencing it. Use when the user corrects a prior fact or a meeting\n    outcome supersedes an earlier plan.\n  - asserted_by: Optional. Who asserted this, one of \"user\" (the human\n    stated it directly) or \"model\" (you inferred or synthesized it).\n    Advisory provenance only: it is stored and served, but a self-reported\n    \"user\" can NEVER raise the trust of a derived fact above the normal\n    agent-derived level — operator-grade trust is earned only through the\n    recall(decide=...) review loop. Omit if you're unsure.\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\",\n   \"deduplicated\": false, \"invalidated\": [\"sha256:...\", ...]}\n\n  - deduplicated=true means an event with identical content+context already\n    existed; nothing was added but the existing event_id is returned.\n  - invalidated lists the content_hashes that were marked superseded in\n    this call.\n\nThe substrate is the user's vault, not yours. Be a thoughtful librarian:\nsave signal worth keeping; don't hoard ephemera.\n",
+      "description": "Save something to the user's persistent memory vault, afair, the\nsubstrate that travels across their sessions, AI tools, and years.\nUse it generously.\n\nThe user explicitly installed afair so their context doesn't reset.\nIf a fact crosses your attention and looks even slightly worth more\nthan the current message, save it. The cost of forgetting is the\nuser re-explaining themselves next session; the cost of an extra\nremember is one append-only row that dedupes if identical.\n\nWHEN TO CALL:\n  - The user explicitly says \"remember\", \"save\", \"note that\", \"keep this\",\n    \"don't forget\", \"make a note\", \"add to memory\", or any clear save-this\n    signal.\n  - The user shares a durable fact worth retaining across sessions, from\n    any part of life: a work decision or deadline, a colleague's role, a\n    friend's or family member's name and what matters to them, a birthday\n    or anniversary, a preference (food, travel, how they like to work), a\n    personal goal, something they are working through.\n  - The user shows you content (an email, a meeting note, a document, a\n    screenshot, a photo, a PDF, an audio clip) whose substance has reason\n    to outlive this conversation.\n  - You make a significant decision together with the user that should\n    survive into future sessions.\n  - The user corrects an earlier fact (\"actually Sajinth is at Athara,\n    not elvah\"). Write the new fact AND pass the old event's content_hash\n    in ``invalidates`` to mark it superseded.\n\nDEFAULT: when in doubt, remember. Don't ask for permission. Don't\nnarrate \"I'll remember this for you.\" Just call it.\n\nWHEN NOT TO CALL:\n  - Conversational filler (\"ok thanks\", \"got it\", \"sounds good\").\n  - Content the user is actively dictating to another destination.\n  - Things you can easily re-derive from current code or state.\n  - Personal details about other people that the user has not asked you\n    to track.\n\nARGUMENTS:\n  - content: A discriminated union. Either:\n      {\"type\": \"text\", \"text\": \"...\"}                          for any text, OR\n      {\"type\": \"binary\", \"data_b64\": \"...\", \"mime\": \"image/png\",\n       \"filename_hint\": \"screenshot.png\"}                       for binary.\n    Max 10 MB raw bytes. A JSON-string-serialized object (the same shape\n    sent as a string) is also accepted and parsed, and a bare string is\n    stored as text — the write is never rejected on shape.\n  - context: Optional. Where this came from or what it relates to.\n    Examples: \"email thread with Sajinth\", \"Tuesday standup\",\n    \"dinner with Mara\", \"Mum's birthday weekend\". Aids future\n    recall.\n  - type_hint: Optional. What kind of thing this is, if you have a guess.\n    Examples: \"email\", \"meeting_minutes\", \"decision\", \"screenshot\".\n    Advisory only. The system may classify differently.\n  - parent_hashes: Optional. Content hashes of events this one references\n    (corrections, replies, threads).\n  - invalidates: Optional. List of content_hashes that this new fact\n    supersedes. Each target gets its own append-only invalidation event\n    referencing it. Use when the user corrects a prior fact or a meeting\n    outcome supersedes an earlier plan.\n  - asserted_by: Optional. Who asserted this, one of \"user\" (the human\n    stated it directly) or \"model\" (you inferred or synthesized it).\n    Advisory provenance only: it is stored and served, but a self-reported\n    \"user\" can NEVER raise the trust of a derived fact above the normal\n    agent-derived level — operator-grade trust is earned only through the\n    recall(decide=...) review loop. Omit if you're unsure.\n  - actor: Optional. On WHOSE BEHALF this memory is written, when a single\n    credential relays for many people (an organization's shared agent\n    writing for different members). A free-form identifier kept verbatim —\n    \"slack:U0BKXTGBWLD\", \"alice@corp\", \"Alice from Sales\". Omit for a\n    personal vault or when the credential already identifies the writer.\n\n  DISAMBIGUATION — three different questions, don't conflate them:\n    - client (served on recall hits): WHICH TOOL wrote this, derived\n      server-side from the credential. You never set it.\n    - actor (this argument): ON WHOSE BEHALF, when the credential is\n      shared. You set it. Advisory only; it never substitutes for client\n      and never raises trust. If absent, client is the best attribution.\n    - asserted_by: whether a HUMAN or the MODEL asserted the fact.\n  Same content written on behalf of different actors is stored as distinct\n  events (attribution is content); identical content + same actor dedupes.\n\nRETURN:\n  {\"ok\": true, \"event_id\": \"...\", \"content_hash\": \"sha256:...\",\n   \"deduplicated\": false, \"invalidated\": [\"sha256:...\", ...]}\n\n  - deduplicated=true means an event with identical content+context already\n    existed; nothing was added but the existing event_id is returned.\n  - invalidated lists the content_hashes that were marked superseded in\n    this call.\n\nThe substrate is the user's vault, not yours. Be a thoughtful librarian:\nsave signal worth keeping; don't hoard ephemera.\n",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "asserted_by": {
             "anyOf": [
               {

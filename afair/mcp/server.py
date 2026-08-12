@@ -42,6 +42,8 @@ from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.expectation_checker import ExpectationChecker
 from ..agents.extraction_retry import ExtractionRetryWorker
+from ..agents.framing import framing_from_settings
+from ..agents.framing import set_current as set_framing
 from ..agents.living_syntheses import LivingSynthesisWorker
 from ..agents.mode_switcher import ModeSwitcher
 from ..agents.pruner import Pruner
@@ -57,6 +59,8 @@ from .auth import BearerTokenMiddleware, enforce_write_scope
 from .blob_upload_route import blob_upload_endpoint
 from .body_limit import BodySizeLimitMiddleware
 from .context import ServerContext, connect_for_thread, set_context
+from .correct_route import correct_endpoint
+from .corrections_route import corrections_list_endpoint, decide_endpoint
 from .correlation import CorrelationIdMiddleware
 from .cors import preflight_endpoint as tokens_preflight_endpoint
 from .export_async_routes import (
@@ -179,6 +183,13 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
     clients (see CLAUDE.md §1 — renaming requires a coordinated update of
     every client's connection config).
     """
+    # Install the active principal framing FIRST (ADR-0010), before any prompt
+    # or MCP-surface string is rendered below. Person default is byte-identical
+    # to every prior release; an organization principal reframes the AI-facing
+    # cognition. One process = one principal (I8), so a boot-time singleton is
+    # the right delivery — every prompt builder reads framing.current().
+    set_framing(framing_from_settings(settings))
+
     # Install the vault encryption key first, before ANY open_db call
     # (set_context below itself does not open a connection, but the
     # background daemons started later by the app lifespan will).
@@ -206,11 +217,11 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
         )
     )
 
-    mcp: FastMCP = FastMCP("afair", instructions=descriptions.SERVER_INSTRUCTIONS)
+    mcp: FastMCP = FastMCP("afair", instructions=descriptions.server_instructions())
 
     # ── tools — descriptions are AI-facing prompts, see descriptions.py ─────
 
-    @mcp.tool(description=descriptions.REMEMBER, version="1")
+    @mcp.tool(description=descriptions.remember_description(), version="1")
     def remember(
         content: schemas.RememberContentInput,
         context: str | None = None,
@@ -218,6 +229,7 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
         parent_hashes: schemas.StringListInput = None,
         invalidates: schemas.StringListInput = None,
         asserted_by: schemas.AssertedBy | None = None,
+        actor: str | None = None,
     ) -> schemas.RememberResult:
         enforce_write_scope()
         # Narrow the widened ``RememberContent | str`` alias back to the concrete
@@ -235,9 +247,14 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
             parent_hashes=parent_hashes,
             invalidates=invalidates,
             asserted_by=asserted_by,
+            actor=actor,
         )
 
-    @mcp.tool(description=descriptions.RECALL, version="1", output_schema=_RECALL_OUTPUT_SCHEMA)
+    @mcp.tool(
+        description=descriptions.recall_description(),
+        version="1",
+        output_schema=_RECALL_OUTPUT_SCHEMA,
+    )
     def recall(
         query: str | None = None,
         scope: str | None = None,
@@ -296,7 +313,7 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
             structured_content=result.model_dump(exclude_none=True),
         )
 
-    @mcp.tool(description=descriptions.OBSERVE, version="1")
+    @mcp.tool(description=descriptions.observe_description(), version="1")
     def observe(event: schemas.ObserveEventInput) -> schemas.ObserveResult:
         enforce_write_scope()
         # Narrow the widened ``ObserveEvent | str`` alias back to the concrete
@@ -309,7 +326,7 @@ def build_server(settings: Settings, *, scheduler: ColdPathScheduler | None = No
     @mcp.resource(
         resources.SESSION_START_URI,
         name=resources.SESSION_START_NAME,
-        description=resources.SESSION_START_DESCRIPTION,
+        description=resources.session_start_description(),
         mime_type="application/json",
     )
     def session_start() -> dict[str, Any]:
@@ -521,6 +538,17 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/tokens",
         "/internal/memory-mirror",
         "/internal/import",
+        # Correction review queue + operator decide (Phase 1). Both self-auth
+        # with authorize_internal (master bearer OR sub-pinned dashboard JWT),
+        # so they're exempt from the main MCP bearer middleware just like the
+        # other /internal management routes.
+        "/internal/corrections",
+        "/internal/decide",
+        # Operator-initiated content correction (ADR-0009). Self-auths with
+        # authorize_internal (master bearer OR sub-pinned dashboard JWT), so
+        # it's exempt from the main MCP bearer middleware like the other
+        # /internal management routes.
+        "/internal/correct",
     }
     # Prefix-exempt: the token sub-routes (/internal/tokens/<id>) and the
     # async-export sub-routes (/internal/export/{request,status,download}),
@@ -550,6 +578,9 @@ def build_app(settings: Settings) -> Starlette:
         "/internal/tokens",
         "/internal/memory-mirror",
         "/internal/import",
+        "/internal/corrections",
+        "/internal/decide",
+        "/internal/correct",
     )
 
     middleware = [
@@ -684,6 +715,19 @@ def build_app(settings: Settings) -> Starlette:
         ),
         Route("/internal/import", import_endpoint, methods=["POST"]),
         Route("/internal/import", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        # Correction review queue (GET) + operator decision (POST). Phase 1:
+        # makes the Memory Mirror actionable. GET reuses the recall pending
+        # view; POST routes through decide_correction (ADR-0002).
+        Route("/internal/corrections", corrections_list_endpoint, methods=["GET"]),
+        Route("/internal/corrections", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        Route("/internal/decide", decide_endpoint, methods=["POST"]),
+        Route("/internal/decide", tokens_preflight_endpoint, methods=["OPTIONS"]),
+        # Operator-initiated content correction (ADR-0009): supersede a source
+        # or synthesis (kind:"event"), or suppress/restore a key point
+        # (kind:"key_point"). Composes append-only substrate primitives; zero
+        # SQL in the route; never routes through decide_correction.
+        Route("/internal/correct", correct_endpoint, methods=["POST"]),
+        Route("/internal/correct", tokens_preflight_endpoint, methods=["OPTIONS"]),
         Route(
             "/internal/tokens",
             tokens_preflight_endpoint,

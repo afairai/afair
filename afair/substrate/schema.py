@@ -64,6 +64,29 @@ SCHEMA_DDL: tuple[str, ...] = (
     # ── interpretations: materialized views over substrate (Invariant I3) ──
     # Multiple versions may coexist. The substrate row is invariant; this
     # table is regenerable. Populated by the Extractor agent in task #4.
+    #
+    # Append-only, enforced by triggers with a SINGLE scoped exception. The
+    # write path (write_interpretation) only ever INSERTs — a re-interpretation
+    # is a NEW version/producer row, never an in-place UPDATE — so there are
+    # ZERO legitimate UPDATEs (``interpretations_no_update`` is unconditional).
+    # There is exactly ONE legitimate DELETE path in the whole codebase: the
+    # Pruner's stale-failed-extraction GC (agents/pruner.py), tightly scoped to
+    # ``produced_by LIKE 'extractor:%'`` rows with ``status='failed'`` that
+    # already have a SUCCESS sibling — it drops regenerable failure diagnostics,
+    # never a memory-of-record row. ``interpretations_no_delete`` therefore
+    # blocks every DELETE EXCEPT those on ``extractor:%`` producers, which is the
+    # exact (and only) shape the Pruner GC emits.
+    #
+    # ADR-0008: the operator's conflict-resolution decision lives here as a
+    # ``conflict_resolution:v1:<pair_key>`` interpretation — a NON-regenerable
+    # decision-of-record, unlike the extractor views this table was built for.
+    # The ``no_delete`` trigger's ``NOT LIKE 'extractor:%'`` guard now PHYSICALLY
+    # protects it: a stray DELETE of a ``conflict_resolution:v1:`` row aborts,
+    # and no code path UPDATEs interpretations at all. The Fable adversarial
+    # review flagged that this decision-of-record was un-triggered while framed
+    # as a "regenerable I3 view"; the triggers below close that gap. Existing
+    # fleet vaults gain the triggers idempotently on next open
+    # (CREATE TRIGGER IF NOT EXISTS).
     """
     CREATE TABLE IF NOT EXISTS interpretations (
         id              TEXT PRIMARY KEY,
@@ -77,6 +100,26 @@ SCHEMA_DDL: tuple[str, ...] = (
     ) STRICT
     """,
     "CREATE INDEX IF NOT EXISTS interpretations_event_idx ON interpretations(event_id)",
+    # ── interpretations append-only enforcement (I2), one scoped exception ──
+    # No UPDATE is ever legitimate (write_interpretation is insert-only).
+    """
+    CREATE TRIGGER IF NOT EXISTS interpretations_no_update
+    BEFORE UPDATE ON interpretations
+    BEGIN
+        SELECT RAISE(ABORT, 'interpretations is append-only (I2)');
+    END
+    """,
+    # DELETE is allowed ONLY for the Pruner's extractor stale-failed GC
+    # (produced_by LIKE 'extractor:%'); everything else — including the
+    # ADR-0008 conflict_resolution:v1: decision-of-record — is blocked.
+    """
+    CREATE TRIGGER IF NOT EXISTS interpretations_no_delete
+    BEFORE DELETE ON interpretations
+    WHEN OLD.produced_by NOT LIKE 'extractor:%'
+    BEGIN
+        SELECT RAISE(ABORT, 'interpretations is append-only (I2); only the extractor failure-GC may delete');
+    END
+    """,
     # ── OAuth state (Phase 1) — pluggable identity + JWT issuance ──────────
     # These tables are MUTABLE (codes are short-lived, tokens get revoked).
     # The events-table append-only triggers do NOT apply here. They live in
@@ -501,7 +544,7 @@ SCHEMA_DDL: tuple[str, ...] = (
         detected_by   TEXT NOT NULL,
         detected_at   TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'proposed'
-                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied', 'expired')),
         decided_at    TEXT,
         decided_by    TEXT
     ) STRICT
@@ -1015,6 +1058,56 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS proposed_ontology_revisions_status_idx "
     "ON proposed_ontology_revisions(status, detected_at DESC)",
+    # ── proposed_conflict_resolutions: the operator conflict queue (ADR-0008) ─
+    # MUTABLE derived state, not substrate — the conflict_resolver enqueues one
+    # row per unresolved conflict pair, a decision flips its status, the pruner
+    # ages out DECIDED rows past retention (open rows are never touched). Same
+    # framing as proposed_corrections / proposed_ontology_revisions above and
+    # export_jobs below: no append-only triggers on purpose (deciding mutates
+    # ``status``), so it is deliberately NON-substrate (I2 protects the user's
+    # MEMORY — events, interpretations, invalidations — not a regenerable
+    # suggestion queue; see ADR-0005's memory-vs-telemetry line). The APPLIED
+    # resolution is the append-only part: an invalidation event + a
+    # conflict_resolution interpretation + an observe event (I2/I7), each of
+    # which rides the export. This queue is REGENERABLE from the unresolved
+    # conflict_flag rows, so it is EXCLUDED from the export (export_route.py).
+    #
+    # The subject of a conflict is an event PAIR, not an entity — that is why
+    # this is its OWN queue and not a proposed_corrections row (which requires an
+    # entity_id FK). ``pair_key`` is the deterministic ``min:max`` of the two
+    # content hashes so the same unordered pair maps to one key; the partial
+    # unique index on OPEN rows is the anti-re-nag guard. ``newer_hash`` records
+    # which side is chronologically newer, so a directional decision maps onto
+    # the frozen verdict enum without widening it (ADR-0008 / I1).
+    """
+    CREATE TABLE IF NOT EXISTS proposed_conflict_resolutions (
+        id            TEXT PRIMARY KEY,
+        pair_key      TEXT NOT NULL,
+        event_a_id    TEXT NOT NULL,
+        event_a_hash  TEXT NOT NULL,
+        event_b_id    TEXT NOT NULL,
+        event_b_hash  TEXT NOT NULL,
+        newer_hash    TEXT NOT NULL,
+        flag_verdict  TEXT NOT NULL,
+        reason        TEXT NOT NULL,
+        confidence    REAL NOT NULL,
+        detected_by   TEXT NOT NULL,
+        detected_at   TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'applied', 'rejected')),
+        resolution    TEXT
+                      CHECK (resolution IS NULL OR resolution IN
+                          ('superseded_older', 'superseded_newer', 'no_conflict')),
+        decided_at    TEXT,
+        decided_by    TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX IF NOT EXISTS proposed_conflict_resolutions_status_idx "
+    "ON proposed_conflict_resolutions(status, detected_at DESC)",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS proposed_conflict_resolutions_open_unique
+    ON proposed_conflict_resolutions(pair_key) WHERE status = 'proposed'
+    """,
     # ── worker_watermarks: cold-path re-scan cursors (P2a, added 2026-07) ────
     # MUTABLE derived state, not substrate (Invariant I2 exception, same
     # framing as proposed_corrections above and export_jobs below). A cold-path
@@ -1162,7 +1255,7 @@ _PROPOSED_CORRECTIONS_REBUILD_DDL = """
         detected_by   TEXT NOT NULL,
         detected_at   TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'proposed'
-                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied')),
+                      CHECK (status IN ('proposed', 'confirmed', 'rejected', 'applied', 'expired')),
         decided_at    TEXT,
         decided_by    TEXT
     ) STRICT
@@ -1241,6 +1334,45 @@ def migrate_proposed_corrections_open_unique(conn: Any) -> bool:
             "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
         )
         return False
+    with conn:
+        conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
+        conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)
+        conn.execute("INSERT INTO proposed_corrections SELECT * FROM proposed_corrections_old")
+        conn.execute("DROP TABLE proposed_corrections_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS proposed_corrections_status_idx "
+            "ON proposed_corrections(status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proposed_corrections_open_unique "
+            "ON proposed_corrections(kind, entity_id) WHERE status = 'proposed'"
+        )
+    return True
+
+
+def migrate_proposed_corrections_status_check(conn: Any) -> bool:
+    """Widen the ``proposed_corrections.status`` CHECK to admit ``expired``
+    (Fix 2 — the pending edge_review TTL).
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table's constraint,
+    so a vault created before this change keeps the frozen
+    ``CHECK (status IN ('proposed','confirmed','rejected','applied'))`` and would
+    REJECT the ``expired`` status the pending-TTL sweep sets. Same non-substrate
+    reasoning + guarded transactional rebuild as
+    :func:`migrate_proposed_corrections_kind_check`: the applied corrections live
+    elsewhere, this queue is regenerable derived state (no I2 triggers).
+
+    Idempotent: guarded on the stored DDL not yet mentioning ``expired``. A fresh
+    vault whose table already carries the widened CHECK is never rebuilt. Runs
+    AFTER the kind + open-unique migrations, so the table it rebuilds already has
+    the widened ``kind`` CHECK and the partial index. Returns True on rebuild."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proposed_corrections'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return False
+    if "'expired'" in row["sql"]:
+        return False  # already widened (fresh vault or prior migration)
     with conn:
         conn.execute("ALTER TABLE proposed_corrections RENAME TO proposed_corrections_old")
         conn.execute(_PROPOSED_CORRECTIONS_REBUILD_DDL)

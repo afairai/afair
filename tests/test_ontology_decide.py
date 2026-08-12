@@ -590,6 +590,10 @@ def test_recall_decide_applies_ontology_proposal_and_reports(ctx: object) -> Non
 
 
 def test_session_start_surfaces_ontology_proposals(db: sqlite3.Connection) -> None:
+    """An ontology proposal rides the structured pending_corrections payload. A
+    SINGLE fresh high-value item is below the Fix 3 nudge threshold, so the decide
+    sentence is suppressed (the item still surfaces; the AI raises it only if it
+    fits)."""
     from afair.mcp.resources import build_session_start_payload
 
     _proposal(
@@ -603,5 +607,25 @@ def test_session_start_surfaces_ontology_proposals(db: sqlite3.Connection) -> No
     assert len(ont) == 1
     assert ont[0]["id"].startswith(ONTOLOGY_PROPOSAL_ID_PREFIX)
     assert "product" in ont[0]["prompt"]
-    assert "ontology_" in payload["instructions"]
-    assert "revert" in payload["instructions"]
+    # A single item is below the nudge threshold → suppressed framing, no decide-ask.
+    assert "afair.recall(decide=" not in payload["instructions"]
+    assert "only if it fits" in payload["instructions"]
+
+
+def test_session_start_ontology_nudge_fires_past_threshold(db: sqlite3.Connection) -> None:
+    """Three fresh high-value ontology proposals cross the Fix 3 growth threshold,
+    so the decide-nudge sentence fires and names the entity-graph corrections."""
+    from afair.mcp.resources import build_session_start_payload
+
+    for from_slug in ("product", "person", "concept"):
+        _proposal(
+            db,
+            action="merge",
+            subject_slug=from_slug,
+            detail={"from_slug": from_slug, "to_slug": "project"},
+        )
+    payload = build_session_start_payload(db)
+    ont = [p for p in payload["pending_corrections"] if p["kind"] == "ontology_merge"]
+    assert len(ont) == 3
+    assert "afair.recall(decide=" in payload["instructions"]
+    assert "ontology revisions" in payload["instructions"]

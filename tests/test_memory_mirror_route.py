@@ -127,3 +127,84 @@ def test_route_exposes_stale_source_without_hiding_history(vault_dir: Path) -> N
     assert any(
         source["content_hash"] == source_hash and not source["current"] for source in sources
     )
+
+
+def test_key_point_suppression_annotates_served_point(vault_dir: Path) -> None:
+    """A suppressed key point is served WITH a marker (ADR-0004 caveat), not
+    dropped — projection-only, the synthesis payload is untouched (I2)."""
+    from afair.substrate.content_corrections import review_key_point
+
+    synthesis_hash, _source = _seed(vault_dir)
+    payload_before = _synthesis_payload(vault_dir, synthesis_hash)
+
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=synthesis_hash,
+            point_text="A prototype exists",
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note="Not true yet.",
+        )
+    finally:
+        conn.close()
+
+    response = TestClient(_app(vault_dir)).get(
+        "/internal/memory-mirror",
+        headers={"Authorization": "Bearer MASTER"},
+    )
+    item = response.json()["syntheses"][0]
+    points = item["key_points"]
+    assert len(points) == 1
+    assert points[0]["suppressed"] is True
+    assert points[0]["suppression"]["note"] == "Not true yet."
+    assert points[0]["point"] == "A prototype exists"  # still served
+
+    # Synthesis payload is byte-identical after annotation (projection-only, I2).
+    assert _synthesis_payload(vault_dir, synthesis_hash) == payload_before
+
+
+def test_key_point_restore_clears_the_marker(vault_dir: Path) -> None:
+    from afair.substrate.content_corrections import review_key_point
+
+    synthesis_hash, _source = _seed(vault_dir)
+    conn = open_db(vault_dir)
+    try:
+        review_key_point(
+            conn,
+            synthesis_hash=synthesis_hash,
+            point_text="A prototype exists",
+            verdict="suppress",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+        review_key_point(
+            conn,
+            synthesis_hash=synthesis_hash,
+            point_text="A prototype exists",
+            verdict="restore",
+            cluster_id="cluster:atlas",
+            note=None,
+        )
+    finally:
+        conn.close()
+
+    response = TestClient(_app(vault_dir)).get(
+        "/internal/memory-mirror",
+        headers={"Authorization": "Bearer MASTER"},
+    )
+    points = response.json()["syntheses"][0]["key_points"]
+    assert points[0]["suppressed"] is False
+    assert "suppression" not in points[0]
+
+
+def _synthesis_payload(vault_dir: Path, content_hash: str) -> str:
+    conn = open_db(vault_dir)
+    try:
+        row = conn.execute(
+            "SELECT payload FROM events WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        return str(row["payload"])
+    finally:
+        conn.close()

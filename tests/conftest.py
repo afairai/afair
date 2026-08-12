@@ -1,12 +1,19 @@
-"""Suite-wide isolation for process-global substrate state.
+"""Shared pytest fixtures: suite-wide isolation for process-global state.
 
 The production server installs one vault key for the lifetime of its process.
 Tests, however, intentionally exercise both encrypted and plaintext vaults in
 the same pytest process.  Reset the module default around every test so a test
 that builds an encrypted server cannot make unrelated later fixtures attempt a
 SQLCipher open on macOS, where the Linux-only wheel is absent.
-
 Per-test explicit keys still work unchanged between setup and teardown.
+
+The autouse ``_reset_principal_framing`` fixture keeps the module-level
+principal framing (ADR-0010) pinned to the person default between tests. The
+framing is a process-wide singleton set once at server boot; a test that
+installs an organization framing (or a ``build_server`` call with org settings)
+would otherwise leak that framing into every subsequent test in the same
+process and silently break the person-default byte-identity assumptions the rest
+of the suite (and the golden) rely on.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ import pytest
 # conftest import time. ``setdefault`` keeps an operator override working.
 os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
 
+from afair.agents.framing import reset_current
 from afair.substrate.db import set_vault_key
 
 if TYPE_CHECKING:
@@ -51,3 +59,13 @@ def _isolate_process_vault_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
         yield
     finally:
         set_vault_key(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_principal_framing() -> Iterator[None]:
+    """Reset the active principal framing to the person default around each test."""
+    reset_current()
+    try:
+        yield
+    finally:
+        reset_current()

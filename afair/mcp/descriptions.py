@@ -18,7 +18,15 @@ Three tools, three verbs, three forever signatures:
 
 from __future__ import annotations
 
-SERVER_INSTRUCTIONS = """\
+from typing import TYPE_CHECKING
+
+from ..agents.framing import current
+
+if TYPE_CHECKING:
+    from ..agents.framing import PrincipalFraming
+
+
+_SERVER_INSTRUCTIONS_PERSON = """\
 afair is the user's persistent memory layer, a chosen replacement for
 the short, vendor-locked, vanishing memory every chat tool ships with
 by default. The user installed this so their context can travel across
@@ -55,7 +63,7 @@ not change. Lean into them.
 """
 
 
-REMEMBER = """\
+_REMEMBER_PERSON = """\
 Save something to the user's persistent memory vault, afair, the
 substrate that travels across their sessions, AI tools, and years.
 Use it generously.
@@ -121,6 +129,21 @@ ARGUMENTS:
     "user" can NEVER raise the trust of a derived fact above the normal
     agent-derived level — operator-grade trust is earned only through the
     recall(decide=...) review loop. Omit if you're unsure.
+  - actor: Optional. On WHOSE BEHALF this memory is written, when a single
+    credential relays for many people (an organization's shared agent
+    writing for different members). A free-form identifier kept verbatim —
+    "slack:U0BKXTGBWLD", "alice@corp", "Alice from Sales". Omit for a
+    personal vault or when the credential already identifies the writer.
+
+  DISAMBIGUATION — three different questions, don't conflate them:
+    - client (served on recall hits): WHICH TOOL wrote this, derived
+      server-side from the credential. You never set it.
+    - actor (this argument): ON WHOSE BEHALF, when the credential is
+      shared. You set it. Advisory only; it never substitutes for client
+      and never raises trust. If absent, client is the best attribution.
+    - asserted_by: whether a HUMAN or the MODEL asserted the fact.
+  Same content written on behalf of different actors is stored as distinct
+  events (attribution is content); identical content + same actor dedupes.
 
 RETURN:
   {"ok": true, "event_id": "...", "content_hash": "sha256:...",
@@ -136,7 +159,7 @@ save signal worth keeping; don't hoard ephemera.
 """
 
 
-RECALL = """\
+_RECALL_PERSON = """\
 Read the user's memory vault, afair, the persistent substrate they
 share across every session and every AI tool. CALL THIS BEFORE you
 respond to anything where the user's history might be relevant. Always.
@@ -291,7 +314,7 @@ relevant context.
 """
 
 
-OBSERVE = """\
+_OBSERVE_PERSON = """\
 Log a structured event from your own agent activity to the user's vault.
 
 This tool is for YOU (the AI agent) to record what YOU did. Different
@@ -326,6 +349,14 @@ ARGUMENTS:
     optional keys:
       "subject": what was acted upon (filename, person, ticket, ...)
       "result":  outcome ("success", "failed: X", free text)
+      "actor":   on WHOSE BEHALF this was logged, when a shared credential
+                 relays for many people (an org agent acting for a specific
+                 member). A free-form identifier kept verbatim
+                 ("slack:U123", "alice@corp"). Distinct from the
+                 server-derived ``client`` (which tool wrote it): actor is
+                 attribution content you set, client is derived. Omit for a
+                 personal vault. Same content on behalf of different actors
+                 is stored as distinct events.
     Beyond those, ANY additional fields are preserved verbatim. Use
     whatever shape fits your agent's natural mental model. A JSON-string-
     serialized object is also accepted and parsed, and a bare string
@@ -344,3 +375,83 @@ ARGUMENTS:
 RETURN:
   {"ok": true, "event_id": "...", "content_hash": "sha256:..."}
 """
+
+
+# ── principal-framed rendering (ADR-0010) ────────────────────────────────────
+#
+# The four constants above are the person-default AI-facing prompts, verbatim.
+# For an organization principal we reframe the owner language ("the user" → the
+# organization) via a small, deterministic set of phrase substitutions applied
+# to the SAME source text — so the org variant tracks every future edit to the
+# person copy automatically and can never silently drift. The person branch
+# returns the literal unchanged, which is why the golden and the
+# ``instructions_sha256`` stay byte-identical at the default.
+
+
+def _org_reframe(text: str, framing: PrincipalFraming) -> str:
+    """Reframe person-worded owner language to the organization's.
+
+    Deterministic, longest-first phrase replacements. Applied ONLY for an
+    organization principal; a person principal never calls this. The result is
+    prose-only — no schema, no argument, no return-shape change — so the wire
+    contract (tool inputSchema/outputSchema) is identical across principals.
+    """
+    org = framing.name
+    replacements = (
+        ("the user's persistent memory layer", f"{org}'s persistent memory layer"),
+        ("the user's persistent memory vault", f"{org}'s persistent memory vault"),
+        ("the user's memory vault", f"{org}'s memory vault"),
+        ("the user's persistent memory", f"{org}'s persistent memory"),
+        ("the user's substrate", f"{org}'s substrate"),
+        ("the user's vault", f"{org}'s vault"),
+        ("the user's history", "the organization's history"),
+        ("the user's current", "the organization's current"),
+        ("the user's", "the organization's"),
+        # Sentence-initial capitalized variant ("The user's salience worker and
+        # mode-switcher ..."): str.replace is case-sensitive, so the lowercase
+        # catch-all above misses it. The org-render guard in test_framing.py
+        # fails if any cased variant ever slips through again.
+        ("The user's", "The organization's"),
+        ("The user installed afair", f"{org} installed afair"),
+        ("The user explicitly installed afair", f"{org} explicitly installed afair"),
+        ("the user re-explaining themselves", "a member re-explaining themselves"),
+        ("the memory they chose to maintain", "the memory the organization chose to maintain"),
+        ("the memory the user paid for", "the memory the organization paid for"),
+        ("The user wants visibility", "The organization wants visibility"),
+        ("the user might want to recall", "a member might want to recall"),
+        ("the user has not asked", "the operator has not asked"),
+        ("the user is actively dictating", "the writer is actively dictating"),
+        ("the user genuinely has no", "the organization genuinely has no"),
+        ("the user chose to save", "the organization chose to save"),
+        ("content the user chose to save", "content the organization chose to save"),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text
+
+
+def _render(person_text: str, framing: PrincipalFraming | None) -> str:
+    f = framing or current()
+    if f.kind == "person":
+        return person_text
+    return _org_reframe(person_text, f)
+
+
+def server_instructions(framing: PrincipalFraming | None = None) -> str:
+    """The MCP ``instructions`` string, principal-framed (person byte-identical)."""
+    return _render(_SERVER_INSTRUCTIONS_PERSON, framing)
+
+
+def remember_description(framing: PrincipalFraming | None = None) -> str:
+    """The ``remember`` tool description, principal-framed (person byte-identical)."""
+    return _render(_REMEMBER_PERSON, framing)
+
+
+def recall_description(framing: PrincipalFraming | None = None) -> str:
+    """The ``recall`` tool description, principal-framed (person byte-identical)."""
+    return _render(_RECALL_PERSON, framing)
+
+
+def observe_description(framing: PrincipalFraming | None = None) -> str:
+    """The ``observe`` tool description, principal-framed (person byte-identical)."""
+    return _render(_OBSERVE_PERSON, framing)

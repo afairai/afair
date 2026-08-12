@@ -39,6 +39,11 @@ Default to more, not less. Forgetting costs me time; an extra remember
 costs nothing. Optionally pass `asserted_by: "user"` when I stated the
 fact directly, or `"model"` when you inferred it. Self-reported and
 advisory: it records provenance, never raises trust. Omit if unsure.
+*(Organization vaults only; ignore for a personal vault: if one shared
+credential relays for several people, pass `actor` with the person on
+whose behalf you're writing, e.g. `actor: "slack:U0BKXTGBWLD"`. It is
+attribution content, distinct from the tool-derived `client`, and never
+raises trust.)*
 
 **Whenever you take an action:**
 Edit a file, run a query, call a tool, fetch a URL: call
@@ -60,11 +65,13 @@ correction without asking me first.
 
 - Don't ask "should I remember this?" Just remember.
 - Don't ask "should I check?" Just recall.
-- Every `recall` result carries `pending_corrections_count`. When it's
-  above zero and you haven't mentioned it this session (or the number
-  changed), tell me once: "you have N memories to review" and offer to
-  walk them with `recall(stats=True)` then `recall(decide=...)`. Don't
-  repeat the nudge on every recall, and never decide without asking me.
+- Every `recall` result carries `pending_counts` (conflicts, entity,
+  ontology, edge_reviews). Mention pending items at most once per
+  session, and only when `pending_counts.conflicts > 0` ("a memory
+  conflict needs your call") or I ask what's pending. Never quote the
+  raw total as a to-do list. Low-confidence relation reviews
+  (`edge_reviews`) expire on their own and are not worth my time unless
+  I ask. Never decide without asking me.
 - Long text (docs, transcripts, code): pass directly through
   `remember(content=...)`, no truncation.
 - Files (PDFs, images, audio) over a few MB: upload via the MCP blob
@@ -136,3 +143,17 @@ Refinements here are append-only: note the date, what was added, why.
   field (v0.1.17, ADR-0006). Self-reported, advisory provenance only: it is
   stored and served but can never raise the trust of a derived fact;
   operator-grade trust still comes only from `recall(decide=...)`.
+- 2026-07-21: value-ranked and rate-limited the pending nudge. Replaced the
+  `pending_corrections_count` bullet (which re-fired whenever the number
+  changed) with `pending_counts`: conflicts are worth surfacing on sight,
+  entity and ontology corrections when they accumulate, and `edge_reviews`
+  are never worth a nudge because they now expire on their own. The
+  `session-start` resource itemizes conflicts first and self-quiets the
+  nudge (a conflict always shows; otherwise the high-value queue must grow
+  by at least three since the last nudge and a week must have passed).
+- 2026-07-28: added the optional `actor` remember/observe field (ADR-0010).
+  Deliberately gated as organization-only conditional guidance so a personal
+  vault gets no extra noise: the parenthetical tells an org's shared-agent to
+  pass the on-whose-behalf identifier, while a solo user reads past it. actor
+  is attribution content (in-hash, distinct from the server-derived `client`)
+  and never raises trust.

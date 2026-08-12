@@ -372,9 +372,7 @@ def test_cooldown_skips_cycle_without_burning_attempts(
     event = _write_text_event(ctx, "cooldown-guarded event")
     _seed_failure(ctx, event, "llm_rate_limit")
 
-    monkeypatch.setattr(
-        "afair.agents.extraction_retry.provider_in_cooldown", lambda: True
-    )
+    monkeypatch.setattr("afair.agents.extraction_retry.provider_in_cooldown", lambda: True)
     stats = ExtractionRetryWorker().run(ctx.db, settings_local)
     assert stats.get("skipped_provider_cooldown") is True
     assert stats["candidates"] == 0
@@ -394,8 +392,10 @@ def test_orphan_reaper_selects_started_without_terminal(ctx: ServerContext) -> N
     old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
     # substrate.write_event records no pipeline rows (the MCP handler does);
     # seed written+started by hand, backdated past the grace window.
-    for rid, stage in (("t-orph-0", pe.STAGE_EVENT_WRITTEN),
-                       ("t-orph-1", pe.STAGE_EXTRACTION_STARTED)):
+    for rid, stage in (
+        ("t-orph-0", pe.STAGE_EVENT_WRITTEN),
+        ("t-orph-1", pe.STAGE_EXTRACTION_STARTED),
+    ):
         ctx.db.execute(
             """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
                producer, recorded_at) VALUES (?, ?, ?, ?, 'ok', 'test', ?)""",
@@ -414,8 +414,10 @@ def test_orphan_reaper_ignores_completed_and_fresh(ctx: ServerContext) -> None:
 
     done = _write_text_event(ctx, "completed event")
     old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
-    for rid, stage in (("t-done-0", pe.STAGE_EVENT_WRITTEN),
-                       ("t-done-1", pe.STAGE_EXTRACTION_COMPLETED)):
+    for rid, stage in (
+        ("t-done-0", pe.STAGE_EVENT_WRITTEN),
+        ("t-done-1", pe.STAGE_EXTRACTION_COMPLETED),
+    ):
         ctx.db.execute(
             """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
                producer, recorded_at) VALUES (?, ?, ?, ?, 'ok', 'test', ?)""",
@@ -428,8 +430,7 @@ def test_orphan_reaper_ignores_completed_and_fresh(ctx: ServerContext) -> None:
     ctx.db.execute(
         """INSERT INTO pipeline_events (id, event_id, event_hash, stage, status,
            producer, recorded_at) VALUES ('t-fresh-0', ?, ?, ?, 'ok', 'test', ?)""",
-        (fresh.id, fresh.content_hash, pe.STAGE_EVENT_WRITTEN,
-         datetime.now(UTC).isoformat()),
+        (fresh.id, fresh.content_hash, pe.STAGE_EVENT_WRITTEN, datetime.now(UTC).isoformat()),
     )
     ctx.db.commit()
     orphans = select_orphaned_extractions(ctx.db)

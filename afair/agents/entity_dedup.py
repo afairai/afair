@@ -45,6 +45,7 @@ from ..substrate.entities import (
 )
 from ..substrate.events import read_event_by_hash
 from .cold_path import ColdPathWorker
+from .framing import PrincipalFraming, current
 from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
@@ -156,8 +157,17 @@ _TOOL_SCHEMA: dict[str, Any] = {
     "required": ["same_entity", "confidence"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You deduplicate a personal vault's entity graph. You are shown several
+
+def system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The entity-dedup system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    An ACTIVE scheduled worker (ENTITY_DEDUP_MODEL) — parametrized so an org
+    vault reframes its dedup cognition too (plan-review amendment 1).
+    """
+    f = framing or current()
+    return f"""\
+You deduplicate a {f.vault_possessive} entity graph. You are shown several
 records that share a name but were stored as separate entities (usually
 because each event labeled the thing with a different 'kind'). Decide
 whether they are the SAME real-world entity.
@@ -564,7 +574,7 @@ def _judge(*, members: list[_Member], model: str, api_key: str | None) -> _Verdi
     )
     result = call_tool(
         model=model,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt(),
         user=user_msg,
         tool_name=_TOOL_NAME,
         tool_description=_TOOL_DESCRIPTION,

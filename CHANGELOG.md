@@ -10,6 +10,105 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.27](https://github.com/afairai/afair/compare/v0.1.26...v0.1.27) (2026-07-28)
+
+
+### Features
+
+* **mcp:** actor attribution on remember and observe (ADR-0010) ([2e7ddae](https://github.com/afairai/afair/commit/2e7ddaecaec930e1b77e155dbf8b6506d4b7a19a))
+* **principal:** settings + prompt framing for person or organization vaults ([fc049e7](https://github.com/afairai/afair/commit/fc049e7aee597bb38844eca89f8a0a680f19591f))
+
+
+### Bug Fixes
+
+* **principal:** org wire-contract tripwire + review nits ([ae93d61](https://github.com/afairai/afair/commit/ae93d6143b9ad46a75ef6fb517d67ccc7322145a))
+* **settings:** bind AFAIR_PRINCIPAL_KIND/NAME env vars via AliasChoices ([af745bd](https://github.com/afairai/afair/commit/af745bdcbc1cc402a0cc2855bcdb3168f66b394c))
+
+
+### Documentation
+
+* **adr:** ADR-0010 principal generalization + I8 constitutional amendment ([c01434a](https://github.com/afairai/afair/commit/c01434a744de6cfb73507bb7d5775c751cd731f8))
+* principal env vars + shared-agent client note ([88db244](https://github.com/afairai/afair/commit/88db2447133ce49074d4bff1e5d9bc528632caf6))
+
+## [0.1.26](https://github.com/afairai/afair/compare/v0.1.25...v0.1.26) (2026-07-22)
+
+
+### Features
+
+* **syntheses:** steer re-synthesis away from operator-marked-wrong claims (ADR-0009 b3) ([eef0f3b](https://github.com/afairai/afair/commit/eef0f3b5e35e5a4aa066541cec428dc741d0f06b))
+
+
+### Bug Fixes
+
+* **audit:** resolve merged-away into-target through the full merge chain ([da9b019](https://github.com/afairai/afair/commit/da9b019af06b86a9d24b4cb074940563874ad19b))
+* **recall:** exclude conflicts from the nudge growth baseline ([0f5158e](https://github.com/afairai/afair/commit/0f5158e856237a993cbccb542e1cc810f1337667))
+
+
+### Documentation
+
+* **adr:** record ADR-0009 b3 shipped (steered re-synthesis) ([e437153](https://github.com/afairai/afair/commit/e43715320c70175a08cbad6ba6f6f689843b85e2))
+
+## [0.1.25](https://github.com/afairai/afair/compare/v0.1.24...v0.1.25) (2026-07-21)
+
+
+### Features
+
+* **recall:** value-rank and rate-limit the pending-review nudge ([b1ac59b](https://github.com/afairai/afair/commit/b1ac59b6536364c4c8ed9e4904141fa5f03c411b))
+
+
+### Bug Fixes
+
+* **audit:** suppress duplicate merge_reviews by semantic key, not entity instance ([16e20a4](https://github.com/afairai/afair/commit/16e20a4b543f1961a51a2dd471ba0c94d3db454f))
+* **edges:** expire unattended low-confidence edge_reviews from the queue, keep the edge served ([1302152](https://github.com/afairai/afair/commit/130215215ccc2d998ef7ce6ce90a7793bf62c05c))
+
+## [0.1.24](https://github.com/afairai/afair/compare/v0.1.23...v0.1.24) (2026-07-17)
+
+
+### Features
+
+* **correct:** operator-initiated content correction backend (ADR-0009) ([b94646f](https://github.com/afairai/afair/commit/b94646f023bd65b38ecdc39aee895d802208f0e2))
+* **mirror:** annotate suppressed key points in the Memory Mirror (ADR-0009) ([bbb2a52](https://github.com/afairai/afair/commit/bbb2a5287497f5ba372ed1d7c1d38f7f3d6b8111))
+
+
+### Bug Fixes
+
+* **correct:** carry key-point suppressions across re-synthesis + serialize the decide ([94221b2](https://github.com/afairai/afair/commit/94221b23aaa70c759cb095fce810658c672942b0))
+
+
+### Documentation
+
+* **adr:** ADR-0009 operator content correction ([597ae22](https://github.com/afairai/afair/commit/597ae22e06deb80077edbbfcb94b18ebc02a50a0))
+
+## [0.1.23](https://github.com/afairai/afair/compare/v0.1.22...v0.1.23) (2026-07-16)
+
+
+### Bug Fixes
+
+* **conflicts:** protect the resolution record + self-heal orphaned proposals ([95942a2](https://github.com/afairai/afair/commit/95942a2d37af4a69d9f30a20a3b22142ac942fdc))
+
+
+### Documentation
+
+* reconcile I2 wording with the interpretations append-only triggers ([384de23](https://github.com/afairai/afair/commit/384de23e0269b9f6a23cea4f58fcd9a9c8448a20))
+
+## [0.1.22](https://github.com/afairai/afair/compare/v0.1.21...v0.1.22) (2026-07-16)
+
+
+### Features
+
+* **conflicts:** operator-resolvable synthesis conflicts (Phase 2, ADR-0008) ([4743c36](https://github.com/afairai/afair/commit/4743c36d59e18c84a773b049ff64f58ce53f226e))
+* **mcp:** operator decide surface over the correction queue (Phase 1) ([de61b1c](https://github.com/afairai/afair/commit/de61b1c854b04f80024330349328e01d3b5d94cc))
+
+
+### Bug Fixes
+
+* **conflicts:** pair-scoped resolution identity + claim-first decide race ([72f2ca8](https://github.com/afairai/afair/commit/72f2ca87ed3bbed645c202687967bca13dac567f))
+
+
+### Documentation
+
+* **adr:** ADR-0008 operator conflict resolution ([f5c44b7](https://github.com/afairai/afair/commit/f5c44b7d64c46e7ba829e5eb384f3582d5d33df1))
+
 ## [0.1.21](https://github.com/afairai/afair/compare/v0.1.20...v0.1.21) (2026-07-14)
 
 

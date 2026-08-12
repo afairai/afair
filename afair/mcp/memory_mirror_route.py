@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse
 
-from ..agents.conflict_resolver import read_conflicts_batch
+from ..agents.conflict_resolver import flag_is_unresolved, read_conflicts_batch
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.invalidation import INVALIDATE_KIND, read_invalidations_batch
 from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
-from ..agents.verdicts import is_unresolved_conflict
 from ..substrate import open_db, read_event_by_hash
+from ..substrate.content_corrections import point_digest, read_key_point_reviews
 from .cors import cors_headers
 from .internal_auth import authorize_internal
 
@@ -106,6 +106,25 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         ),
     ).fetchall()
 
+    # Batch-read the effective key-point suppression verdict per served
+    # synthesis (Flavor B-b2), resolved across both the exact-hash lane and the
+    # cluster-fallback lane so a suppression carries forward to a re-derived
+    # synthesis of the same cluster (a re-synthesis is a NEW event with a NEW
+    # content_hash). Projection-only: the synthesis payload is NEVER rewritten
+    # (I2); we annotate served key points with suppressed:true + a caveat so a
+    # marked-wrong point is served WITH a marker, not dropped (ADR-0004).
+    synthesis_clusters: dict[str, str | None] = {}
+    for row in rows:
+        if row["kind"] != LIVING_SYNTHESIS_KIND:
+            continue
+        try:
+            row_payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            row_payload = {}
+        cluster = row_payload.get("cluster_id")
+        synthesis_clusters[row["content_hash"]] = cluster if isinstance(cluster, str) else None
+    reviews_by_synthesis = read_key_point_reviews(conn, synthesis_clusters)
+
     out: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -128,12 +147,12 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
                     }
                 )
                 continue
-            source_conflicts = [
-                flag
-                for flag in conflicts.get(source_hash, [])
-                if is_unresolved_conflict(str(flag.get("verdict", "")))
-            ]
-            unresolved_count += len(source_conflicts)
+            # Serve ALL conflict flags (resolved ones carry their resolution, so
+            # the dashboard can show a "resolved by you" badge — ADR-0004
+            # caveat-not-suppress), but only count the still-unresolved ones
+            # toward the tension total (ADR-0008).
+            all_conflicts = conflicts.get(source_hash, [])
+            unresolved_count += sum(1 for flag in all_conflicts if flag_is_unresolved(flag))
             sources.append(
                 {
                     "event_id": source.id,
@@ -143,7 +162,7 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
                     "preview": _source_preview(source.payload),
                     "current": source_hash not in source_invalidations,
                     "missing": False,
-                    "conflicts": source_conflicts,
+                    "conflicts": all_conflicts,
                 }
             )
 
@@ -152,6 +171,10 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         key_points = payload.get("key_points", [])
         if not isinstance(key_points, list):
             key_points = []
+        if living:
+            key_points = _annotate_key_points(
+                key_points, reviews_by_synthesis.get(row["content_hash"], {})
+            )
         out.append(
             {
                 "event_id": row["id"],
@@ -178,6 +201,41 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _annotate_key_points(
+    key_points: list[Any], reviews: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Annotate served key points with the operator's suppression verdict.
+
+    Projection-only (I2): the synthesis payload is untouched; each served point
+    gains ``suppressed`` + (when suppressed) a ``suppression`` block. ``reviews``
+    is the already-resolved ``{point_digest: {verdict, note, decided_at, ...}}``
+    for THIS synthesis from :func:`read_key_point_reviews`, which has already
+    applied the exact-over-cluster precedence and the cluster-fallback carry
+    across re-synthesis. Matched by ``point_digest`` of the served text, so a
+    verbatim key point that re-forms on a re-synthesis of the same cluster
+    carries the verdict forward (a reworded point produces a different digest and
+    misses — documented b3 limitation). A ``restore`` verdict is served as
+    ``suppressed: false`` (the latest-wins row already reflects it).
+    """
+    annotated: list[dict[str, Any]] = []
+    for item in key_points:
+        if not isinstance(item, dict):
+            annotated.append(item)
+            continue
+        point = item.get("point")
+        enriched = dict(item)
+        review = reviews.get(point_digest(point)) if isinstance(point, str) else None
+        suppressed = review is not None and review.get("verdict") == "suppress"
+        enriched["suppressed"] = suppressed
+        if suppressed and review is not None:
+            enriched["suppression"] = {
+                "note": review.get("note"),
+                "decided_at": review.get("decided_at"),
+            }
+        annotated.append(enriched)
+    return annotated
 
 
 def _source_preview(payload: dict[str, Any]) -> str:

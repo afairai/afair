@@ -74,12 +74,7 @@ completes in two cycles; steady-state re-scoring is far smaller."""
 
 EDGE_REVIEW_PROPOSAL_THRESHOLD = 0.6
 """Served confidence below which a live, unreviewed, `proposed` edge becomes a
-candidate for the operator's review queue (ADR-0004 C4). The queue draws ONLY
-from the band ``[EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_
-THRESHOLD)``: an edge below the expiry floor is noise, not a question — it
-either auto-expires (never served) or lives on with its low-confidence caveat
-(served), but it never costs the operator a review (2026-08-10 operator
-decision after sub-0.5 vague edges kept surfacing as questions)."""
+candidate for the operator's review queue (ADR-0004 C4)."""
 
 MAX_EDGE_REVIEW_PROPOSALS_PER_CYCLE = 3
 """Only the K lowest-confidence uncertain edges are queued per cycle —
@@ -113,10 +108,7 @@ with ``LOW_CONFIDENCE_EDGE_CAVEAT_THRESHOLD`` (handlers.py) — an edge recall
 would only ever surface WITH a low-confidence caveat, and that never actually
 got served, is noise worth retiring. Strictly below the 0.6 review threshold:
 a served edge in [0.5, 0.6) is worth a human glance (queued), while an edge
-under 0.5 is not — never served it auto-expires here; served it lives on with
-its caveat but is excluded from the review queue (the ``>=`` floor in
-``_fetch_review_candidate_page``), so a sub-0.5 derivation never becomes an
-operator question either way."""
+under 0.5 that recall never even surfaced is not."""
 
 EDGE_EXPIRY_MIN_AGE_DAYS = 14
 """Grace period before a never-served low-confidence edge can be auto-expired.
@@ -148,6 +140,31 @@ watermarks)."""
 MAX_NOISE_EXPIRIES_PER_CYCLE = 25
 """Hard cap on retro-sweep (B4) noise expiries per cycle — same blast-radius
 discipline as the never-served sweep."""
+
+EDGE_REVIEW_PENDING_TTL_DAYS = 30
+"""Days an OPEN (``status='proposed'``) edge_review may sit unattended before the
+pending-TTL sweep retires its queue slot. The never-served sweep only ever
+retires edges recall never surfaced; a served-then-proposed low-confidence
+edge_review that the operator simply never gets to had no way out of the queue
+(3 proposed per cycle in, 0 aged out) and accumulated forever. This TTL ages out
+the review SLOT — NOT the edge, which stays served-with-caveat — so the nudge
+count stops growing while the relation is still recalled."""
+
+MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE = 25
+"""Hard cap on pending edge_review expiries per cycle — same blast-radius
+discipline as the edge sweeps."""
+
+EDGE_REVIEW_EXPIRY_PRODUCER = "edge_scorer:review_expiry:v1"
+
+EDGE_REVIEW_EXPIRY_EPOCH_KEY = "edge_review_expiry_epoch"
+"""Marker key (in ``worker_watermarks``) recording WHEN pending-review-expiry
+tracking began on this vault. Rollout safety, mirroring ``EDGE_SERVES_EPOCH_KEY``:
+at deploy the operator may already hold a backlog of long-open reviews. Anchoring
+the TTL to ``detected_at`` alone would expire that whole backlog on the first
+post-deploy cycle. Anchoring instead to ``max(detected_at, epoch)`` gives every
+review — however old — a full ``EDGE_REVIEW_PENDING_TTL_DAYS`` window from the
+epoch before it can be retired, so the FIRST post-deploy cycle expires ZERO. Set
+once, on the first sweep that finds it absent; never moves."""
 
 TRANSIENT_NOISE_MIN_CONFIDENCE = 0.6
 """A source event must be classified ``transient`` with at least this confidence
@@ -219,6 +236,13 @@ class EdgeConfidenceScorer(ColdPathWorker):
         # Same append-only invalidation, no edge_reviews row.
         stats["edges_expired_noise"] = _expire_noise_edges(conn)
 
+        # Expire OPEN edge_reviews that sat unattended past the pending TTL —
+        # retire the review SLOT (nudge count drops) while the edge stays served
+        # with its caveat. NO edge_invalidations, NO edge_reviews row. Runs BEFORE
+        # proposal so a just-expired review's edge is excluded from the candidate
+        # set (anti-churn), and its epoch is set-once so the first cycle expires 0.
+        stats["edge_reviews_expired_pending"] = _expire_stale_pending_edge_reviews(conn)
+
         # Propose the lowest-confidence uncertain edges for operator review
         # (ADR-0004 C4). This gives record_edge_review its first production
         # caller and makes the calibration set grow.
@@ -242,6 +266,7 @@ class EdgeConfidenceScorer(ColdPathWorker):
                 f"skipped_unchanged={stats['edges_skipped_unchanged']} "
                 f"legacy_backfilled={stats['legacy_backfilled']} "
                 f"reviews_proposed={stats['edge_reviews_proposed']} "
+                f"reviews_expired_pending={stats['edge_reviews_expired_pending']} "
                 f"expired_unserved={stats['edges_expired_unserved']} "
                 f"expired_noise={stats['edges_expired_noise']}"
             ),
@@ -440,12 +465,9 @@ def _propose_edge_reviews(conn: sqlite3.Connection) -> int:
     Selects live (non-invalidated), unreviewed, and ACTUALLY-SERVED edges
     (``EXISTS edge_serves`` — an edge recall never surfaced is not worth the
     operator's attention; that reversal is the core of the serve-gated review
-    design) whose SERVED confidence sits in the review band
-    ``[EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_THRESHOLD)`` —
-    those resolve to `proposed` (served < threshold < the auto-confirm floor).
-    Below the band an edge is noise, not a question: it never queues, however
-    often recall served it (it keeps its low-confidence caveat instead).
-    Lowest confidence first. Each is inserted into
+    design) whose SERVED confidence is below the threshold — those resolve to
+    `proposed` (served < threshold < the auto-confirm floor). Lowest confidence
+    first. Each is inserted into
     ``proposed_corrections`` (kind ``edge_review``) with ``INSERT OR IGNORE``,
     which under the partial unique index ``proposed_corrections_open_unique``
     (one OPEN row per (kind, subject)) means a re-run never duplicates an open
@@ -510,9 +532,8 @@ def _fetch_review_candidate_page(
     cursor: tuple[float, str, str] | None,
     page_size: int,
 ) -> list[Any]:
-    """One keyset page of live, unreviewed edge candidates inside the review
-    band ``[expiry floor, review threshold)``, ordered
-    ``(served_confidence, discovered_at, id)`` ascending.
+    """One keyset page of low-confidence, live, unreviewed edge candidates,
+    ordered ``(served_confidence, discovered_at, id)`` ascending.
 
     ``cursor`` is the last row of the previous page; None for the first page.
     The keyset predicate repeats the ``COALESCE`` expression (a SELECT alias
@@ -535,10 +556,14 @@ def _fetch_review_candidate_page(
         WHERE i.id IS NULL
           AND NOT EXISTS (SELECT 1 FROM edge_reviews r WHERE r.edge_id = e.id)
           AND EXISTS (SELECT 1 FROM edge_serves sv WHERE sv.edge_id = e.id)
-          AND COALESCE(ls.confidence, e.confidence) >= ?
+          AND NOT EXISTS (
+              SELECT 1 FROM proposed_corrections pc
+              WHERE pc.kind = 'edge_review' AND pc.status = 'expired'
+                AND json_extract(pc.detail, '$.edge_id') = e.id
+          )
           AND COALESCE(ls.confidence, e.confidence) < ?
     """
-    params: list[Any] = [EDGE_EXPIRY_CONFIDENCE_THRESHOLD, EDGE_REVIEW_PROPOSAL_THRESHOLD]
+    params: list[Any] = [EDGE_REVIEW_PROPOSAL_THRESHOLD]
     if cursor is not None:
         sql += " AND (COALESCE(ls.confidence, e.confidence), e.discovered_at, e.id) > (?, ?, ?)"
         params.extend(cursor)
@@ -748,6 +773,84 @@ def _expire_noise_edges(conn: sqlite3.Connection) -> int:
         if len(page) < EDGE_REVIEW_CANDIDATE_POOL:
             break  # last page — candidates exhausted
     return expired
+
+
+def _review_expiry_epoch(conn: sqlite3.Connection) -> str:
+    """The ISO timestamp when pending-review-expiry tracking began on this vault,
+    set once and never moved. Read-or-create against ``worker_watermarks``
+    (mutable derived state — same footing as ``_serve_tracking_epoch``).
+    ``INSERT OR IGNORE`` + re-read keeps concurrent first-cycles safe."""
+    existing = watermarks.read_watermark(conn, EDGE_REVIEW_EXPIRY_EPOCH_KEY)
+    if existing is not None:
+        return existing[0]  # through_created_at carries the epoch
+    now = datetime.now(UTC).isoformat()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO worker_watermarks "
+            "(worker, through_created_at, through_id, updated_at) VALUES (?, ?, ?, ?)",
+            (EDGE_REVIEW_EXPIRY_EPOCH_KEY, now, str(ULID()), now),
+        )
+    row = watermarks.read_watermark(conn, EDGE_REVIEW_EXPIRY_EPOCH_KEY)
+    return row[0] if row is not None else now
+
+
+def _expire_stale_pending_edge_reviews(conn: sqlite3.Connection) -> int:
+    """Retire the queue SLOT of OPEN edge_reviews that sat unattended past the
+    pending TTL — WITHOUT touching the edge.
+
+    A served-then-proposed low-confidence edge_review has no other exit from the
+    queue: the never-served sweep only retires never-served EDGES, and the
+    operator may simply never get to it. So 3 proposals land per cycle and none
+    age out — the pending count grows without bound and the nudge nags forever.
+    This sweep sets such a row's status to ``expired`` (the SAME mutation class as
+    a decide: an UPDATE of the operational, non-substrate ``proposed_corrections``
+    row), which:
+
+    - does NOT touch ``entity_edges`` (I2 — the edge is never mutated or deleted);
+    - writes NO ``edge_invalidations`` row (UNLIKE the never-served sweep, which
+      retires the EDGE) — the edge stays LIVE and recall keeps serving it WITH its
+      low-confidence caveat, so this is expiry of a review SLOT, not the relation;
+    - writes NO ``edge_reviews`` row — no operator verdict was recorded, so the
+      calibration set stays a pure record of real verdicts, and the operator can
+      still decide the expired row later (corrections.py relaxes the status gate
+      for expired edge_reviews only).
+
+    ROLLOUT SAFETY — the TTL is anchored to ``max(detected_at, epoch)``, NOT to
+    ``detected_at`` alone, mirroring ``_expire_unserved_low_confidence_edges``.
+    At deploy the operator may already hold a backlog of long-open reviews;
+    anchoring to ``detected_at`` would expire the whole backlog on the first
+    cycle. Anchoring to the set-once expiry epoch gives every review a full
+    ``EDGE_REVIEW_PENDING_TTL_DAYS`` window from the epoch, so the FIRST
+    post-deploy cycle expires ZERO. Capped at
+    ``MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE`` per run, oldest first.
+
+    The expired row is the durable anti-re-propose guard (there is no
+    ``edge_reviews`` row to serve that role): ``_fetch_review_candidate_page``
+    excludes edges with an ``expired`` edge_review, and the Pruner keeps expired
+    rows. So an expired review is never re-proposed — no retire/re-propose loop."""
+    epoch = _review_expiry_epoch(conn)
+    cutoff = (datetime.now(UTC) - timedelta(days=EDGE_REVIEW_PENDING_TTL_DAYS)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT id FROM proposed_corrections
+        WHERE kind = 'edge_review' AND status = 'proposed'
+          AND max(detected_at, ?) < ?
+        ORDER BY detected_at ASC, id ASC
+        LIMIT ?
+        """,
+        (epoch, cutoff, MAX_PENDING_REVIEW_EXPIRIES_PER_CYCLE),
+    ).fetchall()
+    if not rows:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    with conn:
+        for r in rows:
+            conn.execute(
+                "UPDATE proposed_corrections "
+                "SET status = 'expired', decided_at = ?, decided_by = ? WHERE id = ?",
+                (now, EDGE_REVIEW_EXPIRY_PRODUCER, r["id"]),
+            )
+    return len(rows)
 
 
 def _insert_edge_review_proposal(

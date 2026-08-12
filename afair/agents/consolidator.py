@@ -50,6 +50,7 @@ from pydantic import BaseModel
 from ..substrate import pipeline_events as pe
 from ..substrate import write_event
 from .cold_path import ColdPathWorker
+from .framing import PrincipalFraming, current
 from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
@@ -129,15 +130,22 @@ _TOOL_SCHEMA: dict[str, Any] = {
     "required": ["narrative", "themes"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You are a personal-vault consolidator. Once per day, you summarize that
+
+def system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The consolidator system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    role = "personal-vault consolidator" if f.kind == "person" else f"consolidator for {f.name}"
+    return f"""\
+You are a {role}. Once per day, you summarize that
 day's events into a narrative + theme list + open threads. The summary
-becomes part of the user's persistent memory.
+becomes part of {f.persistent_memory_phrase}.
 
 {UNTRUSTED_CONTENT_DIRECTIVE}
 
-Write in second person ("you decided", "you and Sajinth shipped X"),
-present tense, plain language. Mention names, decisions, and any
+{f.voice_rule} Mention names, decisions, and any
 unresolved threads. Don't pad — 2-5 sentences is plenty.
 
 Use the record_daily_consolidation tool exactly once.
@@ -286,7 +294,7 @@ def _summarize_day(
     )
     result = call_tool(
         model=model,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt(),
         user=user_msg,
         tool_name=_TOOL_NAME,
         tool_description=_TOOL_DESCRIPTION,

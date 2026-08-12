@@ -17,6 +17,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from ..substrate.kinds import BOOTSTRAP_KIND_SLUGS, live_kind_slugs
+from .framing import PrincipalFraming, current
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
 if TYPE_CHECKING:
@@ -49,11 +50,19 @@ _TRUNCATION_TAIL = 4_000
 
 
 EXTRACTOR_TOOL_NAME = "record_extraction"
-EXTRACTOR_TOOL_DESCRIPTION = (
-    "Record the structured extraction for one event from the user's substrate. "
-    "Call exactly once per event. Fill every required field; use empty arrays "
-    "or null for fields without information rather than omitting them."
-)
+
+
+def extractor_tool_description(framing: PrincipalFraming | None = None) -> str:
+    """The extractor tool description, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return (
+        f"Record the structured extraction for one event from {f.substrate_phrase}. "
+        "Call exactly once per event. Fill every required field; use empty arrays "
+        "or null for fields without information rather than omitting them."
+    )
 
 
 def _entity_kind_property(slugs: tuple[str, ...] | list[str]) -> dict[str, Any]:
@@ -215,9 +224,15 @@ def extractor_tool_schema(conn: sqlite3.Connection | None = None) -> dict[str, A
     return schema
 
 
-EXTRACTOR_SYSTEM_PROMPT = f"""\
-You are an information extractor for a personal memory vault. Given one
-event from the user's substrate, call the ``record_extraction`` tool with
+def extractor_system_prompt(framing: PrincipalFraming | None = None) -> str:
+    """The extractor system prompt, principal-framed (ADR-0010).
+
+    Person default renders byte-identically to the pre-ADR-0010 constant.
+    """
+    f = framing or current()
+    return f"""\
+You are an information extractor for a {f.vault_descriptor}. Given one
+event from {f.substrate_phrase}, call the ``record_extraction`` tool with
 a structured description of its content.
 
 {UNTRUSTED_CONTENT_DIRECTIVE}
@@ -238,7 +253,7 @@ Guidance:
   for what this event IS (constitution, decision, meeting_notes, email,
   code_snippet, etc.). The system learns its own ontology over time;
   don't restrict yourself to a fixed enum.
-- ``confidence`` reflects your own self-assessment, not the user's.
+- ``confidence`` reflects your own self-assessment, not {f.owner_possessive}.
 - If the event payload was truncated (you'll see a TRUNCATED marker),
   extract from what you can see; mention truncation only if a salient
   fact obviously lies in the elided portion.

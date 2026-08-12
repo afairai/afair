@@ -282,8 +282,13 @@ class ExtractionRetryWorker(ColdPathWorker):
         # the watermark stays put, candidates stay candidates.
         if provider_in_cooldown():
             log.info("extraction_retry.provider_cooldown_skip")
-            return {"candidates": 0, "succeeded": 0, "still_failing": 0,
-                    "reaped": 0, "skipped_provider_cooldown": True}
+            return {
+                "candidates": 0,
+                "succeeded": 0,
+                "still_failing": 0,
+                "reaped": 0,
+                "skipped_provider_cooldown": True,
+            }
 
         candidates = select_retry_candidates(conn, wm_id=wm_id)
         stats: dict[str, Any] = {

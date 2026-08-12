@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..agents import read_latest_interpretation, schedule_extraction
 from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
-from ..agents.conflict_resolver import read_conflicts_batch
+from ..agents.conflict_resolver import flag_is_unresolved, read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
 from ..agents.interpretation import (
@@ -65,7 +65,8 @@ from ..substrate import (
     build_compound_payload,
     build_text_payload,
     count_events_by_client,
-    count_pending_corrections,
+    count_pending_conflict_proposals,
+    count_pending_corrections_by_kind,
     count_pending_ontology_proposals,
     iter_events,
     latest_edge_confidence_batch,
@@ -79,6 +80,7 @@ from ..substrate import (
     read_event_provenance_batch,
     read_mentions_batch,
     read_object,
+    read_pending_conflict_proposals,
     read_pending_corrections,
     read_pending_ontology_proposals,
     record_edge_serves,
@@ -128,6 +130,7 @@ from .schemas import (
     InvalidationSummary,
     ObserveEvent,
     ObserveResult,
+    PendingCounts,
     ProposedCorrectionView,
     RecallCoverage,
     RecallFeedback,
@@ -315,10 +318,14 @@ def _payload_summary(
             parts_summary.append(part_view)
         summary["parts"] = parts_summary
 
-    # Common metadata across content types. ``asserted_by`` (W3) rides here so
-    # the caller-supplied assertion label survives the truncated summary view,
-    # not just full_payload/by_id — same passthrough treatment as type_hint.
-    for k in ("context", "type_hint", "asserted_by", "language", "target_hash", "reason"):
+    # Common metadata across content types. ``asserted_by`` (W3) and ``actor``
+    # (ADR-0010) ride here so the caller-supplied assertion label and the
+    # on-whose-behalf attribution survive the truncated summary view, not just
+    # full_payload/by_id — same passthrough treatment as type_hint. actor is
+    # served at EVERY verbosity (it's already in the payload, zero extra cost;
+    # note the asymmetry vs ``client``, which is dropped at compact because it
+    # costs a sidecar query).
+    for k in ("context", "type_hint", "asserted_by", "actor", "language", "target_hash", "reason"):
         if payload.get(k) is not None:
             value = payload[k]
             if k == "context" and context_cap is not None and isinstance(value, str):
@@ -1128,6 +1135,7 @@ def remember(
     parent_hashes: list[str] | None = None,
     invalidates: list[str] | None = None,
     asserted_by: schemas.AssertedBy | None = None,
+    actor: str | None = None,
 ) -> RememberResult:
     """Write a fact to the substrate, optionally invalidating prior facts.
 
@@ -1151,6 +1159,12 @@ def remember(
     # at the handler boundary.
     context, context_full = _truncate_preserve(context, schemas.MAX_CONTEXT_CHARS)
     type_hint, type_hint_full = _truncate_preserve(type_hint, schemas.MAX_TYPE_HINT_CHARS)
+    # actor (ADR-0010): sanitize (strip control chars, blank → absent; NOT
+    # slugged — the identifier is content), then truncate-preserve to actor_full
+    # exactly like context/type_hint. A None/blank actor leaves the payload
+    # byte-identical to a pre-actor write (the dedup / content-hash guard).
+    actor = schemas.sanitize_actor(actor)
+    actor, actor_full = _truncate_preserve(actor, schemas.MAX_ACTOR_CHARS)
     if parent_hashes is not None and len(parent_hashes) > schemas.MAX_PARENT_HASHES_PER_CALL:
         msg = (
             f"parent_hashes must be <= {schemas.MAX_PARENT_HASHES_PER_CALL} entries; "
@@ -1320,6 +1334,17 @@ def remember(
     # to a plain re-write is a new event; supersession handles the rest.
     if asserted_by is not None:
         payload["asserted_by"] = asserted_by
+    # actor (ADR-0010) is caller-supplied attribution = CONTENT, so it goes IN
+    # the payload and therefore IN the content hash (same boundary as
+    # asserted_by, and unlike the W1 server-derived ``client`` sidecar): the
+    # same sentence written on behalf of member A vs B is a DIFFERENT assertion,
+    # so dedup must keep them apart. A supplied actor rides through the extractor
+    # inside wrap_untrusted (build_user_message's extras loop), which is where
+    # its injection safety lives — see the ADR-0010 maintenance contract.
+    if actor is not None:
+        payload["actor"] = actor
+    if actor_full is not None:
+        payload["actor_full"] = actor_full
 
     # Single-pass write: ``write_event_with_status`` returns the row plus a
     # was_inserted bool, so we don't have to compute the content hash twice
@@ -1655,7 +1680,12 @@ def _compute_coverage(
         hit_has_unresolved = False
         for c in flags:
             verdict = str(c.get("verdict", ""))
-            if is_unresolved_conflict(verdict):
+            # ADR-0008: a pair the operator resolved no longer counts toward the
+            # unresolved-tension caveat (flag_is_unresolved gates on both the
+            # verdict AND a null resolution), but its verdict-level caveat
+            # template (e.g. "a newer record supersedes an older one") is still
+            # surfaced for context.
+            if flag_is_unresolved(c):
                 hit_has_unresolved = True
             cav = _verdict_meta(verdict).caveat
             if cav:
@@ -1897,7 +1927,28 @@ def recall(
     # The cheap universal nudge: the TRUE open-queue total on every recall,
     # so a client can prompt "you have N memories to review" without the
     # operator ever calling stats=True. The heavy list stays gated above.
-    pending_count = count_pending_corrections(db) + count_pending_ontology_proposals(db)
+    _by_kind = count_pending_corrections_by_kind(db)
+    _ontology_count = count_pending_ontology_proposals(db)
+    _conflict_count = count_pending_conflict_proposals(db)
+    pending_count = sum(_by_kind.values()) + _ontology_count + _conflict_count
+    # Same total, split by value class (Fix 3) so a client can value-rank the
+    # nudge instead of quoting the raw total. entity = retype/merge/merge_review
+    # (the human-judgment corrections); edge_reviews = the low-value, self-expiring
+    # relation reviews. Null when the queue is empty (nothing to nudge about).
+    pending_counts = (
+        PendingCounts(
+            conflicts=_conflict_count,
+            entity=(
+                _by_kind.get("retype", 0)
+                + _by_kind.get("merge", 0)
+                + _by_kind.get("merge_review", 0)
+            ),
+            ontology=_ontology_count,
+            edge_reviews=_by_kind.get("edge_review", 0),
+        )
+        if pending_count > 0
+        else None
+    )
 
     # ── Single-event lookup mode ───────────────────────────────────────────
     if by_id is not None or by_content_hash is not None:
@@ -1917,6 +1968,7 @@ def recall(
                 summary=summary,
                 pending_corrections=pending,
                 pending_corrections_count=pending_count,
+                pending_counts=pending_counts,
                 decisions=decisions_out,
             )
         invalidations = _attach_invalidations([target], db)
@@ -1956,6 +2008,7 @@ def recall(
             summary=summary,
             pending_corrections=pending,
             pending_corrections_count=pending_count,
+            pending_counts=pending_counts,
             decisions=decisions_out,
         )
 
@@ -2134,6 +2187,7 @@ def recall(
         coverage=_compute_coverage(events, invalidations, conflicts, overlay),
         pending_corrections=pending,
         pending_corrections_count=pending_count,
+        pending_counts=pending_counts,
         decisions=decisions_out,
         next_cursor=next_cursor,
     )
@@ -2213,7 +2267,100 @@ def _pending_correction_views(
         )
         for p in read_pending_ontology_proposals(db, limit=fetch)
     ]
+    views += [
+        ProposedCorrectionView(
+            id=p.id,
+            kind="conflict",
+            prompt=_conflict_prompt(p.reason),
+            evidence=p.reason,
+            confidence=p.confidence,
+        )
+        for p in read_pending_conflict_proposals(db, limit=fetch)
+    ]
     return views[offset : offset + limit]
+
+
+def _conflict_prompt(reason: str) -> str:
+    """A directional yes/no prompt for one unresolved conflict pair (ADR-0008),
+    safe to show the operator verbatim."""
+    base = (
+        "Two of your memories are in unresolved tension. Is the newer one "
+        "current (supersedes the older), is the newer one wrong (keep the "
+        "older), or is this not a real conflict?"
+    )
+    return f"{base} ({reason})" if reason else base
+
+
+def _pending_correction_details(db: Any, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+    """The structured ``detail`` blob per open proposal, keyed by proposal id.
+
+    Companion to :func:`_pending_correction_views` for the /internal/corrections
+    dashboard route: the wire view intentionally drops the raw ``detail`` (the
+    recall client only needs the ready-to-ask ``prompt``), but the dashboard's
+    decision controls need the underlying kind/target/action data. This mirrors
+    the exact fetch-window-slice of ``_pending_correction_views`` so a detail
+    lines up with its view by id, and it reuses the same read helpers — the
+    route never runs its own proposal SQL (ADR-0002 single-mutation-point; the
+    write path is ``decide_correction`` only, and even this read stays out of
+    the route)."""
+    fetch = offset + limit
+    ordered: list[tuple[str, dict[str, Any]]] = [
+        (p.id, {"queue": "entity_audit", "kind": p.kind, "detail": p.detail})
+        for p in read_pending_corrections(db, limit=fetch)
+    ]
+    ordered += [
+        (
+            p.id,
+            {
+                "queue": "ontology",
+                "action": p.action,
+                "subject_slug": p.subject_slug,
+                "detail": p.detail,
+            },
+        )
+        for p in read_pending_ontology_proposals(db, limit=fetch)
+    ]
+    ordered += [
+        (p.id, _conflict_detail(db, p)) for p in read_pending_conflict_proposals(db, limit=fetch)
+    ]
+    window = ordered[offset : offset + limit]
+    return dict(window)
+
+
+_CONFLICT_PREVIEW_CHARS = 320
+
+
+def _conflict_detail(db: Any, proposal: Any) -> dict[str, Any]:
+    """The structured conflict payload for the dashboard's 3-way controls: both
+    sides' hashes/ids/previews/created_ats, which side is newer, the flag verdict
+    and reason. Read-only — never mutates a source event or a conflict_flag row
+    (I2)."""
+
+    def _side(event_hash: str) -> dict[str, Any]:
+        ev = read_event_by_hash(db, event_hash)
+        if ev is None:
+            return {"content_hash": event_hash, "missing": True}
+        text = ev.payload.get("text") or ev.payload.get("context") or ev.payload.get("result") or ""
+        if not isinstance(text, str):
+            text = ""
+        preview = " ".join(text.split())[:_CONFLICT_PREVIEW_CHARS]
+        return {
+            "event_id": ev.id,
+            "content_hash": ev.content_hash,
+            "created_at": ev.created_at,
+            "preview": preview,
+            "missing": False,
+        }
+
+    return {
+        "queue": "conflict",
+        "pair_key": proposal.pair_key,
+        "newer_hash": proposal.newer_hash,
+        "flag_verdict": proposal.flag_verdict,
+        "reason": proposal.reason,
+        "event_a": _side(proposal.event_a_hash),
+        "event_b": _side(proposal.event_b_hash),
+    }
 
 
 # ── observe ─────────────────────────────────────────────────────────────────
@@ -2223,6 +2370,13 @@ def observe(event: ObserveEvent) -> ObserveResult:
     db = connect_for_thread()
 
     event_dict = event.model_dump(exclude_none=False)
+    # ADR-0010: ``actor`` is an ADDITIVE optional field. An absent actor must
+    # produce the byte-identical pre-change payload (and therefore the same
+    # content hash), so drop it when None — unlike subject/result, which were
+    # always present-as-null historically and stay that way. A supplied actor
+    # rides in the payload = in the content hash (advisory attribution content).
+    if event_dict.get("actor") is None:
+        event_dict.pop("actor", None)
     # Reserved payload keys always win over caller-supplied extras.
     # ObserveEvent allows arbitrary extras, so a caller could otherwise
     # smuggle content_type="text-large" + blob_hash=<existing hash> and

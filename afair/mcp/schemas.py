@@ -72,6 +72,38 @@ MAX_TYPE_HINT_CHARS = 200
 MAX_MIME_CHARS = 200
 MAX_FILENAME_HINT_CHARS = 500
 
+# ADR-0010 actor attribution: "on whose behalf" a SHARED credential wrote
+# (an org agent relaying many humans). Bounded but NOT slugged — fidelity
+# matters, since a real actor is an identifier like "slack:U0BKXTGBWLD"
+# whose ':' is outside any slug charset. Caller-supplied = CONTENT, so it
+# rides in the payload / content hash (exactly like asserted_by, W3).
+MAX_ACTOR_CHARS = 120
+
+
+def sanitize_actor(raw: str | None) -> str | None:
+    """Normalize a caller-supplied ``actor`` string, or None when effectively
+    absent.
+
+    Strips surrounding whitespace and drops C0/C1 control characters (they add
+    no attribution value and could disrupt the extractor's rendered view), but
+    does NOT slug or lowercase — the actor is an opaque identifier whose exact
+    form ("slack:U0BKXTGBWLD", "email@corp") is content and must survive
+    verbatim. A blank-after-strip value is treated as absent (None). Length
+    capping is applied by the caller via truncate-preserve so the full original
+    is retained under ``actor_full`` (same convention as context/type_hint).
+
+    NB: actor's injection safety comes from the extractor emitting it INSIDE
+    ``wrap_untrusted`` (prompts.build_user_message), NOT from this cap — see the
+    maintenance contract in ADR-0010.
+    """
+    if raw is None:
+        return None
+    cleaned = "".join(ch for ch in raw if ord(ch) >= 0x20 or ch in "\t").strip()
+    # Collapse any surviving internal tabs to spaces so the extractor view is
+    # clean; keep everything else verbatim (colons, dots, slashes are content).
+    cleaned = cleaned.replace("\t", " ").strip()
+    return cleaned or None
+
 
 # ── remember ────────────────────────────────────────────────────────────────
 
@@ -377,6 +409,14 @@ class ConflictFlag(BaseModel):
     reason: str = ""
     confidence: float = 0.0
 
+    resolution: str | None = None
+    """The operator's resolution of this conflict pair, when they've decided it
+    through the review queue (ADR-0008): ``superseded_older`` (the newer memory
+    is current), ``superseded_newer`` (the newer was wrong, keep the older), or
+    ``no_conflict`` (not a real clash). Null while the pair is still open. A
+    resolved flag is STILL served (ADR-0004 caveat-not-suppress) but no longer
+    counts toward the unresolved-conflict caveats. Additive per I1."""
+
 
 class InvalidationSummary(BaseModel):
     """Surfacing of a fact's bi-temporal invalidation status.
@@ -533,7 +573,9 @@ class ProposedCorrectionView(BaseModel):
     kind: str
     """'retype' | 'merge' | 'merge_review' for entity proposals;
     'ontology_add' | 'ontology_rename' | 'ontology_merge' | 'ontology_split'
-    | 'ontology_deprecate' for ontology proposals."""
+    | 'ontology_deprecate' for ontology proposals; 'conflict' for an unresolved
+    conflict pair the operator can resolve (ADR-0008) — its ``prompt`` is
+    directional and the decision routes to the conflict queue on a ``cfl_`` id."""
     entity_id: str = ""
     entity_name: str = ""
     prompt: str
@@ -570,6 +612,26 @@ class CorrectionOutcomeView(BaseModel):
     note: str
 
 
+class PendingCounts(BaseModel):
+    """Open-proposal counts split BY VALUE CLASS, so a client can value-rank what
+    it surfaces instead of quoting one undifferentiated total.
+
+    ``conflicts`` are the highest-value class (a memory conflict needs the
+    operator's call) and worth surfacing on sight. ``entity`` (retype / merge /
+    merge_review) and ``ontology`` are worth mentioning when they accumulate.
+    ``edge_reviews`` are low-value: low-confidence relation reviews that expire on
+    their own (Fix 2) and are not worth the operator's attention unless asked.
+
+    ``pending_corrections_count`` on ``RecallResult`` stays the true grand total;
+    this is the same information split for ranking. Additive per I1.
+    """
+
+    conflicts: int = 0
+    entity: int = 0
+    ontology: int = 0
+    edge_reviews: int = 0
+
+
 class RecallResult(BaseModel):
     """Result of any `recall` call.
 
@@ -599,6 +661,11 @@ class RecallResult(BaseModel):
     coverage: RecallCoverage | None = None
     pending_corrections: list[ProposedCorrectionView] = []
     pending_corrections_count: int = 0
+    pending_counts: PendingCounts | None = None
+    """The open-proposal total split by value class (conflicts / entity /
+    ontology / edge_reviews) so a client can value-rank the nudge rather than
+    quote the raw ``pending_corrections_count``. Populated on every call whenever
+    anything is pending; null when the queue is empty. Additive per I1."""
     decisions: list[CorrectionOutcomeView] = []
     """Per-decision outcomes when this call carried ``decide=`` (single or
     batch). Empty on calls that didn't decide anything. Additive per I1."""
@@ -825,6 +892,7 @@ _OBSERVE_FIELD_CAPS = {
     "action": MAX_OBSERVE_ACTION_CHARS,
     "subject": MAX_OBSERVE_SUBJECT_CHARS,
     "result": MAX_OBSERVE_RESULT_CHARS,
+    "actor": MAX_ACTOR_CHARS,
 }
 """Per-field character caps for the write-first truncation in
 ``ObserveEvent._accept_first``. Over-long values are truncated to the cap
@@ -930,6 +998,11 @@ class ObserveEvent(BaseModel):
     action: str = Field(min_length=1, max_length=MAX_OBSERVE_ACTION_CHARS)
     subject: str | None = Field(default=None, max_length=MAX_OBSERVE_SUBJECT_CHARS)
     result: str | None = Field(default=None, max_length=MAX_OBSERVE_RESULT_CHARS)
+    # ADR-0010: on whose behalf a shared credential logged this observe. Advisory
+    # attribution CONTENT (in-payload, in-hash), never a substitute for the
+    # server-derived ``client``. Bounded + control-char-stripped like the others;
+    # blank-after-sanitize serializes as absent (see ``_accept_first``).
+    actor: str | None = Field(default=None, max_length=MAX_ACTOR_CHARS)
 
     @model_validator(mode="before")
     @classmethod
@@ -966,6 +1039,16 @@ class ObserveEvent(BaseModel):
             action = coerced.get("action")
             if not isinstance(action, str) or not action.strip():
                 coerced["action"] = "observed"
+            # Sanitize ``actor`` (ADR-0010): strip control chars, blank → absent.
+            # NOT slugged — the identifier ("slack:U123") is content, kept
+            # verbatim. Length capping happens in _truncate_long_fields below.
+            if "actor" in coerced:
+                actor = coerced.get("actor")
+                cleaned = sanitize_actor(actor) if isinstance(actor, str) else None
+                if cleaned is None:
+                    coerced.pop("actor", None)
+                else:
+                    coerced["actor"] = cleaned
             return cls._truncate_long_fields(coerced)
         dump = json.dumps(data, ensure_ascii=False, default=str)
         return cls._truncate_long_fields({"action": "observed", "result": dump})

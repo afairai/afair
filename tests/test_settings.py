@@ -282,3 +282,80 @@ def test_judge_panel_entry_requires_provider_prefix(
 
     with pytest.raises(ValidationError, match="JUDGE_PANEL"):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+# ── principal (ADR-0010) ─────────────────────────────────────────────────────
+
+
+def test_principal_defaults_to_person() -> None:
+    """Default principal is a person with a blank name (byte-identity path)."""
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.principal_kind == "person"
+    assert s.principal_name == ""
+
+
+def test_person_ignores_supplied_name() -> None:
+    """A person principal drops any supplied name — v1 byte-identity: the name
+    can never reach a rendered prompt."""
+    s = Settings(_env_file=None, principal_kind="person", principal_name="Ignored Inc")  # type: ignore[call-arg]
+    assert s.principal_name == ""
+
+
+def test_organization_requires_name() -> None:
+    """An organization principal without a name fails boot loudly."""
+    with pytest.raises(ValidationError, match="PRINCIPAL_NAME"):
+        Settings(_env_file=None, principal_kind="organization")  # type: ignore[call-arg]
+
+
+def test_organization_blank_name_rejected() -> None:
+    """A whitespace/control-only org name sanitizes to blank and is rejected."""
+    with pytest.raises(ValidationError, match="PRINCIPAL_NAME"):
+        Settings(_env_file=None, principal_kind="organization", principal_name="   \n\t  ")  # type: ignore[call-arg]
+
+
+def test_organization_name_sanitized() -> None:
+    """Newlines/control chars collapse to single spaces; the name is trimmed and
+    capped so it can't reshape an interpolated system prompt."""
+    s = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        principal_kind="organization",
+        principal_name="  Acme\n\tCorp  ",
+    )
+    assert s.principal_name == "Acme Corp"
+
+
+def test_organization_name_capped() -> None:
+    """An absurdly long org name is capped (interpolated into prompts)."""
+    s = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        principal_kind="organization",
+        principal_name="A" * 500,
+    )
+    assert len(s.principal_name) == 120
+
+
+def test_invalid_principal_kind_rejected() -> None:
+    """Only 'person' | 'organization' are valid principal kinds."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, principal_kind="team")  # type: ignore[call-arg]
+
+
+def test_bare_principal_env_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bare ``PRINCIPAL_KIND`` / ``PRINCIPAL_NAME`` names bind (case-insensitive)."""
+    monkeypatch.setenv("PRINCIPAL_KIND", "organization")
+    monkeypatch.setenv("PRINCIPAL_NAME", "Globex")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.principal_kind == "organization"
+    assert s.principal_name == "Globex"
+
+
+def test_afair_prefixed_principal_env_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DOCUMENTED ``AFAIR_PRINCIPAL_KIND`` / ``AFAIR_PRINCIPAL_NAME`` env vars
+    bind via AliasChoices, exactly like AFAIR_VAULT_KEY / AFAIR_AUTH_TOKEN. Without
+    the alias only the bare name bound, so the documented var silently did nothing
+    and an org vault booted in person mode. Regression guard for that."""
+    monkeypatch.setenv("AFAIR_PRINCIPAL_KIND", "organization")
+    monkeypatch.setenv("AFAIR_PRINCIPAL_NAME", "Acme Corp")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.principal_kind == "organization"
+    assert s.principal_name == "Acme Corp"

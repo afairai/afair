@@ -510,6 +510,57 @@ def test_plain_recall_carries_count_without_list(ctx: object) -> None:
     assert result.pending_corrections == []  # list still gated behind stats/decide
 
 
+def test_recall_carries_value_split_pending_counts(ctx: object) -> None:
+    """Fix 3: pending_counts splits the true total by value class. The seed is
+    two entity-class corrections (retype + merge_review), so entity==2 and the
+    others are 0; the grand total pending_corrections_count is unchanged (I1)."""
+    from afair.mcp import handlers
+
+    result = handlers.recall(query="anything")
+    assert result.pending_corrections_count == 2  # unchanged true total
+    assert result.pending_counts is not None
+    assert result.pending_counts.entity == 2
+    assert result.pending_counts.conflicts == 0
+    assert result.pending_counts.ontology == 0
+    assert result.pending_counts.edge_reviews == 0
+    # The split sums to the grand total.
+    pc = result.pending_counts
+    assert (
+        pc.conflicts + pc.entity + pc.ontology + pc.edge_reviews == result.pending_corrections_count
+    )
+
+
+def test_recall_pending_counts_null_when_queue_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no proposals, pending_counts is null (nothing to nudge about) and the
+    count is 0."""
+    from afair.mcp import handlers
+    from afair.mcp.context import ServerContext, set_context
+
+    vault = tmp_path / "empty_vault"
+    vault.mkdir()
+    conn = open_db(vault)
+    try:
+        set_context(
+            ServerContext(
+                db=conn,
+                vault_dir=vault,
+                inline_text_max_bytes=64 * 1024,
+                embedding_dim=1024,
+                embedding_model="stub",
+                surprise_context_window=20,
+                semantic_recall_enabled=False,
+            )
+        )
+        monkeypatch.setattr(handlers, "connect_for_thread", lambda: conn)
+        result = handlers.recall(query="anything")
+        assert result.pending_corrections_count == 0
+        assert result.pending_counts is None
+    finally:
+        conn.close()
+
+
 def test_single_event_lookup_carries_count(ctx: object) -> None:
     """The count rides the single-event lookup returns too — both the hit path
     and the miss path — so a by_id recall nudges just like a query recall."""
