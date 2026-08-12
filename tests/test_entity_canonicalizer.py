@@ -69,6 +69,11 @@ def settings(tmp_path: Path) -> Settings:
         environment="local",
         vault_dir=tmp_path,
         cold_path_enabled=False,
+        # Pinned explicitly: the escalation tests need a model ``_sonnet_for``
+        # can map, and an ambient EXTRACTOR_MODEL/CANONICALIZER_MODEL in the
+        # process env would otherwise override the built-in default.
+        extractor_model="anthropic/claude-haiku-4-5",
+        canonicalizer_model="anthropic/claude-haiku-4-5",
     )
 
 
