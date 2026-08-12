@@ -306,3 +306,89 @@ def test_classify_name_marker_auth_still_works() -> None:
         pass
 
     assert isinstance(llm._classify(AuthError("nope")), llm.LLMAuthError)
+
+
+# ── tool-markup leak repair (production bug: bridge leaked tool markup) ─────
+
+
+def test_call_tool_repairs_markup_leaked_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end through call_tool: an argument value that swallowed its own
+    closing tag plus the following <parameter> fragment (the exact production
+    shape from event_temporal.closure_state) is cut clean, and the swallowed
+    sibling field is re-homed."""
+    contaminated = {
+        "temporal_class": "commitment",
+        "confidence": 0.8,
+        "closure_state": (
+            'open</closure_state>\n<parameter name="relevance_horizon">2026-07-27T08:36:25Z'
+        ),
+    }
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", lambda **_: _make_response(contaminated))
+
+    result = llm.call_tool(
+        model="anthropic/claude-haiku-4-5",
+        system="sys",
+        user="usr",
+        tool_name="do_thing",
+        tool_description="desc",
+        tool_schema=SCHEMA,
+    )
+    assert result.data["closure_state"] == "open"
+    assert result.data["relevance_horizon"] == "2026-07-27T08:36:25Z"
+    assert result.data["temporal_class"] == "commitment"
+
+
+def test_repair_recovers_multiple_swallowed_parameters() -> None:
+    data = {
+        "event_time": (
+            "2026-07-27</event_time>\n"
+            '<parameter name="relevance_horizon">2026-07-28</parameter>\n'
+            '<parameter name="closure_state">open'
+        ),
+    }
+    repaired = llm._repair_tool_markup_leak(data)
+    assert repaired["event_time"] == "2026-07-27"
+    assert repaired["relevance_horizon"] == "2026-07-28"
+    assert repaired["closure_state"] == "open"
+
+
+def test_repair_never_overwrites_a_well_formed_sibling() -> None:
+    data = {
+        "closure_state": 'open</closure_state>\n<parameter name="relevance_horizon">2099-01-01',
+        "relevance_horizon": "2026-07-27T08:36:25Z",
+    }
+    repaired = llm._repair_tool_markup_leak(data)
+    assert repaired["closure_state"] == "open"
+    # The already-present value wins over the recovered fragment.
+    assert repaired["relevance_horizon"] == "2026-07-27T08:36:25Z"
+
+
+def test_repair_yields_none_when_nothing_precedes_the_markup() -> None:
+    data = {"closure_state": '</closure_state>\n<parameter name="event_time">2026-07-27'}
+    repaired = llm._repair_tool_markup_leak(data)
+    assert repaired["closure_state"] is None
+    assert repaired["event_time"] == "2026-07-27"
+
+
+def test_repair_ignores_legitimate_markup_in_values() -> None:
+    """A value quoting user HTML/XML is NOT contamination: only the field's own
+    closing tag or tool-call frame tags trigger the repair."""
+    data = {
+        "summary": "the doc says <b>bold</b> and closes with </html>",
+        "reason": "user wrote <note>see attachment</note>",
+    }
+    repaired = llm._repair_tool_markup_leak(dict(data))
+    assert repaired == data
+
+
+def test_repair_handles_namespaced_parameter_tags() -> None:
+    data = {
+        "closure_state": (
+            'open</ns:closure_state>\n<ns:parameter name="relevance_horizon">2026-07-27'
+        ),
+    }
+    repaired = llm._repair_tool_markup_leak(data)
+    assert repaired["closure_state"] == "open"
+    assert repaired["relevance_horizon"] == "2026-07-27"

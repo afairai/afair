@@ -190,3 +190,114 @@ def test_event_without_extraction_is_skipped(
     stats = tw.TemporalWorker().run(db, settings)
     assert stats["events_classified"] == 0
     assert stats["llm_calls"] == 0
+
+
+# ── field sanitization (defense-in-depth behind llm's markup-leak repair) ───
+
+
+def test_contaminated_optional_fields_are_dropped_not_stored(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production bug verbatim: a bridge leaked raw tool-call markup into
+    closure_state. Even when such a value reaches the worker (i.e. the central
+    repair in call_tool did not catch it), it must never be written."""
+    event_hash = _seed(db, "promised to send the report next week")
+    monkeypatch.setattr(
+        tw,
+        "call_tool",
+        _llm(
+            {
+                "temporal_class": "commitment",
+                "confidence": 0.8,
+                "closure_state": (
+                    'open</closure_state>\n<parameter name="relevance_horizon">2026-07-27T08:36:25Z'
+                ),
+                "event_time": "sometime next week",
+                "relevance_horizon": "shortly after the event",
+                "recurrence_rule": "every year <probably>",
+            }
+        ),
+    )
+    tw.TemporalWorker().run(db, settings)
+    row = read_event_temporal(db, event_hash)
+    assert row is not None
+    assert row.temporal_class == "commitment"
+    assert row.closure_state is None
+    assert row.event_time is None
+    assert row.relevance_horizon is None
+    assert row.recurrence_rule is None
+
+
+def test_valid_optional_fields_pass_through(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_hash = _seed(db, "dentist appointment on 2026-09-01 at 10:00")
+    monkeypatch.setattr(
+        tw,
+        "call_tool",
+        _llm(
+            {
+                "temporal_class": "one_off",
+                "confidence": 0.9,
+                "event_time": "2026-09-01T10:00:00Z",
+                "relevance_horizon": "2026-09-01",
+                "recurrence_rule": "FREQ=YEARLY;BYMONTH=9",
+                "closure_state": "open",
+            }
+        ),
+    )
+    tw.TemporalWorker().run(db, settings)
+    row = read_event_temporal(db, event_hash)
+    assert row is not None
+    assert row.event_time == "2026-09-01T10:00:00Z"
+    assert row.relevance_horizon == "2026-09-01"
+    assert row.recurrence_rule == "FREQ=YEARLY;BYMONTH=9"
+    assert row.closure_state == "open"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-07-27",
+        "2026-07-27T08:36:25Z",
+        "2026-07-27T08:36:25.123456+02:00",
+        "2026-07-27 08:36",
+        "2026-07-27T08:36:25+0200",
+    ],
+)
+def test_opt_iso_accepts_iso_shapes(value: str) -> None:
+    assert tw._opt_iso(value, field="event_time") == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "next Friday",
+        "2026-07-27T08:36:25Z</relevance_horizon>",
+        'open</closure_state>\n<parameter name="relevance_horizon">2026-07-27T08:36:25Z',
+        "07/27/2026",
+        "2026-7-27",
+        "",
+        None,
+        42,
+    ],
+)
+def test_opt_iso_rejects_non_iso(value: object) -> None:
+    assert tw._opt_iso(value, field="event_time") is None
+
+
+def test_opt_closure_whitelist() -> None:
+    assert tw._opt_closure("open") == "open"
+    assert tw._opt_closure("fulfilled") == "fulfilled"
+    assert tw._opt_closure("superseded") == "superseded"
+    assert tw._opt_closure("done") is None
+    assert tw._opt_closure("open</closure_state>") is None
+    assert tw._opt_closure(None) is None
+
+
+def test_opt_rrule_sanity() -> None:
+    assert tw._opt_rrule("FREQ=YEARLY") == "FREQ=YEARLY"
+    assert tw._opt_rrule("FREQ=MONTHLY;BYMONTHDAY=27") == "FREQ=MONTHLY;BYMONTHDAY=27"
+    assert tw._opt_rrule("every year") is None
+    assert tw._opt_rrule("FREQ=YEARLY <x>") is None
+    assert tw._opt_rrule(None) is None

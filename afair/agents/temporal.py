@@ -19,6 +19,7 @@ LLM is called through the I5-neutral wrapper.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -47,7 +48,17 @@ log = structlog.get_logger(__name__)
 
 TEMPORAL_VERSION = "temporal:v1"
 """Stamped into ``event_temporal.computed_by``. Bumping it re-derives old
-events when the inference improves (I7) without touching the substrate."""
+events when the inference improves (I7) without touching the substrate.
+
+Legacy data note (2026-08-12): rows written before the field sanitization
+below may carry leaked tool-call markup in ``closure_state`` /
+``relevance_horizon`` (e.g. ``'open</closure_state>\\n<parameter ...'``),
+produced by a tool-call bridge that reassembled arguments from raw model
+text. ``event_temporal`` is derived state: a version bump (``temporal:v2``)
+re-derives EVERY extracted event — roughly one LLM call per event (~2300 at
+current vault size) — and the latest-per-hash reads then supersede the
+polluted rows. That cost makes the bump a deliberate operator decision;
+never bump as a side effect of an unrelated change."""
 
 MAX_EVENTS_PER_CYCLE = 10
 MAX_LLM_CALLS_PER_CYCLE = 8
@@ -365,10 +376,10 @@ def _infer_temporal(
     return _TemporalVerdict(
         temporal_class=temporal_class,
         confidence=confidence,
-        event_time=_opt_str(data.get("event_time")),
-        relevance_horizon=_opt_str(data.get("relevance_horizon")),
-        recurrence_rule=_opt_str(data.get("recurrence_rule")),
-        closure_state=_opt_str(data.get("closure_state")),
+        event_time=_opt_iso(data.get("event_time"), field="event_time"),
+        relevance_horizon=_opt_iso(data.get("relevance_horizon"), field="relevance_horizon"),
+        recurrence_rule=_opt_rrule(data.get("recurrence_rule")),
+        closure_state=_opt_closure(data.get("closure_state")),
     )
 
 
@@ -376,6 +387,59 @@ def _opt_str(value: Any) -> str | None:
     """A non-empty string, or None — the shape every optional column wants."""
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+# ── field sanitization (defense-in-depth behind llm._repair_tool_markup_leak) ──
+#
+# The columns below are structured, machine-consumed derived state
+# (``sync_event_edge_validity`` and the decay scorer read them), so a value
+# that fails its shape check is dropped to None rather than stored verbatim.
+# Production incident: a tool-call bridge leaked raw tool markup into these
+# fields, e.g. closure_state =
+# ``'open</closure_state>\n<parameter name="relevance_horizon">2026-07-27...'``.
+
+CLOSURE_STATES: tuple[str, ...] = ("open", "fulfilled", "superseded")
+"""The closure vocabulary — mirrors the enum in ``_TOOL_SCHEMA`` (schema
+forcing documents it to the model; this whitelist enforces it in code)."""
+
+_ISO_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"  # date
+    r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?"  # optional time
+    r"(?:Z|[+-]\d{2}:?\d{2})?)?$"  # optional offset
+)
+"""ISO 8601 date or datetime, exactly the shapes the schema asks for. Anything
+else (prose, leaked markup, relative phrases) must not reach the column."""
+
+_RRULE_RE = re.compile(r"^(?=.*FREQ=)[A-Za-z0-9;=,+:-]+$")
+"""RFC 5545 RRULE sanity: FREQ= present, charset closed under RRULE syntax
+(no whitespace, no markup)."""
+
+
+def _opt_iso(value: Any, *, field: str) -> str | None:
+    """An ISO 8601 date/datetime string, or None (dropped with a warning)."""
+    s = _opt_str(value)
+    if s is None or _ISO_TIMESTAMP_RE.match(s):
+        return s
+    log.warning("temporal.dropped_invalid_field", field=field, value=s[:160])
+    return None
+
+
+def _opt_closure(value: Any) -> str | None:
+    """A whitelisted closure state, or None (dropped with a warning)."""
+    s = _opt_str(value)
+    if s is None or s in CLOSURE_STATES:
+        return s
+    log.warning("temporal.dropped_invalid_field", field="closure_state", value=s[:160])
+    return None
+
+
+def _opt_rrule(value: Any) -> str | None:
+    """A plausibly-shaped RRULE, or None (dropped with a warning)."""
+    s = _opt_str(value)
+    if s is None or _RRULE_RE.match(s):
+        return s
+    log.warning("temporal.dropped_invalid_field", field="recurrence_rule", value=s[:160])
     return None
 
 

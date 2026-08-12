@@ -24,6 +24,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
+log = structlog.get_logger(__name__)
+
 # ── Kosten-Wächter (lokaler Self-Host-Patch, Michael 2026-07-20) ────────────────
 # Schreibt je bezahltem API-Call die von litellm berechneten $-Kosten in eine
 # host-sichtbare JSONL. Lokale Modelle (ollama/*) kosten 0 und werden übersprungen.
@@ -211,7 +215,74 @@ def call_tool(
         msg = f"tool arguments must be a JSON object, got {type(data).__name__}"
         raise LLMResponseError(msg)
 
+    data = _repair_tool_markup_leak(data)
     return LLMResult(data=data, model=model, raw=raw_args)
+
+
+# ── tool-markup leak repair ────────────────────────────────────────────────
+#
+# A tool-call bridge that reassembles arguments from raw model text (e.g. an
+# OpenAI-compatible wrapper around a CLI) can leak the model's own tool-call
+# markup INTO an argument value: the value absorbs its closing tag plus the
+# FOLLOWING ``<parameter name="...">`` fragments. Real production sample from
+# ``event_temporal.closure_state``:
+#
+#     'open</closure_state>\n<parameter name="relevance_horizon">2026-07-27T08:36:25Z'
+#
+# The JSON itself parses fine, so schema forcing doesn't catch it — the junk
+# lives inside one string value while the swallowed sibling fields are missing.
+# Repair = cut the value at the first markup marker and re-home the swallowed
+# ``<parameter>`` fragments into their own (still-unset) keys.
+
+_MARKUP_PARAM_RE = re.compile(r'<(?:\w+:)?parameter\s+name="([\w.-]+)"\s*>\s*([^<]*)')
+_MARKUP_CLOSING_RE = re.compile(r"</(?:\w+:)?[\w.-]+>")
+
+
+def _looks_markup_contaminated(key: str, value: str) -> bool:
+    """True when a string argument carries leaked tool-call markup.
+
+    Deliberately narrow to keep false positives near zero on values that
+    legitimately quote user HTML/XML: only the field's OWN closing tag, a
+    ``</parameter>``/``</invoke>`` frame tag, or an opening
+    ``<parameter name="...">`` fragment count as contamination.
+    """
+    if _MARKUP_PARAM_RE.search(value):
+        return True
+    return bool(
+        re.search(
+            rf"</(?:\w+:)?(?:{re.escape(key)}|parameter|invoke|function_calls?)>",
+            value,
+        )
+    )
+
+
+def _repair_tool_markup_leak(data: dict[str, Any]) -> dict[str, Any]:
+    """Strip leaked tool-call markup from string arguments (in place).
+
+    For each contaminated value: keep the clean prefix (before the first
+    markup marker), then recover any swallowed ``<parameter name="X">value``
+    fragments into their own keys — but only where that key is still unset,
+    so a well-formed sibling value is never overwritten.
+    """
+    for key in list(data.keys()):
+        value = data[key]
+        if not isinstance(value, str) or not _looks_markup_contaminated(key, value):
+            continue
+        cut = _MARKUP_CLOSING_RE.search(value)
+        param = _MARKUP_PARAM_RE.search(value)
+        cut_at = min(m.start() for m in (cut, param) if m is not None)
+        clean = value[:cut_at].strip()
+        data[key] = clean if clean else None
+        for name, fragment in _MARKUP_PARAM_RE.findall(value):
+            if data.get(name) in (None, ""):
+                recovered = fragment.strip()
+                data[name] = recovered if recovered else None
+        log.warning(
+            "llm.tool_args_markup_leak_repaired",
+            field=key,
+            sample=value[:160],
+        )
+    return data
 
 
 _AUTH_NAME_MARKERS = ("auth", "apikey", "permissiondenied")
