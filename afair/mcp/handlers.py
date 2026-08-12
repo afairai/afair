@@ -108,6 +108,7 @@ from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
 from ..substrate.search import FTS5_SPECIALS_RE, MMR_DEFAULT_LAMBDA, mmr_rerank
 from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
+from .assoc_expand import events_via_chain
 from .auth import current_client
 from .context import connect_for_thread, get_context
 from .schemas import (
@@ -1987,6 +1988,15 @@ def recall(
         # queries.
         entity_hits = _events_via_entity_match(db, query, limit=fetch_n)
 
+        # P1b chain arm — multi-entity queries ("S O") whose evidence spans
+        # events that each mention only PART of the query. Expands the
+        # query's entities one hop (hard edges + soft-association sidecar)
+        # and surfaces events mentioning >=2 expanded entities. [] for
+        # single-concept and prose queries; fails soft; kill switch
+        # AFAIR_CHAIN_RECALL=0. Gate that motivated it: multihop both@8
+        # 5% baseline — query-term expansion alone reached only 10%.
+        chain_hits = events_via_chain(db, ctx.vault_dir, query)
+
         if depth == "shallow" or not ctx.semantic_recall_enabled:
             fts_hits = search_fts(db, query, limit=fetch_n)
             events = rrf_merge(fts_hits, entity_hits, limit=fetch_n) if entity_hits else fts_hits
@@ -2016,6 +2026,13 @@ def recall(
                 hybrid = rrf_merge(fts_hits, vec_hits, limit=fetch_n)
                 events = rrf_merge(hybrid, entity_hits, limit=fetch_n) if entity_hits else hybrid
                 depth_used = "normal"
+
+        # Chain-arm merge (P1b) — one line after both branches so shallow,
+        # degraded-embedding and normal all get it. RRF keeps direct text
+        # matches competitive; chain evidence (>=2 expanded entities) enters
+        # ranked by chain strength.
+        if chain_hits:
+            events = rrf_merge(events, chain_hits, limit=fetch_n)
 
         # depth="deep" — follow the entity graph out from what the direct arms
         # found. Placed after BOTH branches so a deep recall still expands when
@@ -2059,6 +2076,19 @@ def recall(
         # synthesis before the raw events it summarizes (query path only —
         # browse mode stays chronological).
         events = _article_first_order(events, invalidated=set(invalidations))
+
+        # Chain-evidence hoist (P1b): when the query named two connectable
+        # entities, the events EVIDENCING that connection belong on page 1 —
+        # RRF alone lets three text arms push them under the fold (measured:
+        # multihop legs missing from top-8 despite being in the chain arm).
+        # Same pattern as the article hoist above; capped at 3 so text
+        # relevance keeps the rest of the page.
+        if chain_hits:
+            chain_ids = {e.id for e in chain_hits[:3]}
+            hoisted = [e for e in events if e.id in chain_ids]
+            if hoisted:
+                rest = [e for e in events if e.id not in chain_ids]
+                events = hoisted + rest
 
         # Diversity last, so it reorders the FINAL ranking rather than one that
         # a later pass would have rearranged anyway. deep-only, and the pass is
