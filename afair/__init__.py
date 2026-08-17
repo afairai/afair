@@ -1,3 +1,3 @@
 """afair: a user-owned, vendor-neutral memory vault for AI assistants, over MCP."""
 
-__version__ = "0.1.27"  # x-release-please-version
+__version__ = "0.1.28"  # x-release-please-version
