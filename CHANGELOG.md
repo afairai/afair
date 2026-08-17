@@ -10,6 +10,20 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.28](https://github.com/afairai/afair/compare/v0.1.27...v0.1.28) (2026-08-17)
+
+
+### Bug Fixes
+
+* **deps:** resolve all open dependency vulnerabilities in one pass ([#65](https://github.com/afairai/afair/issues/65)) ([e374e73](https://github.com/afairai/afair/commit/e374e73db4b04505bf7097951397b90958940112))
+
+
+### Documentation
+
+* **adr:** accept ADR-0011 membership federation ([a5caf37](https://github.com/afairai/afair/commit/a5caf370486221df0e9782c2293b6486c2774c3d))
+* **adr:** fold second adversarial review into ADR-0011 (13 findings) ([a6702c2](https://github.com/afairai/afair/commit/a6702c26749aebcb4d133d8356e13a90a966d3cd))
+* **readme:** align tagline with canonical positioning phrase ([1ebd6c6](https://github.com/afairai/afair/commit/1ebd6c6cb07725e0356d455c4759c881742b0c79))
+
 ## [0.1.27](https://github.com/afairai/afair/compare/v0.1.26...v0.1.27) (2026-07-28)
 
 
