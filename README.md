@@ -5,7 +5,7 @@
 <h1 align="center">afair</h1>
 
 <p align="center">
-  <em>The memory that keeps itself current, across every AI you use.</em>
+  <em>The open-source, self-organizing memory for all your AI tools.</em>
 </p>
 
 <p align="center">
