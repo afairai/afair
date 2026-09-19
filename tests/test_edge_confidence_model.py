@@ -79,14 +79,67 @@ def test_all_signals_missing_is_neutral_plus_crispness_only() -> None:
     crisp = EdgeConfidenceSignals(predicate="runs")
     c_crisp, _comp_crisp = compute_edge_confidence(crisp)
     assert MIN_EDGE_CONFIDENCE < c_crisp < MAX_EDGE_CONFIDENCE
-    from afair.substrate.confidence import W_CRISP
+    from afair.substrate.confidence import W_CRISP, W_VAGUE
 
     assert isclose(c_crisp, _sigmoid(_logit(DEFAULT_BASE_RATE) + W_CRISP), rel_tol=1e-12)
 
-    # Vague predicate, nothing else: z == logit(base) - W_CRISP exactly.
+    # Vague predicate, nothing else: z == logit(base) - W_VAGUE exactly (the
+    # crisp/vague term is asymmetric: small bonus, larger penalty).
     vague = EdgeConfidenceSignals(predicate="is a person in the circle of")
     c_vague, _ = compute_edge_confidence(vague)
-    assert isclose(c_vague, _sigmoid(_logit(DEFAULT_BASE_RATE) - W_CRISP), rel_tol=1e-12)
+    assert isclose(c_vague, _sigmoid(_logit(DEFAULT_BASE_RATE) - W_VAGUE), rel_tol=1e-12)
+
+
+def test_vague_uncorroborated_stays_below_expiry_floor() -> None:
+    """The W_VAGUE sizing guarantee: a vague predicate with ZERO corroboration
+    stays below 0.5 at the default base rate, even in the worst case (a perfect
+    extraction self-assessment and exact mentions — every other term is <= 0).
+    So an uncorroborated vague derivation silently expires instead of reaching
+    the operator's review queue (2026-08-10 operator decision)."""
+    worst = EdgeConfidenceSignals(
+        extraction_confidence=1.0,
+        subject_mention_confidence=1.0,
+        object_mention_confidence=1.0,
+        predicate="is a person in the circle of",
+        corroborating_sources=0,
+    )
+    c, _ = compute_edge_confidence(worst)
+    assert c < 0.5
+
+    # Typical vague derivation (the 2026-08-10 example shape).
+    typical = EdgeConfidenceSignals(
+        extraction_confidence=0.8,
+        subject_mention_confidence=1.0,
+        object_mention_confidence=0.9,
+        predicate="wants to install components on",
+        corroborating_sources=0,
+    )
+    c_typ, _ = compute_edge_confidence(typical)
+    assert c_typ < 0.5
+
+
+def test_intent_predicate_counts_as_vague() -> None:
+    """Intent/hedge language is vague even when short enough to pass the
+    word-count check: "wants to install" (3 words) scores like a vague
+    predicate, not like a crisp relation."""
+    intent = EdgeConfidenceSignals(predicate="wants to install")
+    crisp = EdgeConfidenceSignals(predicate="runs")
+    c_intent, comp = compute_edge_confidence(intent)
+    c_crisp, _ = compute_edge_confidence(crisp)
+    assert c_intent < c_crisp
+    assert comp["terms"]["crisp"] < 0  # penalized, not bonused
+
+
+def test_corroboration_lifts_vague_back_over_the_floor() -> None:
+    """The escape hatch: corroborating sources can lift a vague derivation back
+    over 0.5 — vague claims earn attention through corroboration, never by
+    default."""
+    vague = EdgeConfidenceSignals(predicate="is a person in the circle of")
+    c0, _ = compute_edge_confidence(vague)
+    c1, _ = compute_edge_confidence(vague.model_copy(update={"corroborating_sources": 1}))
+    assert c0 < 0.5
+    assert c1 > c0
+    assert c1 >= 0.5
 
 
 def test_clamps() -> None:

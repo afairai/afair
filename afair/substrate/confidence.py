@@ -33,8 +33,14 @@ from .edge_confidence import latest_edge_confidence_batch
 if TYPE_CHECKING:
     import sqlite3
 
-EDGE_CONFIDENCE_VERSION = "edge_confidence:v1"
-"""Stamped into edge_confidence_scores.computed_by. Bump to re-derive (I7)."""
+EDGE_CONFIDENCE_VERSION = "edge_confidence:v2"
+"""Stamped into edge_confidence_scores.computed_by. Bump to re-derive (I7).
+
+v2: the crisp/vague term became asymmetric (W_CRISP bonus unchanged, new
+W_VAGUE penalty) and intent-hedge predicates ("wants to ...") count as vague —
+uncorroborated vague derivations now score below the 0.5 expiry threshold
+instead of landing in the operator's review queue. v1 rows stay as history;
+the cold-path scorer re-derives every edge under v2 at its usual per-cycle cap."""
 
 # Hand-set anchors (ADR-0004 "Calibration"). base_rate and corroboration
 # weight are ALSO tuner-whitelisted (S8); these constants are the defaults.
@@ -51,8 +57,22 @@ EXTRACTION_NEUTRAL = 0.7
 this raises the score, below it lowers it."""
 
 W_CRISP = 0.4
-"""Log-odds bonus/penalty for a crisp vs vague predicate — the ADR-0002
-confabulation tell (a real relation is a short verb-phrase)."""
+"""Log-odds bonus for a crisp predicate — the ADR-0002 confabulation tell (a
+real relation is a short verb-phrase). Bonus only; the vague side carries its
+own, larger weight (``W_VAGUE``) so raising the penalty never inflates the
+scores of healthy crisp edges."""
+
+W_VAGUE = 1.4
+"""Log-odds penalty for a vague predicate (asymmetric counterpart of
+``W_CRISP``). Sized so that a vague, UNCORROBORATED derivation stays below the
+0.5 edge-expiry threshold at the default base rate even in the worst case:
+``logit(0.70) + W_EXTRACT*(1.0-0.7) - W_VAGUE`` = 0.847 + 0.45 - 1.4 < 0, i.e.
+< 0.5 after the sigmoid (mention/conflict terms are always <= 0). One
+corroborating source (+0.8 log-odds per doubling) can lift it back over 0.5,
+which is the intended escape hatch: vague claims earn attention through
+corroboration, not by default. Operator-set 2026-08-10 after vague intent
+edges ("wants to install components on ...") kept reaching the review queue.
+Tuner-whitelisted as ``edge_confidence.vague_penalty``."""
 
 W_MENTION = 2.0
 """Log-odds weight on the WEAKEST endpoint mention (min over the two ends),
@@ -132,6 +152,7 @@ def compute_edge_confidence(
     *,
     base_rate: float = DEFAULT_BASE_RATE,
     corroboration_weight: float = W_CORROBORATION,
+    vague_penalty: float = W_VAGUE,
 ) -> tuple[float, dict[str, Any]]:
     """Compute a served confidence in [MIN, MAX] plus its full explanation.
 
@@ -141,8 +162,9 @@ def compute_edge_confidence(
     every per-term contribution, and the summed ``z`` — enough to recompute the
     score and to answer "why this number?".
 
-    ``base_rate`` and ``corroboration_weight`` are passed in so the tuner-
-    resolved values (S8) flow through; they default to the module constants.
+    ``base_rate``, ``corroboration_weight`` and ``vague_penalty`` are passed in
+    so the tuner-resolved values (S8) flow through; they default to the module
+    constants.
     """
     base_term = _logit(base_rate)
     z = base_term
@@ -154,8 +176,9 @@ def compute_edge_confidence(
         extract_term = 0.0
     z += extract_term
 
-    # Predicate crispness — bonus for a crisp relation, penalty for vague.
-    crisp_term = W_CRISP if predicate_is_crisp(signals.predicate) else -W_CRISP
+    # Predicate crispness — small bonus for a crisp relation, larger penalty
+    # for vague/intent language (asymmetric by design; see W_VAGUE).
+    crisp_term = W_CRISP if predicate_is_crisp(signals.predicate) else -vague_penalty
     z += crisp_term
 
     # Weakest-endpoint mention — deviation of the WEAKER end from a perfect 1.0.
@@ -184,6 +207,7 @@ def compute_edge_confidence(
             "w_extract": W_EXTRACT,
             "extraction_neutral": EXTRACTION_NEUTRAL,
             "w_crisp": W_CRISP,
+            "w_vague": vague_penalty,
             "w_mention": W_MENTION,
             "corroboration_weight": corroboration_weight,
             "w_conflict": W_CONFLICT,

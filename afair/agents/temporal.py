@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from ..substrate import pipeline_events as pe
 from ..substrate import watermarks
+from ..substrate.edge_validity import sync_event_edge_validity
 from ..substrate.events import read_event_by_hash
 from ..substrate.temporal import TEMPORAL_CLASSES, write_event_temporal
 from .cold_path import ColdPathWorker
@@ -152,6 +153,7 @@ class TemporalWorker(ColdPathWorker):
     def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
         stats: dict[str, Any] = {
             "events_classified": 0,
+            "edge_validity_spans": 0,
             "llm_calls": 0,
             "llm_errors": 0,
             "by_class": {},
@@ -202,6 +204,15 @@ class TemporalWorker(ColdPathWorker):
             )
             if row is not None:
                 stats["events_classified"] += 1
+                stats["edge_validity_spans"] += sync_event_edge_validity(
+                    conn,
+                    event_id=event.id,
+                    temporal_class=verdict.temporal_class,
+                    event_time=verdict.event_time,
+                    relevance_horizon=verdict.relevance_horizon,
+                    confidence=verdict.confidence,
+                    computed_by=TEMPORAL_VERSION,
+                )
                 by_class = stats["by_class"]
                 by_class[verdict.temporal_class] = by_class.get(verdict.temporal_class, 0) + 1
 
@@ -237,6 +248,29 @@ class TemporalWorker(ColdPathWorker):
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+
+def backlog_count(conn: sqlite3.Connection) -> int:
+    """How many extracted events still lack a temporal classification.
+
+    Same predicate as ``_find_events_needing_temporal`` minus watermark and
+    limit — the watermark is a scan optimization, not a truth criterion, and
+    /health wants the truth. Count only; never payloads.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT i.event_hash)
+        FROM interpretations i
+        WHERE i.produced_by LIKE 'extractor:%'
+          AND NOT EXISTS (
+              SELECT 1 FROM event_temporal t
+              WHERE t.event_hash = i.event_hash
+                AND t.computed_by = :version
+          )
+        """,
+        {"version": TEMPORAL_VERSION},
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def _find_events_needing_temporal(

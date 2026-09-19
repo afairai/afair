@@ -175,7 +175,9 @@ def test_backfill_keyless_vault_skips_key_install(
         "scripts.backfill_entities.set_vault_key",
         lambda key: calls.append(key),
     )
-    monkeypatch.delenv("AFAIR_VAULT_KEY", raising=False)
+    # Explicitly shadow a developer's local .env; deleting the process value
+    # would make Settings load the real repository key again.
+    monkeypatch.setenv("AFAIR_VAULT_KEY", "")
 
     rc = main(["--vault-dir", str(tmp_path), "--quiet"])
     assert rc == 0

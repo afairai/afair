@@ -65,12 +65,65 @@ of", "shares Business/Product role with"). Word count is a cheap, effective
 proxy for that tell — see the false edges that prompted ADR-0002."""
 
 
+# Intent/hedge predicate stems. "X wants to install Y", "X plans to migrate
+# to Y" are short enough to pass the word-count check, but they assert an
+# ASPIRATION, not a relation that holds — exactly the vague derivations the
+# operator kept rejecting in edge review (2026-08-10: "wants to install
+# components on"). Deliberately NOT in _NON_DURABLE_PREDICATE_STEMS: intent
+# edges may exist and earn confidence through corroboration; they just score
+# vague (and never auto-confirm), they are not write-gated or noise-swept.
+# Matched as whole-normalized-predicate or stem-prefixed phrase.
+_VAGUE_INTENT_STEMS: frozenset[str] = frozenset(
+    {
+        "wants",
+        "want",
+        "wanted",
+        "wishes",
+        "wish",
+        "wished",
+        "plans to",
+        "planning to",
+        "planned to",
+        "is planning to",
+        "intends to",
+        "intending to",
+        "intended to",
+        "hopes to",
+        "hoping to",
+        "hoped to",
+        "aims to",
+        "aiming to",
+        "aimed to",
+        "seeks to",
+        "seeking to",
+        "would like to",
+        "would love to",
+        "is interested in",
+        "interested in",
+        "is considering",
+        "considering",
+        "considers",
+        "is thinking about",
+        "thinking about",
+        "is looking to",
+        "looking to",
+    }
+)
+
+
 def predicate_is_crisp(predicate: str) -> bool:
     """True for a short, relation-shaped predicate; False for vague
-    profile-language. The single most discriminating signal between a real
-    edge and a co-occurrence confabulation."""
+    profile-language OR intent/hedge language. The single most discriminating
+    signal between a real edge and a co-occurrence confabulation.
+
+    Two tells: verbose profile phrasing (> ``_MAX_PREDICATE_WORDS`` words),
+    and intent-hedge stems ("wants to ...", "plans to ...") that are short but
+    assert an aspiration rather than a relation that holds."""
     words = predicate.split()
-    return 1 <= len(words) <= _MAX_PREDICATE_WORDS
+    if not (1 <= len(words) <= _MAX_PREDICATE_WORDS):
+        return False
+    norm = " ".join(predicate.lower().split())
+    return not any(norm == stem or norm.startswith(stem + " ") for stem in _VAGUE_INTENT_STEMS)
 
 
 # Predicate stems that describe a TEXTUAL / stative / comparative relationship

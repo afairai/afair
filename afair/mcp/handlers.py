@@ -102,9 +102,12 @@ from ..substrate.belief import (
     resolve_trust,
 )
 from ..substrate.corrections import decide_correction
+from ..substrate.edge_validity import normalize_temporal_bound
 from ..substrate.events import row_to_event
+from ..substrate.graph_walk import DEFAULT_LIMITS as GRAPH_WALK_LIMITS
+from ..substrate.graph_walk import effective_validity_batch, walk_from_events
 from ..substrate.kinds import ONTOLOGY_PROPOSAL_ID_PREFIX
-from ..substrate.search import FTS5_SPECIALS_RE
+from ..substrate.search import FTS5_SPECIALS_RE, MMR_DEFAULT_LAMBDA, mmr_rerank
 from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
 from .auth import current_client
@@ -899,6 +902,26 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
     # mid-backfill). This is the number the auto-confirm gate now judges — the
     # frozen write-time column would make the gate vacuous.
     served_confidence = latest_edge_confidence_batch(db, all_edge_ids)
+    # SERVED validity (ADR-0008), by the same argument as the confidence overlay
+    # directly above: ``entity_edges.valid_from/valid_to`` is the frozen
+    # at-discovery snapshot, while the latest ``edge_validity_spans`` row is what
+    # the system currently believes about when the fact held. Serving the column
+    # would show a bound that a later correction has already replaced.
+    #
+    # Additive by construction: the two keys already exist on the wire, this only
+    # fills them with the current interpretation instead of the original guess,
+    # so the MCP surface is untouched. Fail-soft — a validity hiccup must not
+    # cost the caller their recall, it just falls back to the columns.
+    all_edges_flat = [edge for edges in edges_by_event_id.values() for edge in edges]
+    try:
+        effective_validity = effective_validity_batch(
+            db, {edge.id: (edge.valid_from, edge.valid_to) for edge in all_edges_flat}
+        )
+    except sqlite3.Error:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning("recall.edge_validity_overlay_failed")
+        effective_validity = {edge.id: (edge.valid_from, edge.valid_to) for edge in all_edges_flat}
     auto_confirm_floor = _resolve_auto_confirm_floor(db)
     event_id_to_hash = {e.id: e.content_hash for e in events}
     # W3: the source event's caller-supplied ``asserted_by`` maps to the edge's
@@ -942,13 +965,14 @@ def _build_entity_overlay(events: list[Event], db: Any) -> dict[str, dict[str, A
                     floor=auto_confirm_floor,
                 ),
             )
+            eff_from, eff_to = effective_validity.get(edge.id, (edge.valid_from, edge.valid_to))
             edge_views.append(
                 {
                     "subject": subj_canonical.canonical_name,
                     "predicate": edge.predicate,
                     "object": obj_canonical.canonical_name,
-                    "valid_from": edge.valid_from,
-                    "valid_to": edge.valid_to,
+                    "valid_from": eff_from,
+                    "valid_to": eff_to,
                     "trust": trust.value,
                     "confidence": round(conf, 3),
                 }
@@ -1476,6 +1500,77 @@ def _temporal_rerank(
     return [e for _, _, e in scored]
 
 
+# ── depth="deep": graph expansion + diversity ────────────────────────────────
+# Both live behind depth="deep" ONLY. ``_auto_route_depth`` never returns
+# "deep", so nothing reaches this path unless a caller asked for it by name —
+# the default recall shape is byte-for-byte what it was. Until now "deep" was a
+# declared-but-inert value that returned hybrid results plus an apology note;
+# these two steps are what it always said it would be.
+
+
+def _expand_via_graph(
+    events: list[Event], db: sqlite3.Connection, *, limit: int, as_of: str | None = None
+) -> tuple[list[Event], str | None]:
+    """Append events reached by a bounded walk over the entity graph.
+
+    Appended, never fused: a graph-reached event is evidence one or two
+    relations away from what the query actually matched, so it belongs behind
+    the direct hits, not interleaved with them. The MMR pass downstream is what
+    lets those tail candidates rise — and only when the direct hits above them
+    turned out to be redundant with each other.
+
+    The combined pool is deliberately NOT cut back to ``limit`` here. Whenever
+    the direct arms already filled the fetch window — the normal case, not the
+    exception — truncating at this point would discard every graph candidate
+    before the diversity pass ever saw one, making the expansion a no-op exactly
+    when it was needed. The pool stays bounded regardless: the walk itself is
+    hard-capped at ``max_events_total``, so this adds at most that many
+    candidates, and the MMR stage reduces to ``limit`` afterwards. ``limit`` is
+    still honored for the degenerate case where the walk somehow returned more
+    than its own ceiling.
+
+    Fails soft. A walk is an enrichment; if the graph read misbehaves, recall
+    returns exactly what it would have returned without it.
+    """
+    if not events:
+        return events, None
+    try:
+        found, stats = walk_from_events(db, events, limits=GRAPH_WALK_LIMITS, now=as_of)
+    except sqlite3.Error as exc:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning("recall.graph_walk_failed", error=str(exc))
+        return events, "graph expansion unavailable; returned direct matches only"
+    if not found:
+        return events, None
+    note = (
+        f"graph expansion: {stats.events_found} event(s) reached via "
+        f"{stats.entities_discovered} entities within {stats.hops_used} hop(s)"
+    )
+    if stats.hubs_skipped:
+        note += f"; {stats.hubs_skipped} hub(s) not traversed"
+    stale = stats.expired_skipped + stats.not_yet_valid_skipped
+    if stale:
+        lens = f"at {as_of}" if as_of else "currently"
+        note += f"; {stale} relation(s) skipped as not valid {lens}"
+    if stats.truncated:
+        note += "; walk truncated at its bounds"
+    return events + found[: max(limit, GRAPH_WALK_LIMITS.max_events_total)], note
+
+
+def _diversify(events: list[Event], *, limit: int) -> list[Event]:
+    """MMR pass: demote near-duplicates so one page covers more ground.
+
+    A vault fed by daily jobs accumulates families of near-identical records
+    (three handoffs of one session, five daily logs sharing their bullets).
+    Relevance ranking serves the whole family; this keeps the best member and
+    lets the rest fall behind whatever is genuinely different.
+    """
+    if len(events) < 2:
+        return events
+    return mmr_rerank(events, limit=limit, lambda_=MMR_DEFAULT_LAMBDA)
+
+
 def _build_temporal_overlay(
     events: list[Event], db: sqlite3.Connection
 ) -> dict[str, dict[str, Any]]:
@@ -1674,6 +1769,7 @@ def recall(
     pending_offset: int = 0,
     verbosity: RecallVerbosity = "compact",
     cursor: str | None = None,
+    as_of: str | None = None,
 ) -> RecallResult:
     """Read the vault. Six call modes share this signature:
 
@@ -1698,12 +1794,31 @@ def recall(
     search/browse results best-effort — pass the returned ``next_cursor`` back
     verbatim; rankings are recomputed per call.
 
+    ``as_of`` is an optional ISO-8601 world-time lens for the bounded entity
+    graph. With the default ``depth="auto"`` it promotes the call to ``deep``;
+    an explicit shallow/normal depth is rejected rather than silently ignoring
+    the requested date. Knowledge-time invalidations remain authoritative: the
+    lens asks what relations held then, not what afair had not learned yet.
+
     ``scope`` is a free-text substring matched against the interpretation's
     topic_signal (Phase 3.5 — currently no-op until topic_signal lands).
     """
     if by_id is not None and by_content_hash is not None:
         msg = "recall accepts at most one of by_id, by_content_hash"
         raise InvalidRecallArgsError(msg)
+
+    normalized_as_of: str | None = None
+    if as_of is not None:
+        try:
+            normalized_as_of = normalize_temporal_bound(as_of)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("as_of must be a valid ISO 8601 timestamp") from exc
+        if normalized_as_of is None:
+            raise ValueError("as_of must be a valid ISO 8601 timestamp")
+        if depth not in ("auto", "deep"):
+            raise ValueError('as_of requires depth="deep" or the default depth="auto"')
+        if query is not None and query.strip() and depth == "auto":
+            depth = "deep"
 
     db = connect_for_thread()
     ctx = get_context()
@@ -1954,12 +2069,21 @@ def recall(
                 hybrid = rrf_merge(fts_hits, vec_hits, limit=fetch_n)
                 events = rrf_merge(hybrid, entity_hits, limit=fetch_n) if entity_hits else hybrid
                 depth_used = "normal"
-                if depth == "deep":
-                    note = _combine_notes(
-                        note,
-                        "deep depth is not yet richer than normal "
-                        "(Phase 3+ reasoning agent pending); returned hybrid results",
-                    )
+
+        # depth="deep" — follow the entity graph out from what the direct arms
+        # found. Placed after BOTH branches so a deep recall still expands when
+        # semantic recall is off or the embedding call failed: the walk reads
+        # the graph, it never needs a vector.
+        if depth == "deep":
+            events, walk_note = _expand_via_graph(events, db, limit=fetch_n, as_of=normalized_as_of)
+            note = _combine_notes(note, walk_note)
+            if normalized_as_of:
+                note = _combine_notes(note, f"world-time lens: {normalized_as_of}")
+            # Deep is now a real mode even when semantic retrieval degrades:
+            # the bounded graph walk, flat-history lens and MMR still ran. The
+            # result field must describe the effective mode rather than only
+            # the direct retrieval arm beneath it.
+            depth_used = "deep"
 
         # Temporal intent ("current role", "latest …") → prefer the newest
         # matching record. Only kicks in for temporal queries; everything else
@@ -1988,6 +2112,12 @@ def recall(
         # synthesis before the raw events it summarizes (query path only —
         # browse mode stays chronological).
         events = _article_first_order(events, invalidated=set(invalidations))
+
+        # Diversity last, so it reorders the FINAL ranking rather than one that
+        # a later pass would have rearranged anyway. deep-only, and the pass is
+        # rank-preserving for a list that holds no near-duplicates.
+        if depth == "deep":
+            events = _diversify(events, limit=fetch_n)
 
     # Cursor slice (P1-2): the searches overfetched by (offset + page + 1), and
     # invalidations were computed on that fuller list above (a dict superset is

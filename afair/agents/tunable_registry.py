@@ -193,11 +193,11 @@ REGISTRY: tuple[TunableSpec, ...] = (
         ),
     ),
     # ── edge-confidence model (ADR-0004) ──────────────────────────────
-    # The intercept + corroboration weight of the log-odds edge-confidence
-    # model, and the served-confidence floor the quarantine gate uses. The
-    # model's STRUCTURE (the terms, the sigmoid, the scorer itself) stays off
-    # the tunable surface per I7; only these three scalars drift, within hard
-    # bounds, on the evidence of calibration_report.
+    # The intercept, corroboration weight and vague-predicate penalty of the
+    # log-odds edge-confidence model, and the served-confidence floor the
+    # quarantine gate uses. The model's STRUCTURE (the terms, the sigmoid, the
+    # scorer itself) stays off the tunable surface per I7; only these four
+    # scalars drift, within hard bounds, on the evidence of calibration_report.
     TunableSpec(
         worker="edge_confidence",
         tunable="base_rate",
@@ -220,6 +220,24 @@ REGISTRY: tuple[TunableSpec, ...] = (
         max_value=2.0,
         bounded_delta=0.20,
         rationale=("Log-odds added per doubling of independent corroborating source events."),
+    ),
+    TunableSpec(
+        worker="edge_confidence",
+        tunable="vague_penalty",
+        kind="float",
+        default=1.4,
+        # Below ~0.9 even the bare vague case (base rate + penalty, no other
+        # signals) climbs back over the 0.5 expiry floor, defeating the
+        # penalty's purpose (uncorroborated vague derivations expire silently
+        # instead of queueing for review) — so 0.9 is the hard floor.
+        min_value=0.9,
+        max_value=2.5,
+        bounded_delta=0.20,
+        rationale=(
+            "Log-odds penalty for a vague/intent predicate (asymmetric "
+            "counterpart of the crisp bonus); keeps uncorroborated vague "
+            "derivations below the 0.5 expiry threshold."
+        ),
     ),
     TunableSpec(
         worker="belief",

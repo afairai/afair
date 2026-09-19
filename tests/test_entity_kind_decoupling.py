@@ -524,6 +524,10 @@ def test_existing_vault_reopens_byte_identical_except_new_tables(tmp_path: Path)
         conn.execute("DROP VIEW entity_current_kind_v1")
         conn.execute("DROP TABLE entity_kind_assignments")
         conn.execute("DROP TABLE entity_identities")
+        # A real pre-Phase-2 vault carries SQLite's default user_version 0;
+        # resetting the schema fingerprint is part of faking one, else the
+        # next open fast-paths past the DDL and never recreates the tables.
+        conn.execute("PRAGMA user_version = 0")
     conn.close()
 
     conn = open_db(tmp_path)

@@ -358,7 +358,11 @@ Depth = Literal["auto", "shallow", "normal", "deep"]
                  Caller doesn't have to think about it.
 - ``shallow``  — FTS5 keyword only. No embedding inference.
 - ``normal``   — Hybrid FTS5 + vector via Reciprocal Rank Fusion.
-- ``deep``     — Same as normal until the Phase 3+ reasoning agent lands.
+- ``deep``     — Hybrid retrieval plus a bounded one-to-two-hop walk over
+                 entity relations valid now or at an explicit ``as_of`` instant,
+                 plus MMR diversity. Temporal
+                 relevance decay is disabled so direct historical matches stay
+                 findable.
 """
 
 RecallVerbosity = Literal["compact", "standard", "full"]

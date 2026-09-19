@@ -438,7 +438,9 @@ def test_recall_does_not_surface_invalidated_edges(ctx: ServerContext, settings:
 # ── merge resolution ──────────────────────────────────────────────────────
 
 
-def test_recall_resolves_canonical_through_merges(ctx: ServerContext, settings: Settings) -> None:
+def test_recall_resolves_canonical_through_merges(
+    ctx: ServerContext, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """If two entities have been merged, recall surfaces the SURVIVING
     canonical for both mentions — the "from" entity is invisible by
     default (decision #6)."""
@@ -453,6 +455,21 @@ def test_recall_resolves_canonical_through_merges(ctx: ServerContext, settings: 
     EntityCanonicalizer().run(ctx.db, settings)
 
     # Event B: creates "Sajinth" person.
+    # The purpose of this test is the post-merge recall overlay, not an LLM's
+    # opinion on whether these two deliberately separate fixtures are already
+    # the same person. Force the candidate judge to choose "new" so model
+    # updates or credentials on the host cannot change the test setup.
+    from afair.agents.llm import LLMResult
+
+    monkeypatch.setattr(
+        ec,
+        "call_tool",
+        lambda **_kw: LLMResult(
+            data={"matched_entity_id": None, "reason": "test fixture split", "confidence": 1.0},
+            model="test/no-match",
+            raw="",
+        ),
+    )
     _seed_event_with_entities(
         ctx,
         text="Sajinth runs Athara",
