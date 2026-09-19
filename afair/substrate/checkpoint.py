@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import contextlib
 import threading
-import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -56,21 +55,29 @@ log = structlog.get_logger(__name__)
 
 
 def start_checkpoint_loop(
-    vault_dir: Path, *, embedding_dim: int = 1536, interval_seconds: int = 300
+    vault_dir: Path,
+    *,
+    embedding_dim: int = 1536,
+    interval_seconds: int = 300,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread:
     """Spawn a daemon thread that issues ``wal_checkpoint(PASSIVE)`` periodically.
 
     Returns the thread for visibility / testing. The thread is a daemon so
-    it dies with the process — no shutdown ceremony needed.
+    a hung cycle can never block process exit. Pass ``stop_event`` to own
+    the shutdown: setting it wakes the loop out of its sleep immediately
+    and ends it, so the owner can ``join()`` the returned thread (the app
+    lifespan does exactly that). Without an event the loop runs for the
+    life of the process.
 
     The first checkpoint runs after ``interval_seconds``; we don't run one
     immediately at boot because the just-started server has no WAL volume
     to compact yet.
     """
+    stop = stop_event if stop_event is not None else threading.Event()
 
     def loop() -> None:
-        while True:
-            time.sleep(interval_seconds)
+        while not stop.wait(interval_seconds):
             conn = None
             try:
                 conn = open_db(vault_dir, embedding_dim=embedding_dim)

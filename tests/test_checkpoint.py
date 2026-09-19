@@ -7,6 +7,7 @@ deterministically testable piece; the loop start is smoke-checked.
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,12 @@ def test_gc_oauth_codes_deletes_only_expired(tmp_path: Path) -> None:
 
 
 def test_start_checkpoint_loop_returns_daemon_thread(tmp_path: Path) -> None:
-    thread = start_checkpoint_loop(tmp_path, interval_seconds=3600)
+    stop = threading.Event()
+    thread = start_checkpoint_loop(tmp_path, interval_seconds=3600, stop_event=stop)
     assert thread.is_alive()
     assert thread.daemon is True
+    # The stop event must wake the loop out of its (hour-long) sleep — the
+    # join can only succeed because Event.wait is interruptible.
+    stop.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()

@@ -67,10 +67,13 @@ def test_worker_invoked_at_least_once_within_short_window(
         poll_seconds=1,
     )
     sched.start()
-    # Give it up to 3 seconds.
-    deadline = time.monotonic() + 3.0
-    while worker.invocations == 0 and time.monotonic() < deadline:
-        time.sleep(0.1)
+    try:
+        # Give it up to 3 seconds.
+        deadline = time.monotonic() + 3.0
+        while worker.invocations == 0 and time.monotonic() < deadline:
+            time.sleep(0.1)
+    finally:
+        sched.stop()
     assert worker.invocations >= 1
 
 
@@ -89,9 +92,12 @@ def test_worker_failure_does_not_block_others(tmp_path: Path, settings_local: Se
         poll_seconds=1,
     )
     sched.start()
-    deadline = time.monotonic() + 3.0
-    while counter.invocations == 0 and time.monotonic() < deadline:
-        time.sleep(0.1)
+    try:
+        deadline = time.monotonic() + 3.0
+        while counter.invocations == 0 and time.monotonic() < deadline:
+            time.sleep(0.1)
+    finally:
+        sched.stop()
     assert counter.invocations >= 1  # raiser's failure didn't stop counter
 
 
@@ -106,8 +112,27 @@ def test_start_is_idempotent(tmp_path: Path, settings_local: Settings) -> None:
     )
     t1 = sched.start()
     t2 = sched.start()
-    assert t1 is t2
-    assert isinstance(t1, threading.Thread)
+    try:
+        assert t1 is t2
+        assert isinstance(t1, threading.Thread)
+    finally:
+        sched.stop()
+
+
+def test_stop_terminates_daemon_mid_sleep(tmp_path: Path, settings_local: Settings) -> None:
+    """stop() must wake the poll sleep immediately — with poll_seconds=3600
+    the join can only succeed if the Event interrupts the wait."""
+    sched = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[_CountingWorker()],
+        poll_seconds=3600,
+    )
+    thread = sched.start()
+    assert thread.is_alive()
+    sched.stop()
+    assert not thread.is_alive()
 
 
 def test_status_reports_each_worker(tmp_path: Path, settings_local: Settings) -> None:
@@ -177,7 +202,10 @@ def test_worker_failure_rolls_back_open_transaction(
         poll_seconds=1,
     )
     sched.start()
-    deadline = time.monotonic() + 3.0
-    while checker.seen is None and time.monotonic() < deadline:
-        time.sleep(0.1)
+    try:
+        deadline = time.monotonic() + 3.0
+        while checker.seen is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+    finally:
+        sched.stop()
     assert checker.seen == 0
