@@ -383,7 +383,7 @@ def test_extract_audio_routes_through_whisper(
 
 
 @pytest.mark.parametrize("vision_override", [None, "openai/gpt-4o-mini"])
-@pytest.mark.parametrize("entrypoint", ["context", "direct"])
+@pytest.mark.parametrize("entrypoint", ["context", "direct", "admin"])
 def test_extract_image_routes_through_vision(
     ctx: ServerContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,6 +451,20 @@ def test_extract_image_routes_through_vision(
     with patch("litellm.completion", return_value=response) as completion:
         if entrypoint == "context":
             extractor.extract_sync(e.id)
+        elif entrypoint == "admin":
+            from afair import admin
+            from afair.settings import Settings
+
+            settings = Settings(
+                _env_file=None,
+                vault_dir=ctx.vault_dir,
+                vision_model=expected_model,
+                anthropic_api_key=ctx.anthropic_api_key,
+                openai_api_key=ctx.openai_api_key,
+                semantic_recall_enabled=False,
+            )
+            monkeypatch.setattr(admin, "load_settings", lambda: settings)
+            assert admin.reprocess_failed_extractions()["events_reprocessed"] == 1
         else:
             # Operator/recovery callers may omit vision_model entirely.
             overrides = {"vision_model": vision_override} if vision_override else {}
