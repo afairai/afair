@@ -18,6 +18,19 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.33](https://github.com/afairai/afair/compare/v0.1.32...v0.1.33) (2026-11-26)
+
+
+### Features
+
+* **canonicalizer:** upgrade low-confidence second pass to Sonnet 5.5 ([41d0ba1](https://github.com/afairai/afair/commit/41d0ba1472bc43db13f7f949fdba548bb42f3b66))
+* **canonicalizer:** use Sonnet 5.5 for low-confidence second pass ([06ec7a7](https://github.com/afairai/afair/commit/06ec7a72070813fc5f07c928924ef72df1ee5552))
+
+
+### Bug Fixes
+
+* **canonicalizer:** use supported Sonnet strict schema keywords ([1227543](https://github.com/afairai/afair/commit/122754360c1e285bafcd4b3ebfa6e5c1a6a691ad))
+
 ## [0.1.32](https://github.com/afairai/afair/compare/v0.1.31...v0.1.32) (2026-11-26)
 
 
