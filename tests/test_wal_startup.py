@@ -41,8 +41,13 @@ class _ScriptedConnection:
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "sqlcipher"])
-def test_immediate_busy_upgrade_retries_and_observes_other_opener_wal(monkeypatch, backend):
-    error = sqlite3.OperationalError("database is locked")
+@pytest.mark.parametrize(
+    "message", ["database is locked", "database table is locked: sqlite_master"]
+)
+def test_immediate_busy_upgrade_retries_and_observes_other_opener_wal(
+    monkeypatch, backend, message
+):
+    error = sqlite3.OperationalError(message)
     if backend == "sqlcipher":
 
         class CipherOperationalError(Exception):
@@ -51,7 +56,7 @@ def test_immediate_busy_upgrade_retries_and_observes_other_opener_wal(monkeypatc
         monkeypatch.setitem(
             sys.modules, "sqlcipher3", SimpleNamespace(OperationalError=CipherOperationalError)
         )
-        error = CipherOperationalError("database is locked")
+        error = CipherOperationalError(message)
     conn = _ScriptedConnection(error, becomes_wal=True)
     pauses = []
     monkeypatch.setattr(db.time, "sleep", pauses.append)
@@ -249,3 +254,17 @@ def test_busy_extended_code_is_recognized_without_relying_on_message():
     error = sqlite3.OperationalError("provider-specific busy text")
     error.sqlite_errorcode = sqlite3.SQLITE_BUSY | (2 << 8)
     assert db._is_sqlite_busy(error)
+
+
+def test_timeout_restore_failure_does_not_mask_initialization_error(monkeypatch):
+    original = sqlite3.OperationalError("disk I/O error")
+
+    class RestoreFails(_ScriptedConnection):
+        def execute(self, sql):
+            if sql == "PRAGMA busy_timeout = 5000":
+                raise OSError("restore failed")
+            return super().execute(sql)
+
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        db._ensure_wal(RestoreFails(original))
+    assert caught.value is original

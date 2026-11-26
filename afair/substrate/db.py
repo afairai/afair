@@ -183,11 +183,9 @@ def _is_sqlite_busy(error: Exception) -> bool:
     if isinstance(code, int):
         return code & 0xFF in (_stdlib_sqlite.SQLITE_BUSY, _stdlib_sqlite.SQLITE_LOCKED)
     # SQLCipher builds without sqlite_errorcode expose SQLite's stable messages.
-    return str(error).lower() in (
-        "database is locked",
-        "database is busy",
-        "database table is locked",
-        "database schema is locked",
+    message = str(error).lower()
+    return message in ("database is locked", "database is busy") or message.startswith(
+        ("database table is locked", "database schema is locked")
     )
 
 
