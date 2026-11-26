@@ -14,8 +14,10 @@ additions are new tools, never signature changes to these three.
 from __future__ import annotations
 
 import contextlib
+import re
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -143,6 +145,15 @@ def build_cold_path_workers() -> list[ColdPathWorker]:
         Tuner(promote_enabled=False),
         RollbackMonitor(),
     ]
+
+
+def _build_revision(path: Path) -> str | None:
+    """Read the immutable source revision baked into the runtime image."""
+    try:
+        revision = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
 
 
 def build_server(settings: Settings) -> FastMCP:
@@ -374,6 +385,9 @@ def build_server(settings: Settings) -> FastMCP:
         body: dict[str, Any] = {
             "status": "ok",
             "version": __version__,
+            "build_revision": _build_revision(
+                Path(__file__).resolve().parents[1] / "_build_revision"
+            ),
             "checks": {"db": True},
             "pipeline": None,
             "workers": None,

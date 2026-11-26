@@ -414,6 +414,38 @@ new key and re-import through the MCP export surface. The current design encrypt
 the whole database file; finer-grained designs (per-event encryption, bring-your-
 own-key, TEE) are future work.
 
+## Vault exports
+
+`GET /internal/export` streams JSONL with the existing master bearer or optional
+scoped `AFAIR_EXPORT_TOKEN`; `?blobs=inline` includes referenced object contents.
+The final `manifest` record proves the stream completed. Retry a truncated
+stream rather than importing it as a complete vault.
+
+Every table and the blob-reference scan use one SQLite read transaction, so a
+concurrent write cannot add an interpretation without its event or change an
+operational verdict halfway through the export. Export opens the existing vault
+read-only, without schema initialization. WAL allows writers to keep committing;
+the read snapshot lasts until completion or client disconnect, when the response
+explicitly closes its iterator and database connection. Blob files are read by
+content hash outside SQLite; this is a database snapshot, not a filesystem backup.
+
+Background export jobs use the same JSONL snapshot. With `AFAIR_VAULT_KEY` set,
+they compress in memory and encrypt each compressed chunk **before writing it to
+disk**. There is no plaintext gzip staging file. Private temporary files (0600)
+contain only the AF01 encrypted envelope; the complete gzip and authentication
+tag are flushed and fsynced before an atomic rename publishes the artifact.
+The parent directory is then fsynced before the job becomes ready. Each attempt
+has its own artifact name, so failed or concurrent retries cannot overwrite or
+remove another attempt's ready export. Existing AF01 artifacts and download
+`.jsonl.gz` contents remain compatible.
+
+A killed worker can leave a partial encrypted temporary file, never a partial
+published export or plaintext staging file. The hourly export purge removes stale
+temporary files and orphaned attempts after its existing dead-worker threshold;
+ready artifacts follow the configured retention period. Download verifies the
+complete AES-GCM authentication tag before returning plaintext. Without a vault
+key, local development exports remain plaintext gzip, matching the keyless vault.
+
 ## Entity-graph maintenance
 
 The entity graph (canonical entities, their kinds, and the same-name clusters

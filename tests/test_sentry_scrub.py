@@ -21,10 +21,7 @@ def test_request_headers_cookies_body_are_stripped() -> None:
         }
     }
     scrubbed = _before_send(event, {})
-    assert "headers" not in scrubbed["request"]
-    assert "cookies" not in scrubbed["request"]
-    assert "data" not in scrubbed["request"]
-    assert scrubbed["request"]["url"] == "https://mcp.afair.ai/mcp"
+    assert "request" not in scrubbed
 
 
 def test_sensitive_extra_keys_are_masked() -> None:
@@ -71,7 +68,7 @@ def test_frame_locals_are_dropped() -> None:
 def test_key_sensitivity_detection() -> None:
     for key in ("Authorization", "X-Auth-Token", "VAULT_KEY", "user_email", "Cookie"):
         assert _key_is_sensitive(key), key
-    for key in ("count", "status", "url", "duration_ms"):
+    for key in ("count", "status", "duration_ms"):
         assert not _key_is_sensitive(key), key
 
 
@@ -102,3 +99,85 @@ def test_asgi_message_from_other_logger_still_reports() -> None:
         "message": "ASGI callable returned without completing response.",
     }
     assert _before_send(event, {}) is event
+
+
+def test_incident_fields_never_export_synthetic_vault_content() -> None:
+    import json
+
+    from afair.observability.sentry import _before_breadcrumb
+
+    sentinel = "SYNTHETIC_VAULT_SECRET_9372"
+    event = {
+        "level": "error",
+        "logger": "afair.extractor",
+        "message": sentinel,
+        "transaction": sentinel,
+        "fingerprint": [sentinel],
+        "user": {"id": sentinel},
+        "logentry": {"message": "%s", "params": [sentinel], "formatted": sentinel},
+        "request": {"url": "https://example.test/" + sentinel},
+        "extra": {
+            "event_id": sentinel,
+            "entity_id": sentinel,
+            "content_hash": sentinel,
+            "nested": [{"provider_response": sentinel}, [sentinel]],
+            "count": 7,
+        },
+        "breadcrumbs": {"values": [{"message": sentinel, "data": {"sql": sentinel}}]},
+        "exception": {
+            "values": [
+                {
+                    "type": "RuntimeError",
+                    "value": sentinel,
+                    "stacktrace": {
+                        "frames": [
+                            {
+                                "function": "extract",
+                                "lineno": 34,
+                                "abs_path": sentinel,
+                                "filename": sentinel,
+                                "context_line": sentinel,
+                                "pre_context": [sentinel],
+                                "vars": {"x": sentinel},
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+        "unknown_sdk_extension": sentinel,
+    }
+    result = _before_send(event, {})
+    assert sentinel not in json.dumps(result)
+    assert result["exception"]["values"][0]["type"] == "RuntimeError"
+    assert result["exception"]["values"][0]["stacktrace"]["frames"][0]["lineno"] == 34
+    assert result["extra"]["count"] == 7
+    assert _before_send(result, {}) == result
+    assert sentinel not in json.dumps(
+        _before_breadcrumb({"message": sentinel, "data": [sentinel]}, {})
+    )
+
+
+def test_sentry_init_installs_both_privacy_boundaries(monkeypatch) -> None:
+    from afair.observability import sentry as module
+
+    captured = {}
+    monkeypatch.setenv("GIT_SHA", "1a" * 20)
+    monkeypatch.setenv("SENTRY_DSN", "https://synthetic@example.test/1")
+    monkeypatch.setattr(module.sentry_sdk, "init", lambda **options: captured.update(options))
+    module.init_sentry()
+    assert captured["release"] == "1a" * 20
+    assert captured["before_send"] is module._before_send
+    assert captured["before_breadcrumb"] is module._before_breadcrumb
+    assert captured["traces_sample_rate"] == 0
+    assert captured["send_default_pii"] is False
+    assert captured["include_local_variables"] is False
+
+
+def test_release_environment_survive_and_private_fingerprint_does_not(monkeypatch) -> None:
+    monkeypatch.setenv("AFAIR_ENVIRONMENT", "dev")
+    clean = _before_send(
+        {"environment": "dev", "release": "0.1.30", "fingerprint": ["private"]}, {}
+    )
+    assert clean == {"environment": "dev", "release": "0.1.30"}
+    assert _before_send({"environment": "private", "release": "private"}, {}) == {}

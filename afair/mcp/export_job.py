@@ -16,17 +16,21 @@ only when the user downloads it.
 from __future__ import annotations
 
 import contextlib
-import gzip
 import json
+import os
+import secrets
+import tempfile
 import urllib.request
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from ..substrate import export_jobs, open_db
-from ..substrate.encryption import decrypt_blob, encrypt_blob
+from ..substrate.encryption import _BLOB_MAGIC, _BLOB_NONCE_LEN, decrypt_blob
 from ..substrate.objects import _blob_key_or_none
 from .export_route import _iter_export
 
@@ -43,7 +47,7 @@ def exports_dir(vault_dir: Path) -> Path:
 
 
 def _artifact_path(vault_dir: Path, filename: str) -> Path:
-    # filename is "<job_id>.bin"; job_id is our own token_hex, no traversal
+    # filename contains our own generated job/attempt IDs, no traversal
     # risk, but resolve + containment-check anyway (defense in depth).
     base = exports_dir(vault_dir).resolve()
     p = (base / filename).resolve()
@@ -54,47 +58,77 @@ def _artifact_path(vault_dir: Path, filename: str) -> Path:
 
 
 def generate_artifact(vault_dir: Path, job_id: str, *, include_blobs: bool) -> tuple[str, int]:
-    """Build the gzip'd + encrypted JSONL artifact. Returns (filename, size).
+    """Stream JSONL → gzip → AES-GCM → private disk; publish only when complete.
 
-    The JSONL is streamed straight into a gzip temp FILE (not a BytesIO), so
-    the uncompressed export never lives in RAM. Encryption is still one-pass
-    AES-GCM over the gzip'd bytes — for a blob-heavy vault that gzip can be
-    large, so a future scale fix is framed/streaming encryption; today the
-    peak is ~1x the gzip size, down from ~3x the previous BytesIO path.
+    Preserve the AF01 blob envelope (magic, nonce, ciphertext, final GCM tag),
+    so existing readers can decrypt new exports unchanged. Compression and
+    encryption retain only bounded working buffers, never a plaintext staging
+    file or a whole compressed export. Keyless local-dev vaults retain their
+    documented plaintext behavior; keyed vaults encrypt before ANY disk write.
 
-    On ANY failure every temp + the half-written final is unlinked, so a
-    crash mid-generate never leaks a stray file onto the (tight) volume.
+    Each attempt owns distinct final/temp names. A retry cannot overwrite or
+    unlink another attempt's published artifact, including a concurrent winner.
     """
     vault_dir = Path(vault_dir)
+    # Validate before creating files. Job IDs are generated internally, but a
+    # caller must never be able to escape the export directory via a prefix.
+    if not job_id or any(
+        c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in job_id
+    ):
+        raise ValueError("invalid export job id")
+    blob_key = _blob_key_or_none()
+    encryptor = None
+    nonce = os.urandom(_BLOB_NONCE_LEN) if blob_key is not None else b""
+    if blob_key is not None:
+        encryptor = Cipher(algorithms.AES(blob_key), modes.GCM(nonce)).encryptor()
     out_dir = exports_dir(vault_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{job_id}.bin"
+    filename = f"{job_id}.{secrets.token_hex(8)}.bin"
     path = _artifact_path(vault_dir, filename)
-    gz_tmp = out_dir / f"{job_id}.gz.tmp"
-    bin_tmp = out_dir / f"{job_id}.bin.tmp"
+    temp_path: Path | None = None
     try:
-        # 1. Stream JSONL → gzip directly to a temp file (no full RAM copy).
-        with gzip.open(gz_tmp, "wb", compresslevel=6) as gz:
-            for line in _iter_export(vault_dir, include_blobs=include_blobs):
-                gz.write(line.encode("utf-8"))
-        gz_size = gz_tmp.stat().st_size
+        # NamedTemporaryFile uses O_EXCL and mode 0600, even with permissive umask.
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=out_dir, prefix=f".{job_id}.", suffix=".tmp", delete=False
+        ) as output:
+            temp_path = Path(output.name)
+            if encryptor is not None:
+                output.write(_BLOB_MAGIC + nonce)
+            compressor = zlib.compressobj(level=6, wbits=31)  # gzip wrapper
+            gz_size = 0
 
-        # 2. Encrypt one-pass, freeing each buffer as soon as it's consumed.
-        blob_key = _blob_key_or_none()
-        gz_bytes = gz_tmp.read_bytes()
-        on_disk = encrypt_blob(gz_bytes, blob_key) if blob_key is not None else gz_bytes
-        del gz_bytes
-        bin_tmp.write_bytes(on_disk)
-        del on_disk
-        bin_tmp.replace(path)
+            def write_compressed(chunk: bytes) -> None:
+                nonlocal gz_size
+                gz_size += len(chunk)
+                output.write(encryptor.update(chunk) if encryptor is not None else chunk)
+
+            with contextlib.closing(
+                _iter_export(vault_dir, include_blobs=include_blobs)
+            ) as records:
+                for line in records:
+                    write_compressed(compressor.compress(line.encode("utf-8")))
+            write_compressed(compressor.flush())
+            if encryptor is not None:
+                output.write(encryptor.finalize())
+                output.write(encryptor.tag)
+            output.flush()
+            os.fsync(output.fileno())
+        # Same directory => atomic publication; no final name ever exposes an
+        # incomplete gzip or an unauthenticated encryption envelope.
+        temp_path.replace(path)
+        directory_fd = os.open(out_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         return filename, gz_size
     except BaseException:
-        bin_tmp.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        # This attempt's unique final is safe to remove; a previous successful
+        # attempt is left intact. A process crash leaves ciphertext only.
         path.unlink(missing_ok=True)
         raise
-    finally:
-        gz_tmp.unlink(missing_ok=True)
 
 
 def read_artifact(vault_dir: Path, filename: str) -> bytes:
@@ -125,6 +159,9 @@ def run_job(settings: Settings, job_id: str, *, include_blobs: bool, download_to
     vault_dir = Path(settings.vault_dir)
     conn = open_db(vault_dir)
     try:
+        job = export_jobs.job_by_id(conn, job_id)
+        if job is None or job.status != "pending":
+            return  # An already-ready retry must preserve its published artifact.
         filename, size = generate_artifact(vault_dir, job_id, include_blobs=include_blobs)
         touched = export_jobs.mark_ready(conn, job_id, artifact_filename=filename, size_bytes=size)
         if touched == 0:
@@ -267,14 +304,19 @@ def _reconcile_orphans(vault_dir: Path, conn: sqlite3.Connection) -> int:
             continue
         name = entry.name
         if name.endswith(".bin"):
-            job = export_jobs.job_by_id(conn, name[: -len(".bin")])
+            # New attempts use job_id.random.bin; legacy job_id.bin remains readable.
+            job = export_jobs.job_by_id(conn, name[: -len(".bin")].split(".", 1)[0])
             # Only remove a .bin that is genuinely dead. A 'pending' job's
             # .bin can exist transiently — generate_artifact writes the file
             # BEFORE mark_ready commits — so unlinking on 'pending' would race
             # a live generate and delete a good artifact. Stale-pending jobs
             # are flipped to 'failed' in step 2 above, so they're caught on a
             # later pass (or this one, after the flip).
-            if job is None or job.status in ("failed", "expired"):
+            if (
+                job is None
+                or job.status in ("failed", "expired")
+                or (job.status == "ready" and job.artifact_filename != name)
+            ):
                 _safe_unlink(vault_dir, name)
                 removed += 1
         elif name.endswith(".tmp"):

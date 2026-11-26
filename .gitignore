@@ -50,6 +50,8 @@ coverage.xml
 .env.local
 .env.*.local
 *.backup
+.env.secrets.backup.prod
+.env.secrets.backup.prod.*
 *.pem
 *.key
 
