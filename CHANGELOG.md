@@ -10,6 +10,18 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.29](https://github.com/afairai/afair/compare/v0.1.28...v0.1.29) (2026-11-26)
+
+
+### Features
+
+* bound background spending, prioritize recall and make review explicit ([#92](https://github.com/afairai/afair/issues/92)) ([57bfeec](https://github.com/afairai/afair/commit/57bfeece487bc53fda0ce9f2b9e345f5c8f5b355))
+
+
+### Bug Fixes
+
+* handle concurrent WAL initialization during vault startup ([#94](https://github.com/afairai/afair/issues/94)) ([c5e2443](https://github.com/afairai/afair/commit/c5e244341bbcc374558beb2ecfba050defab02b0))
+
 ## [0.1.28](https://github.com/afairai/afair/compare/v0.1.27...v0.1.28) (2026-08-17)
 
 
