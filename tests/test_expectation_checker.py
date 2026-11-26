@@ -333,3 +333,269 @@ def test_timeline_orders_stages(db: sqlite3.Connection) -> None:
     # ~30s between each backdated stage.
     assert tl[1]["seconds_since_previous"] == pytest.approx(30, abs=2)
     assert tl[2]["seconds_since_previous"] == pytest.approx(30, abs=2)
+
+
+def _untraced_interpretation(
+    conn: sqlite3.Connection,
+    event: Event,
+    extraction: dict[str, Any],
+    *,
+    producer: str = PRODUCED_BY,
+) -> None:
+    from afair.agents.interpretation import write_interpretation
+
+    write_interpretation(
+        conn,
+        event=event,
+        version=EXTRACTOR_SCHEMA_VERSION,
+        produced_by=producer,
+        extraction=extraction,
+    )
+
+
+def test_successful_durable_interpretation_closes_missing_terminal_telemetry(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic completed source")
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EVENT_WRITTEN,
+        recorded_at=_iso_ago(hours=2),
+    )
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "Synthetic summary", "best_guess_kind": "fact"}
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    before_events = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    before_telemetry = db.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0]
+    stats = _run(db, settings_local)
+    assert stats["stuck_extractions"] == 0
+    assert stats["expectation_violations"] == 0
+    assert stats["oldest_stuck_age_seconds"] is None
+    assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before_events
+    assert db.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == before_telemetry
+
+
+def test_complete_legacy_interpretation_closes_missing_telemetry(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic legacy source")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(db, event, {"summary": "Legacy summary", "best_guess_kind": "fact"})
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"status": "failed"},
+        {"status": "fallback"},
+        {"status": "degraded"},
+        {"status": None},
+        {"status": "success", "pdf_no_text_layer": True},
+        {"status": "success", "degraded": True},
+        {"status": "success", "fallback": True},
+        {"status": "success", "fallback_used": True},
+    ],
+)
+def test_failed_unknown_and_degraded_results_stay_visible(
+    db: sqlite3.Connection, settings_local: Settings, extra: dict[str, Any]
+) -> None:
+    event = _write_event(db, "Synthetic incomplete source")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db, event, {"summary": "Synthetic summary", "best_guess_kind": "fact", **extra}
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_binder_success_is_not_authoritative_extraction(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic bound source")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db,
+        event,
+        {"status": "success", "summary": "Summary", "best_guess_kind": "fact"},
+        producer="binder:v0",
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_incomplete_success_marker_does_not_hide_missing_extraction(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic malformed result")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(db, event, {"status": "success"})
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_new_degraded_result_is_not_hidden_by_an_older_success(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic latest-state check")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "First", "best_guess_kind": "fact"}
+    )
+    _untraced_interpretation(
+        db,
+        event,
+        {"status": "degraded", "summary": "Second", "best_guess_kind": "fact"},
+        producer=PRODUCED_BY + "#later",
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_interpretation_for_a_different_content_hash_cannot_close_the_event(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic original event")
+    other = _write_event(db, "Synthetic unrelated event")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db,
+        event.model_copy(update={"content_hash": other.content_hash}),
+        {"status": "success", "summary": "Unrelated", "best_guess_kind": "fact"},
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_success_interpretation_without_post_fts_evidence_remains_stuck(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic crash before FTS enrichment")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "Summary", "best_guess_kind": "fact"}
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_prior_embedding_evidence_does_not_close_a_new_incomplete_result(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic stale postprocess trace")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=_iso_ago(hours=1),
+    )
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "Summary", "best_guess_kind": "fact"}
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_failed_operational_job_prevents_reconciliation_despite_embedding_trace(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic post-embedding operational error")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "Summary", "best_guess_kind": "fact"}
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_STORED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    with db:
+        db.execute(
+            "INSERT INTO extraction_jobs(event_id,failures,last_error_type) VALUES(?,1,'RuntimeError')",
+            (event.id,),
+        )
+    assert _run(db, settings_local)["stuck_extractions"] == 1
+
+
+def test_embedding_failure_preserves_fts_completion_evidence_without_hiding_its_trace(
+    db: sqlite3.Connection, settings_local: Settings
+) -> None:
+    event = _write_event(db, "Synthetic nonfatal vector fallback")
+    _insert_pe(db, event_id=event.id, stage=pe.STAGE_EVENT_WRITTEN, recorded_at=_iso_ago(hours=2))
+    _untraced_interpretation(
+        db, event, {"status": "success", "summary": "Summary", "best_guess_kind": "fact"}
+    )
+    _insert_pe(
+        db,
+        event_id=event.id,
+        event_hash=event.content_hash,
+        stage=pe.STAGE_EMBEDDING_FAILED,
+        status=pe.STATUS_FAILED,
+        producer="embedding:synthetic",
+        recorded_at=datetime.now(UTC).isoformat(),
+    )
+    assert _run(db, settings_local)["stuck_extractions"] == 0
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM pipeline_events WHERE stage=? AND status=?",
+            (pe.STAGE_EMBEDDING_FAILED, pe.STATUS_FAILED),
+        ).fetchone()[0]
+        == 1
+    )
