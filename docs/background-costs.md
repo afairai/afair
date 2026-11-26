@@ -128,3 +128,9 @@ to keyword retrieval. Recovery queued 500 events; the oldest pending age was
 3,608 seconds (seed age was one hour). Peak process RSS was 180.1 MiB, sampled
 disk use 25.3 MiB and WAL size 11.5 MiB. Production latency, provider timing
 and network transport are outside this local process benchmark.
+
+Maintenance embedding backfills, model switches and server warmup also record
+remote calls. On a ledger outage, self-hosted installations with no configured
+spending guard can still embed. The log records `usage.embedding_unaccounted`,
+and those outage calls require provider-side reconciliation. A configured
+spending guard defers the call before provider I/O.

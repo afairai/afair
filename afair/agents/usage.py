@@ -151,19 +151,30 @@ def provider_completion(*, _operation: str = "completion", **kwargs: Any) -> Any
         raise BackgroundBudgetExceeded(f"no safe cost bound for {model}")
     now = datetime.now(UTC)
     ident = uuid4().hex
+    kwargs["num_retries"] = 0
+    kwargs["max_retries"] = 0
+
+    def ledger_unavailable(exc: Exception, message: str) -> Any:
+        # Remote embeddings predate accounting. Self-hosters with no configured
+        # budget retain availability. A configured spending guard always defers.
+        if _operation == "embedding" and settings.background_daily_budget_usd is None:
+            structlog.get_logger(__name__).warning(
+                "usage.embedding_unaccounted", failure_class=type(exc).__name__
+            )
+            return request(**kwargs)
+        raise BackgroundBudgetExceeded(message) from exc
+
     try:
         conn = _connection(settings)
     except Exception as exc:
-        raise BackgroundBudgetExceeded("provider usage ledger unavailable") from exc
+        return ledger_unavailable(exc, "provider usage ledger unavailable")
     try:
         try:
             _reserve(conn, settings, cap, reserve, now, ident, worker, model, _operation)
         except BackgroundBudgetExceeded:
             raise
         except Exception as exc:
-            raise BackgroundBudgetExceeded("provider usage reservation unavailable") from exc
-        kwargs["num_retries"] = 0
-        kwargs["max_retries"] = 0
+            return ledger_unavailable(exc, "provider usage reservation unavailable")
         try:
             response = request(**kwargs)
         except BaseException as exc:

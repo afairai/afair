@@ -37,6 +37,7 @@ from .agents.binder import find_and_record_links
 from .agents.embedding import EmbeddingError, embed_text, serialize_vector
 from .agents.extractor import _embedding_text_for_event, extract_sync
 from .agents.interpretation import read_latest_interpretation
+from .agents.usage import background_usage
 from .mcp.context import ServerContext, clear_context, set_context
 from .settings import Settings, load_settings
 from .substrate import iter_events, open_db
@@ -112,7 +113,8 @@ def backfill_vectors_and_links(*, dry_run: bool = False) -> dict[str, int]:
         text = _embedding_text_for_event(event, extraction)
 
         try:
-            vec = embed_text(model=settings.embedding_model, text=text, api_key=api_key)
+            with background_usage(settings, "operator.backfill_vectors"):
+                vec = embed_text(model=settings.embedding_model, text=text, api_key=api_key)
         except EmbeddingError as e:
             log.warning("backfill.embedding_failed", event_id=event.id, error=str(e))
             stats["embeddings_failed"] += 1
@@ -362,7 +364,8 @@ def switch_embedding_model(
         text = _embedding_text_for_event(event, extraction)
 
         try:
-            vec = embed_text(model=new_model, text=text, api_key=new_api_key)
+            with background_usage(settings, "operator.switch_embedding_model"):
+                vec = embed_text(model=new_model, text=text, api_key=new_api_key)
         except EmbeddingError as e:
             log.warning("switch_embedding.embed_failed", event_id=event.id, error=str(e))
             stats["events_failed"] += 1  # type: ignore[operator]

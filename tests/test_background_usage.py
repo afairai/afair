@@ -443,3 +443,53 @@ def test_pre_operation_ledger_reports_readonly_and_upgrades_on_use(tmp_path):
     ):
         provider_completion(model="test/model")
     assert usage_summary(config)["workers"][0]["operation"] == "completion"
+
+
+@pytest.mark.parametrize("cap,expected_calls", [(None, 1), (1.0, 0)])
+def test_embedding_ledger_outage_preserves_configured_spending_policy(
+    tmp_path, cap, expected_calls
+):
+    with (
+        patch("afair.agents.usage._connection", side_effect=OSError("private")),
+        patch("litellm.embedding", return_value={"data": []}) as provider,
+        background_usage(settings(tmp_path, cap), "recall"),
+    ):
+        if cap is None:
+            provider_completion(_operation="embedding", model="test/model", input=["sample"])
+        else:
+            with pytest.raises(BackgroundBudgetExceeded):
+                provider_completion(_operation="embedding", model="test/model", input=["sample"])
+    assert provider.call_count == expected_calls
+
+
+@pytest.mark.parametrize(
+    "switch,worker",
+    [(False, "operator.backfill_vectors"), (True, "operator.switch_embedding_model")],
+)
+def test_admin_embedding_costs_include_each_source(tmp_path, switch, worker):
+    from types import SimpleNamespace
+
+    from afair import admin
+    from afair.agents.usage import usage_summary
+    from afair.substrate import open_db, write_event
+
+    config = settings(tmp_path).model_copy(
+        update={"embedding_dim": 3, "embedding_model": "test/model"}
+    )
+    conn = open_db(tmp_path, embedding_dim=3)
+    for idx in range(2):
+        write_event(
+            conn, origin="test", kind="remember", payload={"text": str(idx), "content_type": "text"}
+        )
+    conn.close()
+    reply = SimpleNamespace(usage={"prompt_tokens": 4}, data=[{"embedding": [1.0, 0.5, 0.0]}])
+    with (
+        patch.object(admin, "load_settings", return_value=config),
+        patch("litellm.embedding", return_value=reply),
+    ):
+        if switch:
+            admin.switch_embedding_model(new_model="test/model-2", new_dim=3)
+        else:
+            admin.backfill_vectors_and_links()
+    (row,) = usage_summary(config)["workers"]
+    assert (row["worker"], row["operation"], row["attempts"]) == (worker, "embedding", 2)
