@@ -4,11 +4,12 @@ failures visible (Phase 0.5 observability).
 The extraction lifecycle already records every stage into
 ``pipeline_events`` (event.written → extraction.enqueued → …started →
 …completed/…failed). What nothing yet does is *notice* when an event
-enters that pipeline and never reaches a terminal stage. That is the
+enters that pipeline and never reaches a terminal stage or a complete durable
+extractor result. That is the
 exact failure class Phase 0.5 targets: an ``event.written`` whose
 extraction was enqueued but silently dropped — a swallowed executor
 death, a rejected write, a process restart mid-flight — leaves no
-terminal stage and no error row, so it is invisible to both the
+terminal stage and no usable interpretation, so it is invisible to both the
 extraction-retry worker (which keys off failed *interpretations*, not
 missing ones) and to logs.
 
@@ -36,7 +37,8 @@ What it deliberately does NOT do:
 
 Invariant fit: I2 (append-only — pure SELECTs plus one INSERT to an
 append-only table), I3 (new read-side views over the unchanged
-``pipeline_events`` / ``interpretations`` substrate; no migration).
+``pipeline_events``, ``interpretations``, ``events`` and operational
+``extraction_jobs`` tables; no migration).
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ log = structlog.get_logger(__name__)
 
 EXTRACTION_GRACE_SECONDS = 1800
 """An ``event.written`` older than this with no terminal extraction stage
-is counted as *stuck* (a genuine silent drop). Younger open events are
+or authoritative complete extractor result is counted as *stuck* (a genuine silent drop). Younger open events are
 merely *pending* — extraction is synchronous and fast, so 30 minutes is
 generous headroom over the warm path plus one hourly retry cycle."""
 
@@ -100,6 +102,44 @@ open_events AS (
         SELECT 1 FROM pipeline_events t
         WHERE t.event_id = w.event_id
           AND t.stage IN (:stage_completed, :stage_failed)
+    )
+      AND NOT EXISTS (
+        -- Telemetry is best-effort. The matching durable, complete extractor
+        -- result is authoritative even if its terminal trace was lost. Use
+        -- latest state so an older success cannot hide a newer degraded result.
+        SELECT 1 FROM events e JOIN interpretations i
+          ON i.event_id = e.id AND i.event_hash = e.content_hash
+        WHERE e.id = w.event_id
+          AND i.produced_by LIKE 'extractor:%'
+          AND i.id = (
+            SELECT latest.id FROM interpretations latest
+            WHERE latest.event_id = e.id AND latest.event_hash = e.content_hash
+              AND latest.produced_by LIKE 'extractor:%'
+            ORDER BY latest.produced_at DESC, latest.version DESC, latest.id DESC
+            LIMIT 1
+          )
+          AND (json_extract(i.extraction, '$.status') = 'success'
+               OR json_type(i.extraction, '$.status') IS NULL)
+          AND json_type(i.extraction, '$.summary') = 'text'
+          AND json_type(i.extraction, '$.best_guess_kind') = 'text'
+          AND COALESCE(json_extract(i.extraction, '$.pdf_no_text_layer'), 0) = 0
+          AND COALESCE(json_extract(i.extraction, '$.degraded'), 0) = 0
+          AND COALESCE(json_extract(i.extraction, '$.fallback'), 0) = 0
+          AND COALESCE(json_extract(i.extraction, '$.fallback_used'), 0) = 0
+          -- These stages are emitted only after FTS enrichment and after the
+          -- completed-trace call. Interpretation alone can precede a crash.
+          AND EXISTS (
+            SELECT 1 FROM pipeline_events progressed
+            WHERE progressed.event_id = e.id AND progressed.event_hash = e.content_hash
+              AND progressed.stage IN ('embedding.stored', 'embedding.failed')
+              AND progressed.producer LIKE 'embedding:%'
+              AND progressed.recorded_at >= i.produced_at
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM extraction_jobs j
+            WHERE j.event_id = e.id
+              AND (j.failures > 0 OR j.terminal = 1 OR j.last_error_type IS NOT NULL)
+          )
     )
 )
 """
