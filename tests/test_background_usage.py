@@ -408,3 +408,88 @@ def test_failed_unpriced_attempt_stays_unknown_when_cap_enabled_later(tmp_path):
         with pytest.raises(BackgroundBudgetExceeded, match="unpriced"):
             provider_completion(model="test/model", messages=[])
         call.assert_not_called()
+
+
+def test_scoped_embedding_accounted_separately_and_allowed_under_zero_cap(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    config = settings(tmp_path, 0.0)
+    reply = {"usage": {"prompt_tokens": 6}, "data": [{"embedding": [0.5]}]}
+    with patch("litellm.embedding", return_value=reply), background_usage(config, "recall"):
+        assert (
+            provider_completion(_operation="embedding", model="test/model", input=["private"])
+            == reply
+        )
+    (row,) = usage_summary(config)["workers"]
+    assert (row["operation"], row["worker"], row["prompt_tokens"]) == ("embedding", "recall", 6)
+    assert row["settled_estimated_usd"] == pytest.approx(6e-6)
+
+
+def test_pre_operation_ledger_reports_readonly_and_upgrades_on_use(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    config = settings(tmp_path)
+    conn = _connection(config)
+    for name in ("operation", "cache_read_tokens", "cache_write_tokens"):
+        conn.execute(f"ALTER TABLE provider_usage DROP COLUMN {name}")
+    conn.close()
+    assert usage_summary(config)["workers"] == []
+    with (
+        patch(
+            "litellm.completion",
+            return_value={"usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+        ),
+        background_usage(config, "worker"),
+    ):
+        provider_completion(model="test/model")
+    assert usage_summary(config)["workers"][0]["operation"] == "completion"
+
+
+@pytest.mark.parametrize("cap,expected_calls", [(None, 1), (1.0, 0)])
+def test_embedding_ledger_outage_preserves_configured_spending_policy(
+    tmp_path, cap, expected_calls
+):
+    with (
+        patch("afair.agents.usage._connection", side_effect=OSError("private")),
+        patch("litellm.embedding", return_value={"data": []}) as provider,
+        background_usage(settings(tmp_path, cap), "recall"),
+    ):
+        if cap is None:
+            provider_completion(_operation="embedding", model="test/model", input=["sample"])
+        else:
+            with pytest.raises(BackgroundBudgetExceeded):
+                provider_completion(_operation="embedding", model="test/model", input=["sample"])
+    assert provider.call_count == expected_calls
+
+
+@pytest.mark.parametrize(
+    "switch,worker",
+    [(False, "operator.backfill_vectors"), (True, "operator.switch_embedding_model")],
+)
+def test_admin_embedding_costs_include_each_source(tmp_path, switch, worker):
+    from types import SimpleNamespace
+
+    from afair import admin
+    from afair.agents.usage import usage_summary
+    from afair.substrate import open_db, write_event
+
+    config = settings(tmp_path).model_copy(
+        update={"embedding_dim": 3, "embedding_model": "test/model"}
+    )
+    conn = open_db(tmp_path, embedding_dim=3)
+    for idx in range(2):
+        write_event(
+            conn, origin="test", kind="remember", payload={"text": str(idx), "content_type": "text"}
+        )
+    conn.close()
+    reply = SimpleNamespace(usage={"prompt_tokens": 4}, data=[{"embedding": [1.0, 0.5, 0.0]}])
+    with (
+        patch.object(admin, "load_settings", return_value=config),
+        patch("litellm.embedding", return_value=reply),
+    ):
+        if switch:
+            admin.switch_embedding_model(new_model="test/model-2", new_dim=3)
+        else:
+            admin.backfill_vectors_and_links()
+    (row,) = usage_summary(config)["workers"]
+    assert (row["worker"], row["operation"], row["attempts"]) == (worker, "embedding", 2)
