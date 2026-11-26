@@ -216,13 +216,16 @@ def test_novel_kind_squashed_into_existing_entity_kind(
         text="Read about GraphRAG today",
         entities=[{"name": "GraphRAG", "type": "concept"}],
     )
+    # Establish the existing concept before the new mention arrives. ULIDs
+    # created in one millisecond need not sort in insertion order.
+    assert EntityCanonicalizer().run(db, settings)["entities_created"] == 1
     h2 = _write_event_with_extraction(
         db,
         text="GraphRAG is a paper worth citing",
         entities=[{"name": "GraphRAG", "type": "research_paper"}],
     )
     stats = EntityCanonicalizer().run(db, settings)
-    assert stats["entities_created"] == 1
+    assert stats["entities_created"] == 0
     assert stats["entities_matched_exact"] == 1
     assert stats["kind_observations"] == 1
 
