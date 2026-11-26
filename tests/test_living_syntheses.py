@@ -614,3 +614,238 @@ def test_b3_steering_carries_forward_through_run(conn, monkeypatch) -> None:
     # No steering this cycle: system is the plain prompt, user has no steering block.
     assert captured["system"] == ls.system_prompt()
     assert "marked the following prior claims WRONG" not in captured["user"]
+
+
+def test_routine_observations_do_not_refresh_synthesis(conn, monkeypatch):
+    counter = {}
+    for index in range(3):
+        source = _event(conn, f"Atlas note {index}")
+        _mention(conn, source, "Atlas")
+    _stub_llm(monkeypatch, counter=counter)
+    ls.LivingSynthesisWorker().run(conn, Settings())
+    routine = write_event(
+        conn,
+        origin="agent",
+        kind="observe",
+        payload={
+            "action": "read",
+            "subject": "Atlas",
+            "result": "ok",
+        },
+    )
+    _mention(conn, routine, "Atlas")
+    second = ls.LivingSynthesisWorker().run(conn, Settings())
+    assert counter["calls"] == 1
+    assert second["skipped_unchanged"] == 1
+    assert conn.execute("SELECT 1 FROM events WHERE id = ?", (routine.id,)).fetchone()
+
+
+def test_repeated_observations_defer_but_small_factual_correction_refreshes(conn, monkeypatch):
+    counter = {}
+    for index in range(2):
+        source = _event(conn, f"Atlas note {index}")
+        _mention(conn, source, "Atlas")
+
+    def observation(result, timestamp):
+        source = write_event(
+            conn,
+            origin="agent",
+            kind="observe",
+            payload={
+                "action": "check",
+                "subject": "Atlas",
+                "result": result,
+                "timestamp": timestamp,
+            },
+        )
+        _mention(conn, source, "Atlas")
+        return source
+
+    observation("Budget is 150", "one")
+    _stub_llm(monkeypatch, counter=counter)
+    ls.LivingSynthesisWorker().run(conn, Settings())
+    observation("Budget is 150", "two")
+    assert ls.LivingSynthesisWorker().run(conn, Settings())["skipped_unchanged"] == 1
+    assert counter["calls"] == 1
+    observation("Budget is 151", "three")
+    assert ls.LivingSynthesisWorker().run(conn, Settings())["written"] == 1
+    assert counter["calls"] == 2
+
+
+def test_reversion_to_historical_value_is_material(conn, monkeypatch):
+    counter = {}
+    for index in range(2):
+        source = _event(conn, f"Atlas note {index}")
+        _mention(conn, source, "Atlas")
+    _stub_llm(monkeypatch, counter=counter)
+    for index, budget in enumerate([150, 151, 150]):
+        source = write_event(
+            conn,
+            origin="agent",
+            kind="observe",
+            payload={
+                "action": "check",
+                "subject": "Atlas budget",
+                "result": f"Budget is {budget}",
+                "timestamp": str(index),
+            },
+        )
+        _mention(conn, source, "Atlas")
+        assert ls.LivingSynthesisWorker().run(conn, Settings())["written"] == 1
+    assert counter["calls"] == 3
+    assert len(_syntheses(conn)) == 3
+
+
+@pytest.mark.parametrize("routine", [True, False])
+def test_noise_is_filtered_before_source_window_limit(conn, monkeypatch, routine):
+    monkeypatch.setattr(ls, "MAX_SOURCE_EVENTS", 3)
+    sources = [_event(conn, f"Atlas note {index}") for index in range(2)]
+    observation = write_event(
+        conn,
+        origin="agent",
+        kind="observe",
+        payload={
+            "action": "check",
+            "subject": "Atlas budget",
+            "result": "Budget is 150",
+            "timestamp": "first",
+        },
+    )
+    sources.append(observation)
+    for source in sources:
+        _mention(conn, source, "Atlas")
+    for index in range(12):
+        source = write_event(
+            conn,
+            origin="agent",
+            kind="observe",
+            payload={
+                "action": "check",
+                "subject": "Atlas budget",
+                "result": None if routine else "Budget is 150",
+                "timestamp": str(index),
+            },
+        )
+        _mention(conn, source, "Atlas")
+    eligible = ls._eligible_events(conn)
+    assert set(eligible) == {source.content_hash for source in sources}
+    _stub_llm(monkeypatch)
+    assert ls.LivingSynthesisWorker().run(conn, Settings())["written"] == 1
+
+
+def test_duplicate_observations_cannot_rotate_synthesis_source_cap(conn, monkeypatch):
+    monkeypatch.setattr(ls, "MAX_CLUSTER_EVENTS", 3)
+    counter = {}
+    sources = [_event(conn, f"Atlas note {index}") for index in range(2)]
+    for source in sources:
+        _mention(conn, source, "Atlas")
+    _stub_llm(monkeypatch, counter=counter)
+    for index in range(7):
+        source = write_event(
+            conn,
+            origin="agent",
+            kind="observe",
+            payload={
+                "action": "check",
+                "subject": "Atlas budget",
+                "result": "Budget is 150",
+                "timestamp": str(index),
+            },
+        )
+        _mention(conn, source, "Atlas")
+        stats = ls.LivingSynthesisWorker().run(conn, Settings())
+        assert stats["written"] == (1 if index == 0 else 0)
+    assert counter["calls"] == 1
+    assert len(_syntheses(conn)) == 1
+
+
+def test_legacy_routine_only_synthesis_is_retired_without_llm(conn, monkeypatch):
+    sources = [
+        write_event(
+            conn,
+            origin="agent",
+            kind="observe",
+            payload={
+                "action": "read",
+                "subject": f"Atlas file {index}",
+                "result": None,
+            },
+        )
+        for index in range(3)
+    ]
+    prior = write_event(
+        conn,
+        origin="agent",
+        kind=ls.LIVING_SYNTHESIS_KIND,
+        payload={
+            "cluster_id": "cluster:legacy",
+            "member_hashes": [s.content_hash for s in sources],
+            "entity_ids": [],
+            "text": "Routine-only historical synthesis",
+        },
+    )
+
+    def unexpected(**kwargs):
+        raise AssertionError("Routine-only retirement must not invoke an LLM")
+
+    monkeypatch.setattr(ls, "call_tool", unexpected)
+    stats = ls.LivingSynthesisWorker().run(conn, Settings())
+    assert stats["retired"] == 1
+    assert stats["written"] == 0
+    assert conn.execute(
+        "SELECT 1 FROM events WHERE content_hash = ?", (prior.content_hash,)
+    ).fetchone()
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'observe'").fetchone()[0] == 3
+    assert ls._live_priors(conn) == []
+
+
+def test_bounded_indexed_discovery_on_noisy_19000_event_vault(conn, monkeypatch):
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    sources = [_event(conn, f"Atlas source {index}") for index in range(3)]
+    base = datetime(2027, 1, 1, tzinfo=UTC)
+    rows = [
+        (
+            f"synthetic_{index:08}",
+            hashlib.sha256(str(index).encode()).hexdigest(),
+            (base + timedelta(seconds=index)).isoformat(),
+            "agent",
+            "observe",
+            json.dumps({"action": "read", "subject": f"Atlas file {index}", "result": None}),
+            1,
+        )
+        for index in range(19000)
+    ]
+    with conn:
+        conn.executemany(
+            """INSERT INTO events
+            (id, content_hash, created_at, origin, kind, payload, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+    plan = " ".join(
+        row["detail"]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN " + ls._SOURCE_SELECTION_SQL,
+            ("observe", ls.MAX_OBSERVATION_SCAN),
+        )
+    )
+    assert "events_kind_created_at_idx" in plan
+    assert "events_invalidate_target_idx" in plan
+    assert "TEMP B-TREE" not in plan
+    # Measure actual event materialization, not just the plan's LIMIT clause.
+    from afair.substrate import events as events_module
+
+    real = events_module.row_to_event
+    reads = 0
+
+    def counted(row):
+        nonlocal reads
+        reads += 1
+        return real(row)
+
+    monkeypatch.setattr(events_module, "row_to_event", counted)
+    eligible = ls._eligible_events(conn)
+    assert set(eligible) == {source.content_hash for source in sources}
+    assert reads <= ls.MAX_OBSERVATION_SCAN + len(sources)

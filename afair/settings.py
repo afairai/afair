@@ -135,6 +135,33 @@ class Settings(BaseSettings):
     # Format: "<provider>/<model>" — any litellm-supported model.
     extractor_model: str = "anthropic/claude-haiku-4-5"
 
+    # Opt-in USD ceiling: unset preserves self-hosted/local-model behavior.
+    background_daily_budget_usd: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias=AliasChoices(
+            "background_daily_budget_usd", "AFAIR_BACKGROUND_DAILY_BUDGET_USD"
+        ),
+    )
+    # USD per million input/output tokens. Haiku 5.5 high-context rates are
+    # conservative for all contexts; reservations additionally cover cache writes.
+    background_model_prices: dict[str, tuple[float, float]] = Field(
+        default={"anthropic/claude-haiku-5-5": (0.50, 2.50)},
+        validation_alias=AliasChoices("background_model_prices", "AFAIR_BACKGROUND_MODEL_PRICES"),
+    )
+
+    @field_validator("background_model_prices")
+    @classmethod
+    def _valid_background_prices(
+        cls, value: dict[str, tuple[float, float]]
+    ) -> dict[str, tuple[float, float]]:
+        import math
+
+        if any(not math.isfinite(rate) or rate < 0 for pair in value.values() for rate in pair):
+            raise ValueError("background model prices must be finite and nonnegative")
+        return {"anthropic/claude-haiku-5-5": (0.50, 2.50), **value}
+
     # Vision model for image extraction — must be vision-capable.
     # Defaults to Haiku 4.5 (cheap, fast, has vision); upgrade to a
     # Sonnet tier when image understanding requirements grow.

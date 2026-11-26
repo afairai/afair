@@ -181,3 +181,147 @@ def test_worker_failure_rolls_back_open_transaction(
     while checker.seen is None and time.monotonic() < deadline:
         time.sleep(0.1)
     assert checker.seen == 0
+
+
+class _UncommittedWriter(ColdPathWorker):
+    """Writes on the shared connection and returns without committing."""
+
+    name = "uncommitted"
+    interval_seconds = 0
+
+    def run(self, conn: sqlite3.Connection, _settings: Settings) -> dict[str, Any]:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO oauth_codes (
+                code, client_id, redirect_uri, scope, code_challenge,
+                code_challenge_method, user_sub, user_email, expires_at, created_at
+            ) VALUES ('kept', 'c', 'u', NULL, 'ch', 'S256', 'u', NULL, '2999-01-01', '2999-01-01')
+            """
+        )
+        return {}
+
+
+class _ConcurrentWriterProbe(ColdPathWorker):
+    """Tries to take the writer lock from a separate connection, as an MCP
+    request thread would, without waiting."""
+
+    name = "probe"
+    interval_seconds = 0
+
+    def __init__(self, vault_dir: Path) -> None:
+        self._vault_dir = vault_dir
+        self.acquired: bool | None = None
+        self.saw_row: int | None = None
+
+    def run(self, _conn: sqlite3.Connection, _settings: Settings) -> dict[str, Any]:
+        import sqlite3 as sqlite
+
+        other = open_db(self._vault_dir)
+        try:
+            other.execute("PRAGMA busy_timeout = 0")
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+                self.acquired = True
+            except sqlite.OperationalError:
+                self.acquired = False
+            self.saw_row = other.execute(
+                "SELECT COUNT(*) FROM oauth_codes WHERE code = 'kept'"
+            ).fetchone()[0]
+        finally:
+            other.close()
+        return {}
+
+
+def test_successful_worker_open_transaction_is_committed(
+    tmp_path: Path, settings_local: Settings
+) -> None:
+    """A worker that returns with an uncommitted write must not keep the
+    writer lock into the next worker or the poll sleep. The scheduler commits
+    it, so another connection can write immediately and sees the row."""
+    probe = _ConcurrentWriterProbe(tmp_path)
+    open_db(tmp_path).close()
+    sched = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[_UncommittedWriter(), probe],
+        poll_seconds=1,
+    )
+    sched.start()
+    deadline = time.monotonic() + 3.0
+    while probe.acquired is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert probe.acquired is True
+    assert probe.saw_row == 1
+
+
+class _UncommittableWriter(_UncommittedWriter):
+    """Holds the writer lock with a pending write whose COMMIT will fail on a
+    deferred foreign-key violation."""
+
+    name = "uncommittable"
+
+    def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS fk_parent (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS fk_child ("
+            "pid INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED)"
+        )
+        super().run(conn, settings)
+        conn.execute("INSERT INTO fk_child (pid) VALUES (1)")
+        return {}
+
+
+def test_failed_commit_releases_lock_and_scheduler_keeps_running(
+    tmp_path: Path, settings_local: Settings
+) -> None:
+    """If committing a worker's leftover transaction fails, the scheduler
+    rolls back and keeps going. It must never die holding the writer lock."""
+    probe = _ConcurrentWriterProbe(tmp_path)
+    open_db(tmp_path).close()
+    sched = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[_UncommittableWriter(), probe],
+        poll_seconds=1,
+    )
+    sched.start()
+    deadline = time.monotonic() + 3.0
+    while probe.acquired is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert probe.acquired is True
+    assert probe.saw_row == 0
+
+
+class _BudgetDeferredWriter(_UncommittedWriter):
+    name = "budget_deferred"
+
+    def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+        from afair.agents.usage import BackgroundBudgetExceeded
+
+        super().run(conn, settings)
+        raise BackgroundBudgetExceeded("daily allowance exhausted")
+
+
+def test_budget_deferral_rolls_back_and_releases_writer(
+    tmp_path: Path, settings_local: Settings
+) -> None:
+    """A denied later provider call cannot pin a worker's earlier local write."""
+    probe = _ConcurrentWriterProbe(tmp_path)
+    open_db(tmp_path).close()
+    sched = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[_BudgetDeferredWriter(), probe],
+        poll_seconds=1,
+    )
+    sched.start()
+    deadline = time.monotonic() + 3.0
+    while probe.acquired is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert probe.acquired is True
+    assert probe.saw_row == 0
+    assert sched.status()["budget_deferred"]["seconds_since_last_success"] is None

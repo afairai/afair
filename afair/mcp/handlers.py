@@ -37,7 +37,8 @@ import binascii
 import re
 import sqlite3
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,7 @@ from ..agents.binder import get_linked_event_ids, get_linked_event_ids_batch
 from ..agents.conflict_resolver import flag_is_unresolved, read_conflicts_batch
 from ..agents.embedding import EmbeddingError, embed_query
 from ..agents.entity_articles import ENTITY_ARTICLE_KIND
+from ..agents.foreground import foreground_request
 from ..agents.interpretation import (
     read_latest_interpretations_batch,
     read_latest_salience_batch,
@@ -109,6 +111,7 @@ from ..substrate.temporal import read_event_temporal_batch, temporal_relevance
 from . import schemas
 from .auth import current_client
 from .context import connect_for_thread, get_context
+from .recall_timing import record_embedding_wait, timed_recall
 from .schemas import (
     MAX_DECIDE_BATCH,
     MAX_FEEDBACK_IDS_PER_CALL,
@@ -185,6 +188,10 @@ DEFAULT_PENDING_LIMIT = 20  # served pending-queue page when pending_limit is om
 # concurrent-recall pattern (Perf audit I2): 4 was too low and queued
 # the 5th+ concurrent recall behind an embedding network round-trip.
 _RECALL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="recall-parallel")
+# Bound both the user-visible wait and outstanding provider calls. Timed-out
+# calls may finish in the background but cannot accumulate an unbounded queue.
+SEMANTIC_WAIT_SECONDS = 2.0
+_RECALL_EMBEDDING_SLOTS = threading.BoundedSemaphore(8)
 
 
 class ContentTooLargeError(ValueError):
@@ -1400,7 +1407,8 @@ def _auto_route_depth(query: str) -> Depth:
 # one. Non-temporal queries are untouched — no ranking regression.
 _TEMPORAL_INTENT_RE = re.compile(
     r"\b(current|currently|latest|now|today|recent|recently|nowadays|present|"
-    r"these days|right now|as of)\b",
+    r"these days|right now|as of|aktuell(?:e[rmns]?)?|derzeit|momentan|jetzt|heute|"
+    r"neueste[rmns]?|zuletzt|gegenwärtig|zurzeit|inzwischen)\b",
     re.IGNORECASE,
 )
 
@@ -1659,6 +1667,8 @@ def _article_first_order(events: list[Event], invalidated: set[str] | None = Non
     return rest if any(event.kind in synthesis_kinds for event in events) else events
 
 
+@foreground_request
+@timed_recall
 def recall(
     query: str | None = None,
     scope: str | None = None,
@@ -1809,17 +1819,13 @@ def recall(
         else []
     )
 
-    # The cheap universal nudge: the TRUE open-queue total on every recall,
-    # so a client can prompt "you have N memories to review" without the
-    # operator ever calling stats=True. The heavy list stays gated above.
+    # Preserve the true totals for existing clients. These are passive metadata,
+    # not an instruction to interrupt the user with vault maintenance.
     _by_kind = count_pending_corrections_by_kind(db)
     _ontology_count = count_pending_ontology_proposals(db)
     _conflict_count = count_pending_conflict_proposals(db)
     pending_count = sum(_by_kind.values()) + _ontology_count + _conflict_count
-    # Same total, split by value class (Fix 3) so a client can value-rank the
-    # nudge instead of quoting the raw total. entity = retype/merge/merge_review
-    # (the human-judgment corrections); edge_reviews = the low-value, self-expiring
-    # relation reviews. Null when the queue is empty (nothing to nudge about).
+    # Same true total split by class for explicitly requested review.
     pending_counts = (
         PendingCounts(
             conflicts=_conflict_count,
@@ -1931,13 +1937,29 @@ def recall(
             depth_used = "shallow"
         else:
             api_key = _api_key_for_embedding(ctx)
-            emb_future = _RECALL_POOL.submit(
-                embed_query, model=ctx.embedding_model, text=query, api_key=api_key
-            )
+            emb_future = None
+            semantic_deadline = time.monotonic() + SEMANTIC_WAIT_SECONDS
+            slots = _RECALL_EMBEDDING_SLOTS
+            if slots.acquire(blocking=False):
+                try:
+                    emb_future = _RECALL_POOL.submit(
+                        embed_query, model=ctx.embedding_model, text=query, api_key=api_key
+                    )
+                except Exception:
+                    slots.release()
+                    raise
+                emb_future.add_done_callback(lambda _: slots.release())
             fts_hits = search_fts(db, query, limit=fetch_n)
+            wait_started = time.monotonic()
             try:
-                embedding = emb_future.result()
-            except EmbeddingError:
+                if emb_future is None:
+                    raise EmbeddingError("semantic recall capacity busy")
+                embedding = emb_future.result(timeout=max(0, semantic_deadline - time.monotonic()))
+                record_embedding_wait(time.monotonic() - wait_started)
+            except (EmbeddingError, TimeoutError):
+                record_embedding_wait(time.monotonic() - wait_started, fallback=True)
+                if emb_future is not None:
+                    emb_future.cancel()
                 events = (
                     rrf_merge(fts_hits, entity_hits, limit=fetch_n) if entity_hits else fts_hits
                 )

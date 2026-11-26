@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .usage import BackgroundBudgetExceeded, provider_completion
+
 
 class LLMError(Exception):
     """Base for any LLM-call failure that should be recorded as failed_extraction."""
@@ -73,8 +75,6 @@ def call_json(
     a ``failed_extraction`` row (option (b) from the design).
     """
     # Lazy import — litellm is heavy at import time.
-    import litellm
-
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -93,7 +93,9 @@ def call_json(
         kwargs["api_key"] = api_key
 
     try:
-        response = litellm.completion(**kwargs)
+        response = provider_completion(**kwargs)
+    except BackgroundBudgetExceeded:
+        raise
     except Exception as e:
         raise _classify(e) from e
 
@@ -133,8 +135,6 @@ def call_tool(
     (OpenAI's function-calling shape, transparently translated for
     Anthropic, Gemini, etc. by litellm).
     """
-    import litellm
-
     tools = [
         {
             "type": "function",
@@ -162,7 +162,9 @@ def call_tool(
         kwargs["api_key"] = api_key
 
     try:
-        response = litellm.completion(**kwargs)
+        response = provider_completion(**kwargs)
+    except BackgroundBudgetExceeded:
+        raise
     except Exception as e:
         raise _classify(e) from e
 

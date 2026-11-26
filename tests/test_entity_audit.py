@@ -11,10 +11,12 @@ And the worker that queues them into proposed_corrections idempotently.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import pytest
 
+from afair.agents import entity_audit
 from afair.agents.entity_audit import (
     EntityAuditWorker,
     detect_type_mismatch,
@@ -243,6 +245,27 @@ def test_worker_reviews_real_entity_merged_into_structural_name(
         "SELECT detail FROM proposed_corrections WHERE kind = 'merge_review'"
     ).fetchone()
     assert json.loads(row["detail"])["into_name"] == "operations.md"
+
+
+def test_worker_releases_writer_before_merge_scan(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _entity(db, "example.team", "person")
+    find_merges = entity_audit.find_cross_kind_auto_merges
+    with closing(open_db(settings.vault_dir)) as writer:
+        writer.execute("PRAGMA busy_timeout = 0")
+
+        def scan_with_concurrent_write(conn: sqlite3.Connection):
+            write_event(
+                writer,
+                origin="user",
+                kind="remember",
+                payload={"content_type": "text", "text": "Save during entity audit"},
+            )
+            return find_merges(conn)
+
+        monkeypatch.setattr(entity_audit, "find_cross_kind_auto_merges", scan_with_concurrent_write)
+        assert EntityAuditWorker().run(db, settings)["retype_proposals"] == 1
 
 
 def test_worker_still_retypes_domain_person(db: sqlite3.Connection, settings: Settings) -> None:
@@ -537,3 +560,33 @@ def test_decided_row_not_refiled_under_partial_index(
         ).fetchone()[0]
         == 1
     )
+
+
+def test_semantic_recheck_under_writer_lock_absorbs_racing_twin(
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlocked semantic check can go stale before the insert, for example
+    when a concurrent audit files the same question in between. Simulate that
+    by making the unlocked check always miss: the re-check under BEGIN
+    IMMEDIATE must still collapse the twin merges to one review."""
+    _from1, into = _auto_merge_across_kinds(
+        db, "Fable", "person", "product", by="entity_deduplicator:v0"
+    )
+    from2 = _entity(db, "Fable", "person", split_homonym=True)
+    write_entity_merge(
+        db,
+        from_entity_id=from2,
+        into_entity_id=into,
+        merged_by="entity_deduplicator:v0",
+        reason="t",
+        confidence=0.9,
+    )
+    real_exists = entity_audit._semantic_merge_review_exists
+
+    def stale_unless_locked(conn: sqlite3.Connection, **key: str) -> bool:
+        return conn.in_transaction and real_exists(conn, **key)
+
+    monkeypatch.setattr(entity_audit, "_semantic_merge_review_exists", stale_unless_locked)
+    stats = EntityAuditWorker().run(db, settings)
+    assert stats["merge_review_proposals"] == 1
+    assert stats["merge_review_deduped_semantic"] == 1

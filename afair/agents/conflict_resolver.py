@@ -33,6 +33,7 @@ from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_hash
 from .binder import BINDER_PRODUCED_BY
 from .cold_path import ColdPathWorker
+from .evidence_quality import should_compare_observations
 from .framing import PrincipalFraming, current
 from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
@@ -431,41 +432,71 @@ def _enumerate_candidate_pairs(
 ) -> list[tuple[Event, Event]]:
     """Walk binder:v0 interpretation rows; yield (anchor, linked) pairs.
 
-    The Bind agent's output is our pre-filter: only pairs already deemed
-    semantically similar reach the LLM. Skips pairs where either side
-    is an invalidation event (handled by its own semantics).
+    Binder links supply similarity, but two observations also need substantive
+    outcomes and a plausible shared reference. Skip invalidation events. Apply
+    the result bound after filtering so routine links cannot crowd out evidence.
     """
     rows = conn.execute(
         """
         SELECT event_hash, extraction FROM interpretations
         WHERE produced_by = ?
         ORDER BY produced_at DESC
-        LIMIT ?
         """,
-        (BINDER_PRODUCED_BY, max_pairs * 4),  # over-fetch; we filter below
-    ).fetchall()
+        (BINDER_PRODUCED_BY,),
+    )
 
     pairs: list[tuple[Event, Event]] = []
     seen_keys: set[tuple[str, str]] = set()
-    for row in rows:
-        anchor = read_event_by_hash(conn, row["event_hash"])
-        if anchor is None or anchor.kind == INVALIDATE_KIND:
-            continue
-        data = json.loads(row["extraction"])
-        for link in data.get("links", []):
-            link_hash = link.get("event_hash")
-            if not link_hash:
+    # Graph references are loaded once per bounded Binder page, never one extra
+    # query per event pair. Event reads below retain the existing indexed path.
+    while batch := rows.fetchmany(128):
+        decoded = [(row, json.loads(row["extraction"])) for row in batch]
+        hashes = {row["event_hash"] for row in batch}
+        hashes.update(
+            link["event_hash"]
+            for _, data in decoded
+            for link in data.get("links", [])
+            if isinstance(link.get("event_hash"), str)
+        )
+        entity_sets: dict[str, set[str]] = {}
+        # A Binder page can contain many links. Respect conservative SQLite
+        # variable limits while keeping graph reads batched.
+        hash_list = sorted(hashes)
+        for offset in range(0, len(hash_list), 400):
+            chunk = hash_list[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            for mention in conn.execute(
+                f"SELECT event_hash, entity_id FROM entity_mentions "
+                f"WHERE event_hash IN ({placeholders}) "
+                "AND entity_id NOT IN (SELECT entity_id FROM entity_retractions)",
+                chunk,
+            ):
+                entity_sets.setdefault(mention["event_hash"], set()).add(mention["entity_id"])
+        for row, data in decoded:
+            anchor = read_event_by_hash(conn, row["event_hash"])
+            if anchor is None or anchor.kind == INVALIDATE_KIND:
                 continue
-            key = tuple(sorted([anchor.content_hash, link_hash]))
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            linked = read_event_by_hash(conn, link_hash)
-            if linked is None or linked.kind == INVALIDATE_KIND:
-                continue
-            pairs.append((anchor, linked))
-            if len(pairs) >= max_pairs:
-                return pairs
+            for link in data.get("links", []):
+                link_hash = link.get("event_hash")
+                if not isinstance(link_hash, str) or not link_hash:
+                    continue
+                key = tuple(sorted([anchor.content_hash, link_hash]))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                linked = read_event_by_hash(conn, link_hash)
+                if linked is None or linked.kind == INVALIDATE_KIND:
+                    continue
+                if anchor.kind == linked.kind == "observe" and not should_compare_observations(
+                    anchor,
+                    linked,
+                    entity_ids_a=frozenset(entity_sets.get(anchor.content_hash, ())),
+                    entity_ids_b=frozenset(entity_sets.get(linked.content_hash, ())),
+                ):
+                    continue
+                pairs.append((anchor, linked))
+                if len(pairs) >= max_pairs:
+                    return pairs
     return pairs
 
 

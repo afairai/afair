@@ -162,10 +162,24 @@ def open_db(
     return conn
 
 
+def open_db_readonly(vault_dir: Path) -> _stdlib_sqlite.Connection:
+    """Open an existing vault for audit, without mkdir, schema init or pragmas that write."""
+    conn = _open_connection(
+        (vault_dir / "substrate.db").resolve(), vault_key=_VAULT_KEY, read_only=True
+    )
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    return conn
+
+
 def _open_connection(
     db_path: Path,
     *,
     vault_key: bytes | None,
+    read_only: bool = False,
 ) -> _stdlib_sqlite.Connection:
     """Open the underlying SQLite connection, encrypted or plaintext.
 
@@ -203,7 +217,11 @@ def _open_connection(
 
         conn = cast(
             "_stdlib_sqlite.Connection",
-            sqlcipher3.connect(str(db_path), check_same_thread=False),
+            sqlcipher3.connect(
+                db_path.as_uri() + "?mode=ro" if read_only else str(db_path),
+                uri=read_only,
+                check_same_thread=False,
+            ),
         )
         # sqlcipher3 has its own Row class — using stdlib sqlite3.Row
         # here would raise TypeError("Row() argument 1 must be
@@ -230,7 +248,11 @@ def _open_connection(
             raise RuntimeError(msg) from exc
         return conn
 
-    plain_conn = _stdlib_sqlite.connect(str(db_path), check_same_thread=False)
+    plain_conn = _stdlib_sqlite.connect(
+        db_path.as_uri() + "?mode=ro" if read_only else str(db_path),
+        uri=read_only,
+        check_same_thread=False,
+    )
     plain_conn.row_factory = _stdlib_sqlite.Row
     return plain_conn
 

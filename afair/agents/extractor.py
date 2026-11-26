@@ -14,6 +14,7 @@ import contextlib
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -57,11 +58,13 @@ _extractor_thread_local = threading.local()
 # cycle without changing the runtime call graph.
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 log = structlog.get_logger(__name__)
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="extractor")
+_EXTRACTION_QUEUE_SLOTS = threading.BoundedSemaphore(64)
 """Background workers — text-only Phase 0 load fits easily in 4 threads."""
 
 EXTRACTION_LLM_TIMEOUT_SECONDS = 120.0
@@ -117,6 +120,7 @@ def _capture_extractor_kwargs(ctx: Any) -> dict[str, Any]:
     """
     return {
         "vault_dir": ctx.vault_dir,
+        "background_usage_settings": getattr(ctx, "background_usage_settings", None),
         "model": ctx.extractor_model,
         "api_key": _api_key_for(ctx.extractor_model, ctx),
         "embedding_model": ctx.embedding_model,
@@ -128,6 +132,60 @@ def _capture_extractor_kwargs(ctx: Any) -> dict[str, Any]:
         "transcription_model": ctx.transcription_model,
         "transcription_api_key": _api_key_for(ctx.transcription_model, ctx),
     }
+
+
+# Striped locks are bounded independently of vault size. Warm submissions and
+# recovery share them, so a stale candidate cannot duplicate a provider call.
+_EXTRACTION_LOCKS = [threading.Lock() for _ in range(64)]
+
+
+def _serialized_extraction(fn: Callable[..., None]) -> Callable[..., None]:
+    @wraps(fn)
+    def wrapped(**kwargs: Any) -> None:
+        only_if_missing = kwargs.pop("only_if_missing", False)
+        configured_settings = kwargs.pop("background_usage_settings", None)
+        key = (str(kwargs["vault_dir"]), kwargs["event_id"])
+        with _EXTRACTION_LOCKS[hash(key) % len(_EXTRACTION_LOCKS)]:
+            db = _conn_for_extractor_thread(kwargs["vault_dir"], kwargs.get("embedding_dim", 1536))
+            has_attempt = (
+                db.execute(
+                    "SELECT 1 FROM interpretations WHERE event_id=? "
+                    "AND produced_by LIKE 'extractor:%' LIMIT 1",
+                    (kwargs["event_id"],),
+                ).fetchone()
+                is not None
+            )
+            if only_if_missing and has_attempt:
+                return
+            from ..settings import load_settings
+            from .usage import background_usage
+
+            settings = configured_settings or load_settings().model_copy(
+                update={"vault_dir": kwargs["vault_dir"]}
+            )
+            from .extraction_jobs import extraction_lease
+
+            with extraction_lease(
+                db,
+                kwargs["event_id"],
+                purpose="retry" if has_attempt and not only_if_missing else "initial",
+            ):
+                # Recheck after acquiring the DB lease: another process may
+                # have completed extraction since our initial lookup.
+                if (
+                    only_if_missing
+                    and db.execute(
+                        "SELECT 1 FROM interpretations WHERE event_id=? "
+                        "AND produced_by LIKE 'extractor:%' LIMIT 1",
+                        (kwargs["event_id"],),
+                    ).fetchone()
+                    is not None
+                ):
+                    return
+                with background_usage(settings, "extractor"):
+                    fn(**kwargs)
+
+    return wrapped
 
 
 def schedule_extraction(event_id: str) -> None:
@@ -143,9 +201,22 @@ def schedule_extraction(event_id: str) -> None:
     ctx = get_context()
     from ..mcp.context import connect_for_thread
 
+    slots = _EXTRACTION_QUEUE_SLOTS
+    if not slots.acquire(blocking=False):
+        # The committed event is the durable source for bounded discovery;
+        # executor overload cannot grow an unbounded in-memory backlog.
+        log.info("extractor.queue_deferred", event_id=event_id)
+        return
     try:
-        _EXECUTOR.submit(_run_extraction, event_id=event_id, **_capture_extractor_kwargs(ctx))
+        future = _EXECUTOR.submit(
+            _run_extraction,
+            event_id=event_id,
+            only_if_missing=True,
+            **_capture_extractor_kwargs(ctx),
+        )
+        future.add_done_callback(lambda _: slots.release())
     except RuntimeError as exc:
+        slots.release()
         pe.record_safe(
             connect_for_thread,
             event_id=event_id,
@@ -174,7 +245,7 @@ def schedule_extraction(event_id: str) -> None:
     )
 
 
-def extract_sync(event_id: str) -> None:
+def extract_sync(event_id: str, *, only_if_missing: bool = False) -> None:
     """Synchronous extraction — for tests and debugging.
 
     Same code path as the fire-and-forget variant but blocks until done.
@@ -182,7 +253,9 @@ def extract_sync(event_id: str) -> None:
     from ..mcp.context import get_context  # lazy — breaks circular import
 
     ctx = get_context()
-    _run_extraction(event_id=event_id, **_capture_extractor_kwargs(ctx))
+    _run_extraction(
+        event_id=event_id, only_if_missing=only_if_missing, **_capture_extractor_kwargs(ctx)
+    )
 
 
 def _conn_for_extractor_thread(vault_dir: Path, embedding_dim: int) -> Any:
@@ -234,6 +307,7 @@ def clear_extractor_thread_db() -> None:
         del _extractor_thread_local.vault_dir
 
 
+@_serialized_extraction
 def _run_extraction(
     *,
     event_id: str,

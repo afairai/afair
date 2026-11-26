@@ -272,11 +272,15 @@ def test_llm_returns_null_creates_new_entity(
     assert stats["entities_matched_llm"] == 0
 
 
+@pytest.mark.parametrize(
+    "primary_model", ["anthropic/claude-haiku-4-5", "anthropic/claude-haiku-5-5"]
+)
 def test_sonnet_escalation_on_low_confidence(
-    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch, primary_model: str
 ) -> None:
     """Haiku verdict at 0.4 confidence triggers a Sonnet re-judge.
     The escalation counter increments and the Sonnet verdict wins."""
+    settings = settings.model_copy(update={"canonicalizer_model": primary_model})
     _no_sleep(monkeypatch)
 
     _write_event_with_extraction(

@@ -33,6 +33,11 @@ from ..substrate.events import Event, read_event_by_hash, write_event
 from .binder import BINDER_PRODUCED_BY
 from .cold_path import ColdPathWorker
 from .conflict_resolver import read_conflicts_batch
+from .evidence_quality import (
+    is_routine_observation,
+    observation_evidence_key,
+    observation_lane,
+)
 from .framing import PrincipalFraming, current
 from .invalidation import INVALIDATE_KIND, write_invalidation
 from .llm import LLMError, call_tool
@@ -51,6 +56,19 @@ LIVING_SYNTHESIS_PRODUCER = "living_synthesis:v1"
 
 MIN_CLUSTER_EVENTS = 3
 MAX_SOURCE_EVENTS = 400
+MAX_OBSERVATION_SCAN = 3200
+# Index-ordered and output-bounded; filtering invalidated sources uses the
+# existing partial invalidation-target index rather than scanning that history.
+_SOURCE_SELECTION_SQL = """
+    SELECT e.* FROM events e
+    WHERE e.kind = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx
+        WHERE inv.kind = 'invalidate'
+          AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+      )
+    ORDER BY e.created_at DESC LIMIT ?
+"""
 MAX_CLUSTER_EVENTS = 40
 MAX_SYNTHESES_PER_CYCLE = 6
 
@@ -251,9 +269,9 @@ class LivingSynthesisWorker(ColdPathWorker):
             "steered": 0,
             "capped": False,
         }
-        events = _eligible_events(conn)
-        candidates = _discover_candidates(conn, events)
         priors = _live_priors(conn)
+        events = _eligible_events(conn, priors=priors)
+        candidates = _discover_candidates(conn, events)
         _assign_lineage(candidates, priors)
         stats["retired"] = _retire_stale_priors(conn, candidates, priors, events)
         stats["candidates"] = len(candidates)
@@ -267,7 +285,7 @@ class LivingSynthesisWorker(ColdPathWorker):
                 break
 
             prior = _matching_prior(candidate, priors)
-            if prior is not None and candidate.member_hashes == set(prior.member_hashes):
+            if prior is not None and not _materially_changed(conn, candidate, prior, events):
                 stats["skipped_unchanged"] += 1
                 # A crash between a prior cycle's write and its supersession can
                 # leave more than one live synthesis for this cluster_id. The
@@ -347,29 +365,67 @@ class LivingSynthesisWorker(ColdPathWorker):
         return stats
 
 
-def _eligible_events(conn: sqlite3.Connection) -> dict[str, Event]:
-    placeholders = ",".join("?" for _ in _DERIVED_KINDS)
-    rows = conn.execute(
-        f"""
-        SELECT e.content_hash
-        FROM events e
-        WHERE e.kind NOT IN ({placeholders})
-          AND NOT EXISTS (
-            SELECT 1 FROM events inv
-            WHERE inv.kind = ?
-              AND json_extract(inv.payload, '$.target_hash') = e.content_hash
-          )
-        ORDER BY e.created_at DESC, e.id DESC
-        LIMIT ?
-        """,
-        (*sorted(_DERIVED_KINDS), INVALIDATE_KIND, MAX_SOURCE_EVENTS),
-    ).fetchall()
-    out: dict[str, Event] = {}
-    for row in rows:
-        event = read_event_by_hash(conn, row["content_hash"])
-        if event is not None:
-            out[event.content_hash] = event
-    return out
+def _eligible_events(
+    conn: sqlite3.Connection, *, priors: list[_Prior] | None = None
+) -> dict[str, Event]:
+    """Select useful evidence with bounded, index-ordered discovery reads.
+
+    Durable remember sources have their own window so routine observations never
+    crowd them out. Scan at most MAX_OBSERVATION_SCAN recent observations and
+    retain prior source anchors before collapsing consecutive equal outcomes.
+    The first record of each run is stable across duplicate bursts; reversions
+    remain separate runs. Raw observations outside this discovery horizon remain
+    fully recallable, and historical live syntheses retain their source anchors.
+    """
+    source_kinds = [
+        row[0]
+        for row in conn.execute("SELECT DISTINCT kind FROM events WHERE kind != 'observe'")
+        if row[0] not in _DERIVED_KINDS
+    ]
+    pool: dict[str, Event] = {}
+    from ..substrate.events import row_to_event
+
+    for kind, limit in [
+        *((kind, MAX_SOURCE_EVENTS) for kind in source_kinds),
+        ("observe", MAX_OBSERVATION_SCAN),
+    ]:
+        # ORDER BY created_at alone rides events_kind_created_at_idx without a
+        # temp sort. Equal-timestamp rows are ordered by id in Python below.
+        rows = conn.execute(_SOURCE_SELECTION_SQL, (kind, limit))
+        for row in rows:
+            event = row_to_event(row)
+            if not is_routine_observation(event):
+                pool[event.content_hash] = event
+
+    # Existing anchors preserve stable representatives when a long duplicate
+    # burst pushes the original record outside the bounded observation scan.
+    priors = _live_priors(conn) if priors is None else priors
+    anchors = list(dict.fromkeys(h for prior in priors for h in sorted(prior.member_hashes)))[
+        :MAX_SOURCE_EVENTS
+    ]
+    if anchors:
+        placeholders = ",".join("?" for _ in anchors)
+        rows = conn.execute(
+            f"""SELECT e.* FROM events e WHERE e.content_hash IN ({placeholders})
+            AND NOT EXISTS (SELECT 1 FROM events inv WHERE inv.kind = ?
+                AND json_extract(inv.payload, '$.target_hash') = e.content_hash)""",
+            (*anchors, INVALIDATE_KIND),
+        )
+        for row in rows:
+            event = row_to_event(row)
+            if event.kind not in _DERIVED_KINDS and not is_routine_observation(event):
+                pool[event.content_hash] = event
+
+    latest: dict[str, str] = {}
+    selected: list[Event] = []
+    for event in sorted(pool.values(), key=lambda e: (e.created_at, e.id)):
+        if event.kind == "observe":
+            lane, key = observation_lane(event.payload), observation_evidence_key(event.payload)
+            if latest.get(lane) == key:
+                continue
+            latest[lane] = key
+        selected.append(event)
+    return {event.content_hash: event for event in selected[-MAX_SOURCE_EVENTS:]}
 
 
 def _discover_candidates(
@@ -617,6 +673,41 @@ def _live_priors(conn: sqlite3.Connection) -> list[_Prior]:
             )
         )
     return out
+
+
+def _materially_changed(
+    conn: sqlite3.Connection,
+    candidate: _Candidate,
+    prior: _Prior,
+    events: dict[str, Event],
+) -> bool:
+    """Ignore repeated observations but never suppress removed/corrected facts.
+
+    Source removals and new remembers always refresh. Only an added observe with
+    byte-equivalent factual content (ignoring transport/timing metadata) can be
+    deferred; no numerical similarity threshold can swallow a small correction.
+    """
+    if not prior.member_hashes <= candidate.member_hashes:
+        return True
+    added = candidate.member_hashes - prior.member_hashes
+    if not added:
+        return False
+
+    # Compare to the latest outcome in each reference lane, not the set of all
+    # historical values: returning to an older value is still a material change.
+    latest: dict[str, str] = {}
+    sources = [events.get(h) or read_event_by_hash(conn, h) for h in prior.member_hashes]
+    for source in sorted((e for e in sources if e is not None), key=lambda e: (e.created_at, e.id)):
+        if source.kind == "observe":
+            latest[observation_lane(source.payload)] = observation_evidence_key(source.payload)
+    for source in sorted((events[h] for h in added), key=lambda e: (e.created_at, e.id)):
+        if source.kind != "observe":
+            return True
+        lane, key = observation_lane(source.payload), observation_evidence_key(source.payload)
+        if latest.get(lane) != key:
+            return True
+        latest[lane] = key
+    return False
 
 
 def _prior_similarity(candidate: _Candidate, prior: _Prior) -> float:
@@ -915,13 +1006,13 @@ def _retire_stale_priors(
 
 
 def _current_source_count(conn: sqlite3.Connection, hashes: frozenset[str]) -> int:
+    """Count current substantive evidence, including sources outside the window."""
     if not hashes:
         return 0
     placeholders = ",".join("?" for _ in hashes)
-    row = conn.execute(
+    rows = conn.execute(
         f"""
-        SELECT COUNT(*) AS n
-        FROM events e
+        SELECT e.* FROM events e
         WHERE e.content_hash IN ({placeholders})
           AND e.kind NOT IN (?, ?, ?, ?)
           AND NOT EXISTS (
@@ -938,8 +1029,10 @@ def _current_source_count(conn: sqlite3.Connection, hashes: frozenset[str]) -> i
             LIVING_SYNTHESIS_KIND,
             INVALIDATE_KIND,
         ),
-    ).fetchone()
-    return int(row["n"]) if row is not None else 0
+    )
+    from ..substrate.events import row_to_event
+
+    return sum(not is_routine_observation(row_to_event(row)) for row in rows)
 
 
 def _api_key_for_model(model: str, settings: Settings) -> str | None:

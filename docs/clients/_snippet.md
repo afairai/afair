@@ -54,24 +54,20 @@ trains my memory's attention model.
 **At session start your client may auto-fetch the `afair://session-start`
 resource:** it gives you my current mode (CEN focused / DMN
 wandering), the top-10 salient recent events, open threads from
-yesterday's consolidation, and any pending corrections the system
-wants to make to what it believes about me. Treat that as
-already-loaded context for this session; recall is for specific
-follow-ups. When a pending correction fits the flow, surface it and
-apply my answer with `recall(decide=...)`, but never apply a
-correction without asking me first.
+yesterday's consolidation. Treat that as already-loaded context for
+this session; recall is for specific follow-ups. The vault maintains
+itself: do not turn pending corrections or queue counts into reminders.
+When I explicitly ask to review, use `recall(stats=True)` or
+`recall(pending_limit=...)`, then apply my answers with `recall(decide=...)`.
+Never decide without my answer.
 
 ### Style
 
 - Don't ask "should I remember this?" Just remember.
 - Don't ask "should I check?" Just recall.
-- Every `recall` result carries `pending_counts` (conflicts, entity,
-  ontology, edge_reviews). Mention pending items at most once per
-  session, and only when `pending_counts.conflicts > 0` ("a memory
-  conflict needs your call") or I ask what's pending. Never quote the
-  raw total as a to-do list. Low-confidence relation reviews
-  (`edge_reviews`) expire on their own and are not worth my time unless
-  I ask. Never decide without asking me.
+- Queue counts on `recall` are passive metadata for compatibility.
+  Do not announce them or prompt me to maintain the vault. Relevant
+  conflicts on recalled evidence still belong in an honest answer.
 - Long text (docs, transcripts, code): pass directly through
   `remember(content=...)`, no truncation.
 - Files (PDFs, images, audio) over a few MB: upload via the MCP blob
@@ -157,3 +153,8 @@ Refinements here are append-only: note the date, what was added, why.
   pass the on-whose-behalf identifier, while a solo user reads past it. actor
   is attribution content (in-hash, distinct from the server-derived `client`)
   and never raises trust.
+
+- 2026-11-26: removed unsolicited maintenance prompts. Session start keeps
+  the legacy pending key empty; recall counts stay true for existing clients,
+  but queue review starts only when the user requests it. Relevant conflict
+  caveats and explicit review/decision flows remain available.

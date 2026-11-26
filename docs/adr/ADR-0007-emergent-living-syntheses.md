@@ -78,8 +78,11 @@ split or merge never happened.
 
 ### Update and serving behavior
 
-An unchanged evidence set is a no-op and makes no model call. New evidence
-writes a new `living_synthesis` event and invalidates the prior live synthesis.
+An unchanged evidence set is a no-op and makes no model call. Content-free
+observations are excluded. Consecutive observations repeating an identical
+outcome for the same reference keep a stable first source; returning to an
+older outcome after a change remains a new run and refreshes the synthesis.
+New substantive evidence writes a new `living_synthesis` event and invalidates the prior live synthesis.
 The old event remains in the substrate. Its regenerable FTS row is removed so a
 stale version cannot lead current recall.
 
@@ -92,7 +95,11 @@ longer creates new ones.
 
 The worker is intentionally bounded:
 
-- newest 400 live source events considered per cycle;
+- at most 400 useful source events considered per cycle;
+- independent index-ordered source windows: newest 400 per non-derived source
+  kind and newest 3,200 raw observations, plus at most 400 live prior anchors;
+- observation filtering and consecutive-run deduplication precede the final
+  useful-source and 40-source cluster caps; no full-history window sort;
 - at least 3 events per cluster;
 - at most 40 source events per synthesis;
 - at most 6 model calls per cycle;
@@ -159,3 +166,11 @@ The test suite locks the following behavior:
 - no stored category field exists;
 - recall prefers living syntheses while preserving legacy readability.
 
+
+### Operational update — 2026-11-26
+
+Routine-only historical syntheses retire through ordinary append-only
+invalidation when their substantive source count no longer qualifies. Sources
+and prior synthesis bytes are never deleted. Live substantive syntheses outside
+the discovery horizon remain readable and keep their source anchors. Detailed
+policy, compatibility, and rollout checks: [evidence processing](../evidence-processing.md).

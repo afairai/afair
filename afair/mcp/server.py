@@ -31,7 +31,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from ..agents.blob_sweeper import OrphanBlobSweeper
-from ..agents.cold_path import ColdPathScheduler
+from ..agents.cold_path import ColdPathScheduler, ColdPathWorker
 from ..agents.conflict_resolver import ConflictResolver
 from ..agents.consolidator import Consolidator
 from ..agents.edge_scorer import EdgeConfidenceScorer
@@ -40,6 +40,7 @@ from ..agents.entity_audit import EntityAuditWorker
 from ..agents.entity_canonicalizer import EntityCanonicalizer
 from ..agents.entity_dedup import EntityDeduplicator
 from ..agents.expectation_checker import ExpectationChecker
+from ..agents.extraction_recovery import ExtractionRecoveryWorker
 from ..agents.extraction_retry import ExtractionRetryWorker
 from ..agents.framing import framing_from_settings
 from ..agents.framing import set_current as set_framing
@@ -97,6 +98,56 @@ if TYPE_CHECKING:
     from ..settings import Settings
 
 
+def build_cold_path_workers() -> list[ColdPathWorker]:
+    """Production roster, shared with transaction-hygiene conformance tests."""
+    return [
+        Pruner(),
+        OrphanBlobSweeper(),
+        # Bounded re-extraction of events whose latest extractor
+        # interpretation is a transient failure (llm_timeout /
+        # llm_rate_limit). Closes the silent-permanent-gap failure
+        # mode where a timed-out extraction was never re-attempted.
+        ExtractionRecoveryWorker(),
+        ExtractionRetryWorker(),
+        # Phase 0.5 observability — detection-only. Counts silent
+        # pipeline failures (event.written with no terminal
+        # extraction stage, retry-exhausted, permanent failures)
+        # into an append-only snapshot that /health surfaces.
+        ExpectationChecker(),
+        EntityAuditWorker(),
+        ConflictResolver(),
+        Consolidator(),
+        EntityCanonicalizer(),
+        EntityDeduplicator(),
+        EdgeConfidenceScorer(),
+        LivingSynthesisWorker(),
+        TemporalWorker(),
+        SalienceWorker(),
+        # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
+        # kind-usage + kind_observations signals daily and drafts
+        # bounded ontology-revision proposals into the quarantine
+        # queue; nothing is applied without the operator (Phase 5).
+        SchemaEvolver(),
+        ModeSwitcher(),
+        # Self-improvement tuner — observation mode (Phase B
+        # held at promote_enabled=False until a ground-truth
+        # eval-set lands, per the audit pass on 2026-06-03).
+        # Without an eval-set, the LLM judge is the only gate,
+        # and judge-judging-judge is research-grade dubious.
+        # In observe mode the tuner still generates hypotheses
+        # and runs replay + invariant guards, writing
+        # hypothesis/observation rows to tuner_state — but it
+        # returns BEFORE the judge panel, so no judge verdicts
+        # (and no 3-vendor LLM cost) accumulate, and no tuned
+        # value is ever mutated in production. Flip to True
+        # once the eval framework is wired in.
+        # RollbackMonitor stays registered but is effectively
+        # vestigial while no promotes happen.
+        Tuner(promote_enabled=False),
+        RollbackMonitor(),
+    ]
+
+
 def build_server(settings: Settings) -> FastMCP:
     """Construct a FastMCP instance wired to the substrate.
 
@@ -139,6 +190,7 @@ def build_server(settings: Settings) -> FastMCP:
             semantic_recall_enabled=settings.semantic_recall_enabled,
             cold_path_enabled=settings.cold_path_enabled,
             surprise_context_window=settings.surprise_context_window,
+            background_usage_settings=settings,
         )
     )
 
@@ -153,51 +205,7 @@ def build_server(settings: Settings) -> FastMCP:
             vault_dir=settings.vault_dir,
             embedding_dim=settings.embedding_dim,
             settings=settings,
-            workers=[
-                Pruner(),
-                OrphanBlobSweeper(),
-                # Bounded re-extraction of events whose latest extractor
-                # interpretation is a transient failure (llm_timeout /
-                # llm_rate_limit). Closes the silent-permanent-gap failure
-                # mode where a timed-out extraction was never re-attempted.
-                ExtractionRetryWorker(),
-                # Phase 0.5 observability — detection-only. Counts silent
-                # pipeline failures (event.written with no terminal
-                # extraction stage, retry-exhausted, permanent failures)
-                # into an append-only snapshot that /health surfaces.
-                ExpectationChecker(),
-                EntityAuditWorker(),
-                ConflictResolver(),
-                Consolidator(),
-                EntityCanonicalizer(),
-                EntityDeduplicator(),
-                EdgeConfidenceScorer(),
-                LivingSynthesisWorker(),
-                TemporalWorker(),
-                SalienceWorker(),
-                # Schema-Evolver (ADR-0003 Phase 4) — propose-only. Mines
-                # kind-usage + kind_observations signals daily and drafts
-                # bounded ontology-revision proposals into the quarantine
-                # queue; nothing is applied without the operator (Phase 5).
-                SchemaEvolver(),
-                ModeSwitcher(),
-                # Self-improvement tuner — observation mode (Phase B
-                # held at promote_enabled=False until a ground-truth
-                # eval-set lands, per the audit pass on 2026-06-03).
-                # Without an eval-set, the LLM judge is the only gate,
-                # and judge-judging-judge is research-grade dubious.
-                # In observe mode the tuner still generates hypotheses
-                # and runs replay + invariant guards, writing
-                # hypothesis/observation rows to tuner_state — but it
-                # returns BEFORE the judge panel, so no judge verdicts
-                # (and no 3-vendor LLM cost) accumulate, and no tuned
-                # value is ever mutated in production. Flip to True
-                # once the eval framework is wired in.
-                # RollbackMonitor stays registered but is effectively
-                # vestigial while no promotes happen.
-                Tuner(promote_enabled=False),
-                RollbackMonitor(),
-            ],
+            workers=build_cold_path_workers(),
         )
         scheduler.start()
 

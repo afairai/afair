@@ -349,49 +349,49 @@ class EntityAuditWorker(ColdPathWorker):
             "suppressed_structural": 0,
             "merge_review_deduped_semantic": 0,
         }
-        with conn:
-            for eid, name, kind in entities:
-                # C — structural-junk suppression (I6-safe). A file path / ticket
-                # id / config filename doesn't need a human to pick its kind; skip
-                # the proposal only. The entity + its kind_observations stand, and
-                # manual retype/retract stay available.
-                if is_structural_name(name):
-                    stats["suppressed_structural"] += 1
-                    continue
-                tm = detect_type_mismatch(name, kind)
-                if tm is not None:
-                    to_kind, evidence, conf = tm
-                    if _insert_proposal(
-                        conn,
-                        kind="retype",
-                        entity_id=eid,
-                        detail={"from_kind": kind, "to_kind": to_kind, "name": name},
-                        evidence=evidence,
-                        confidence=conf,
-                        now=now,
-                    ):
-                        stats["retype_proposals"] += 1
-            for from_id, detail, evidence, conf in find_cross_kind_auto_merges(conn):
-                # Same suppression on the merge-review side — but only when BOTH
-                # names are structural. A REAL entity auto-merged INTO a
-                # structural name (e.g. "afair" -> "operations.md") is arguably
-                # the merge most worth reviewing, so an OR here would wrongly
-                # silence it; require AND so at least one real name still nags.
-                if is_structural_name(detail["from_name"]) and is_structural_name(
-                    detail["into_name"]
-                ):
-                    stats["suppressed_structural"] += 1
-                    continue
-                # Semantic anti-re-nag: the same question keyed on
-                # (from_name, from_kind, resolved into-target) may already be on
-                # the queue under a different (re-minted) from_entity_id. Suppress
-                # before insert so the Fable-x6 loop cannot re-file it each cycle.
-                if _semantic_merge_review_exists(
+        # Candidate scans and name checks can grow with the graph. Only take
+        # SQLite's writer lock for a single proposal at a time, so the audit
+        # cannot block remember/observe while it scans the rest of the graph.
+        for eid, name, kind in entities:
+            if is_structural_name(name):
+                stats["suppressed_structural"] += 1
+                continue
+            mismatch = detect_type_mismatch(name, kind)
+            if mismatch is None:
+                continue
+            to_kind, evidence, confidence = mismatch
+            with conn:
+                if _insert_proposal(
                     conn,
-                    from_name=detail["from_name"],
-                    from_kind=detail["from_kind"],
-                    into_entity_id=detail["into_entity_id"],
+                    kind="retype",
+                    entity_id=eid,
+                    detail={"from_kind": kind, "to_kind": to_kind, "name": name},
+                    evidence=evidence,
+                    confidence=confidence,
+                    now=now,
                 ):
+                    stats["retype_proposals"] += 1
+
+        for from_id, detail, evidence, confidence in find_cross_kind_auto_merges(conn):
+            # Suppress only when both names are structural. A real entity
+            # merged into a file name is still worth reviewing.
+            if is_structural_name(detail["from_name"]) and is_structural_name(detail["into_name"]):
+                stats["suppressed_structural"] += 1
+                continue
+            key = {
+                "from_name": detail["from_name"],
+                "from_kind": detail["from_kind"],
+                "into_entity_id": detail["into_entity_id"],
+            }
+            if _semantic_merge_review_exists(conn, **key):
+                stats["merge_review_deduped_semantic"] += 1
+                continue
+
+            with conn:
+                # Serialize the final semantic check and insert. The row
+                # uniqueness constraint only covers a single from_entity_id.
+                conn.execute("BEGIN IMMEDIATE")
+                if _semantic_merge_review_exists(conn, **key):
                     stats["merge_review_deduped_semantic"] += 1
                     continue
                 if _insert_proposal(
@@ -400,7 +400,7 @@ class EntityAuditWorker(ColdPathWorker):
                     entity_id=from_id,
                     detail=detail,
                     evidence=evidence,
-                    confidence=conf,
+                    confidence=confidence,
                     now=now,
                 ):
                     stats["merge_review_proposals"] += 1

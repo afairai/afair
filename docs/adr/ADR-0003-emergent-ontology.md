@@ -360,8 +360,8 @@ CREATE TABLE IF NOT EXISTS proposed_ontology_revisions (
 ```
 
 **Human-in-the-loop via the existing decide loop (I1-safe).** Ontology
-proposals join `pending_corrections` in `recall(stats=True)` and the
-`afair://session-start` resource, each with a ready-to-ask prompt ("The
+proposals join `pending_corrections` in explicitly requested `recall(stats=True)`
+or `recall(pending_limit=...)`, each with a ready-to-ask prompt ("The
 extractor has wanted a 'research_paper' kind 40 times; 12 entities now filed
 as 'concept' would move. Add it?"). The operator's verdict arrives through the
 existing `recall(decide={proposal_id, verdict})`; `decide_correction`
@@ -397,8 +397,8 @@ this at time T" completely.
 ### Invariant compliance
 
 - **I1 (MCP surface stability).** No new tool, no signature change. Proposals
-  ride `recall(stats=True)` / `afair://session-start` as additive payload
-  fields; verdicts ride the existing `recall(decide=)`; anchors are ordinary
+  ride explicit `recall(stats=True)` / pending pagination as additive payload
+  fields; the legacy session-start key remains empty and never prompts maintenance; verdicts ride the existing `recall(decide=)`; anchors are ordinary
   `observe` events. A v1.0 client that never sends `decide` keeps working
   unchanged.
 - **I2 (substrate immutability).** Every new belief-bearing table
@@ -561,7 +561,7 @@ Rollback: unregister the worker; queue rows are inert.
 
 **Phase 5: operator-confirm application.**
 Ships: ontology proposals in `read_pending_corrections` output (prefix-keyed
-IDs), `recall(stats=True)` + session-start surfacing, the apply path in
+IDs), explicit `recall(stats=True)` / pending pagination surfacing, the apply path in
 `corrections.py` (anchor event, registry/revision/assignment writes, statuses,
 idempotent double-decide), reversal helpers (`restore`, compensating
 assignments), VISION §4 I6 parenthetical removed, CLAUDE.md status updated.
@@ -620,3 +620,11 @@ Consequence for the deduplicator: for v2 entities its cross-kind workload
 dries up structurally (a genuine same-thing kind-mislabel now links to the
 existing entity at canonicalization time rather than forking identity); what
 remains is the v1 backlog and genuine spelling variants, as intended.
+
+### Operational update — 2026-11-26
+
+Session start no longer lists proposals or asks for vault maintenance. Existing
+queue counts remain honest passive recall metadata for compatibility. Explicit
+review, pagination, and `recall(decide=...)` retain their contracts; a model
+never applies a proposal without an operator answer. Historical descriptions
+of proactive session-start review are superseded by this behavior.
