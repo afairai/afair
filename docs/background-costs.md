@@ -134,3 +134,16 @@ remote calls. On a ledger outage, self-hosted installations with no configured
 spending guard can still embed. The log records `usage.embedding_unaccounted`,
 and those outage calls require provider-side reconciliation. A configured
 spending guard defers the call before provider I/O.
+
+
+### Scheduler lifetime in embedded callers and tests
+
+`ColdPathScheduler.start()` is idempotent while its thread is alive. Call
+`stop(timeout=5)` in a `finally` block when the owning test or embedded caller
+finishes. It wakes the poll immediately, lets the current worker finish its
+transaction cleanup, skips remaining workers, and closes the scheduler's SQLite
+connection on its own thread. Check the returned boolean: `False` means an
+in-flight worker is still running; join again before releasing its resources.
+Stopping cannot forcibly interrupt a provider call. A fully stopped scheduler
+can be restarted. The scheduler tests register every started instance for
+teardown and assert that no owned thread survives, even after a failed assertion.
