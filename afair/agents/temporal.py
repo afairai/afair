@@ -263,6 +263,7 @@ def _find_events_needing_temporal(
         FROM interpretations i
         JOIN events e ON e.id = i.event_id
         WHERE i.produced_by LIKE 'extractor:%'
+          AND json_extract(i.extraction, '$.status') IS NOT 'failed'
           AND (:wm_id IS NULL OR i.id > :wm_id)
           AND NOT EXISTS (
               SELECT 1 FROM event_temporal t

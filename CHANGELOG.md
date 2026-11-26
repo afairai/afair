@@ -10,6 +10,14 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [Unreleased]
+
+### Fixed
+
+- Worker health now reports actual scheduling cadence, daemon heartbeat and
+  explicit budget deferral without treating stored pipeline health or refused
+  work as current-process success.
+
 ## [0.1.30](https://github.com/afairai/afair/compare/v0.1.29...v0.1.30) (2026-11-26)
 
 

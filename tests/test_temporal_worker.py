@@ -190,3 +190,39 @@ def test_event_without_extraction_is_skipped(
     stats = tw.TemporalWorker().run(db, settings)
     assert stats["events_classified"] == 0
     assert stats["llm_calls"] == 0
+
+
+def test_failed_extraction_cannot_create_temporal_overlay_or_consume_limit(
+    db: sqlite3.Connection,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = write_event(
+        db, origin="user", kind="remember", payload={"text": "failed synthetic source"}
+    )
+    write_interpretation(
+        db,
+        event=failed,
+        version=1,
+        produced_by="extractor:v1",
+        extraction={"status": "failed", "error_type": "parse_error"},
+    )
+    monkeypatch.setattr(tw, "call_tool", _boom)
+    assert tw._find_events_needing_temporal(db, 1) == []
+    # An older failed row must be excluded BEFORE LIMIT, so it cannot starve
+    # a valid later event or synthesize proof around failed extraction.
+    good_hash = _seed(db, "successful legacy extraction")
+    candidates = tw._find_events_needing_temporal(db, 1)
+    assert [event.content_hash for event, _ in candidates] == [good_hash]
+    assert read_event_temporal(db, failed.content_hash) is None
+    # A later successful retry is eligible without rewriting the failed row.
+    write_interpretation(
+        db,
+        event=failed,
+        version=1,
+        produced_by="extractor:v1",
+        extraction={"status": "success", "summary": "recovered source", "best_guess_kind": "fact"},
+    )
+    assert failed.content_hash in {
+        event.content_hash for event, _ in tw._find_events_needing_temporal(db, 10)
+    }

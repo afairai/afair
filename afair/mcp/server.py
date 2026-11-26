@@ -391,22 +391,23 @@ def build_server(settings: Settings) -> FastMCP:
             "checks": {"db": True},
             "pipeline": None,
             "workers": None,
+            "worker_health_schema": 2,
+            "scheduler": None,
         }
         try:
             snapshot = observability.read_latest_snapshot(db)
             if snapshot is not None:
                 body["pipeline"] = _health_pipeline_block(snapshot)
             if scheduler is not None:
-                body["workers"] = {
-                    name: {"seconds_since_last_success": st["seconds_since_last_success"]}
-                    for name, st in scheduler.status().items()
-                }
+                body["workers"] = scheduler.status()
+                body["scheduler"] = scheduler.scheduler_status()
         except Exception as e:
             # Same path-hygiene rule as the degraded branch: log the class
             # only, never str(e) (it can carry the vault path).
             log.warning("health.enrich_failed", exc_type=type(e).__name__)
             body["pipeline"] = None
             body["workers"] = None
+            body["scheduler"] = None
         return JSONResponse(body)
 
     return mcp

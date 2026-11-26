@@ -49,8 +49,9 @@ def test_paid_parse_failure_and_retry_both_count(tmp_path):
 
 def test_zero_budget_defers_without_provider_call(tmp_path):
     with patch("litellm.completion") as call, background_usage(settings(tmp_path, 0), "judge"):
-        with pytest.raises(BackgroundBudgetExceeded):
+        with pytest.raises(BackgroundBudgetExceeded) as refusal:
             provider_completion(model="test/model", messages=[], max_tokens=20)
+        assert refusal.value.reason == "daily_budget_exhausted"
         call.assert_not_called()
 
 
