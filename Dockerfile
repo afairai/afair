@@ -72,6 +72,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # own dedicated instance with no shared workload — the security delta is
 # negligible. Documented in CLAUDE.md §10 Deviations.
 
+ARG GIT_SHA=
+RUN printf '%s\n' "$GIT_SHA" > /app/afair/_build_revision
+
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

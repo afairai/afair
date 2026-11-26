@@ -733,3 +733,14 @@ async def test_health_degraded_body_unchanged(
         response = client.get("/health")
     assert response.status_code == 503
     assert response.json() == {"status": "degraded"}
+
+
+def test_build_revision_requires_full_image_commit(tmp_path: Path) -> None:
+    from afair.mcp.server import _build_revision
+
+    path = tmp_path / "revision"
+    assert _build_revision(path) is None
+    path.write_text("main")
+    assert _build_revision(path) is None
+    path.write_text("a1" * 20 + "\n")
+    assert _build_revision(path) == "a1" * 20
