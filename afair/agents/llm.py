@@ -122,7 +122,9 @@ def call_tool(
 ) -> LLMResult:
     """Call the LLM in tool-forcing mode, returning the (validated) tool arguments.
 
-    The model is offered exactly one tool and forced to call it. Output
+    The model is offered exactly one tool and normally forced to call it.
+    Sonnet 5.5 uses strict auto tool choice (forced choice is unsupported);
+    a response without the expected tool still raises LLMResponseError. Output
     can only be arguments matching ``tool_schema``, so:
       - There is no preamble/markdown/prose to strip.
       - Truncated mid-emission still produces invalid JSON, but the failure
@@ -158,6 +160,25 @@ def call_tool(
         "max_tokens": max_tokens,
         "timeout": timeout,
     }
+    if model == "anthropic/claude-sonnet-5-5":
+        # Sonnet 5.5 rejects forced tool choice. Missing/refused tool calls
+        # still fail below. Avoid spending the short verdict on upfront thinking.
+        # Native fields bypass older LiteLLM model-capability maps.
+        kwargs["tool_choice"] = "auto"
+        kwargs["tools"] = [
+            {
+                "name": tool_name,
+                "description": tool_description,
+                "input_schema": tool_schema,
+                "strict": True,
+            }
+        ]
+        kwargs["messages"][0]["content"] += (
+            f"\nReturn the result by calling the {tool_name} tool exactly once."
+        )
+        kwargs["allowed_openai_params"] = ["thinking"]
+        kwargs["thinking"] = {"type": "between_tools"}
+        kwargs["output_config"] = {"effort": "low"}
     if api_key is not None:
         kwargs["api_key"] = api_key
 

@@ -58,6 +58,25 @@ reservation and settlement. LiteLLM's installed Anthropic adapter normalizes
 ledger subtracts cache counts before applying cache-specific multipliers. The
 real adapter is covered by a test to guard against counting cached input twice.
 
+The canonicalizer rechecks low-confidence matches from either supported Haiku
+version with `anthropic/claude-sonnet-5-5`. This second pass shares the owning
+worker's UTC-day budget and call allowance; a refusal defers the event rather
+than bypassing the cap. Built-in Sonnet 5.5 prices are $2/$10 per million
+input/output tokens, with cache reads at $0.10 per million and cache writes at
+$2.50/$4 for five-minute/one-hour writes (unknown TTL uses $4). These prices do
+not depend on the installed LiteLLM map; explicit model-price overrides still
+apply. The published per-token input/output rates are one-third lower than
+Sonnet 4.6's $3/$15; actual cost also depends on tokenization and usage.
+
+Sonnet 5.5 rejects forced tool choice and sampling parameters. Its second-pass
+request uses strict automatic tool choice with an explicit tool instruction,
+`thinking: {"type": "between_tools"}` and low effort so upfront thinking does
+not consume the bounded 300-token verdict. A missing or wrong tool response
+still fails closed. Other models retain their existing tool-choice behavior.
+See the [Anthropic migration guide](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide).
+This changes future canonicalization only: existing memories and interpretations
+are not rewritten and no backfill is triggered.
+
 Coverage is explicit: text, tool calls, judge calls, retries and inline image
 requests pass through the ledger. Under an enabled cap, images with unknown model context limits defer because
 no safe input-cost bound is available. Known models reserve their entire

@@ -153,7 +153,7 @@ def provider_completion(*, _operation: str = "completion", **kwargs: Any) -> Any
         try:
             context_limit = (
                 1_000_000
-                if model == "anthropic/claude-haiku-5-5"
+                if model in {"anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5"}
                 else int(litellm.get_model_info(model)["max_input_tokens"] or 0)
             )
             if context_limit <= 0:
@@ -323,6 +323,20 @@ def _settle(
                 + int(outgoing) * rate_out
             ) / 1_000_000
             source = "haiku_5_5_estimate"
+        elif (
+            model == "anthropic/claude-sonnet-5-5"
+            and settings.background_model_prices.get(model) == (2.0, 10.0)
+            and incoming is not None
+            and outgoing is not None
+        ):
+            # Sonnet 5.5 cache reads are $0.10/MTok (0.05x input), not 0.1x.
+            cost = (
+                max(0, int(incoming) - cache_read - cache_write) * 2.0
+                + cache_read * 0.10
+                + weighted_cache_write * 2.0
+                + int(outgoing) * 10.0
+            ) / 1_000_000
+            source = "sonnet_5_5_estimate"
         elif (
             model in settings.background_model_prices
             and incoming is not None

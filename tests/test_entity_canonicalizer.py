@@ -330,7 +330,7 @@ def test_sonnet_escalation_on_low_confidence(
     # Two distinct models were invoked.
     models_seen = {c["model"] for c in call_log}
     assert any("haiku" in m for m in models_seen)
-    assert any("sonnet" in m for m in models_seen)
+    assert "anthropic/claude-sonnet-5-5" in models_seen
 
 
 def test_llm_hallucinated_entity_id_falls_back_to_new(

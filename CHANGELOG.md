@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Canonicalizer low-confidence Haiku matches now receive a Sonnet 5.5 second
+  pass, using strict auto tool choice and the existing daily budget. Built-in
+  $2/$10 per-million pricing includes Sonnet 5.5's $0.10 cache-read rate.
+
 All notable changes to afair are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reaches

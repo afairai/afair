@@ -494,3 +494,82 @@ def test_admin_embedding_costs_include_each_source(tmp_path, switch, worker):
             admin.backfill_vectors_and_links()
     (row,) = usage_summary(config)["workers"]
     assert (row["worker"], row["operation"], row["attempts"]) == (worker, "embedding", 2)
+
+
+@pytest.mark.parametrize("cache_read,cache_5m,cache_1h", [(0, 0, 0), (200, 300, 0), (200, 0, 300)])
+def test_sonnet_55_prices_without_model_map(tmp_path, cache_read, cache_5m, cache_1h):
+    from afair.agents.usage import usage_summary
+
+    model = "anthropic/claude-sonnet-5-5"
+    config = Settings(_env_file=None, vault_dir=tmp_path, background_daily_budget_usd=1)
+    cache_write = cache_5m + cache_1h
+    usage = {
+        "prompt_tokens": 100 + cache_read + cache_write,
+        "completion_tokens": 10,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "prompt_tokens_details": {
+            "cache_creation_token_details": {
+                "ephemeral_5m_input_tokens": cache_5m,
+                "ephemeral_1h_input_tokens": cache_1h,
+            }
+        },
+    }
+    with (
+        patch("litellm.cost_per_token", side_effect=ValueError("old map")),
+        patch("litellm.completion_cost", side_effect=ValueError("old map")),
+        patch("litellm.completion", return_value={"usage": usage}) as call,
+        background_usage(config, "entity_canonicalizer"),
+    ):
+        provider_completion(model=model, messages=[], max_tokens=300)
+        call.assert_called_once()
+    row = usage_summary(config)["workers"][0]
+    expected = (100 * 2 + cache_read * 0.10 + cache_5m * 2.5 + cache_1h * 4 + 10 * 10) / 1_000_000
+    assert row["settled_estimated_usd"] == pytest.approx(expected)
+    assert row["model"] == model
+    assert row["unpriced_attempts"] == 0
+
+
+def test_sonnet_55_override_augments_defaults_and_applies(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    model = "anthropic/claude-sonnet-5-5"
+    config = Settings(_env_file=None, vault_dir=tmp_path, background_model_prices={model: (3, 15)})
+    assert "anthropic/claude-haiku-5-5" in config.background_model_prices
+    with (
+        patch(
+            "litellm.completion",
+            return_value={
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                }
+            },
+        ),
+        background_usage(config, "entity_canonicalizer"),
+    ):
+        provider_completion(model=model, messages=[])
+    assert usage_summary(config)["workers"][0]["settled_estimated_usd"] == pytest.approx(0.00045)
+
+
+def test_sonnet_55_escalation_shares_primary_daily_budget(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    config = Settings(_env_file=None, vault_dir=tmp_path, background_daily_budget_usd=0.004)
+    with (
+        patch(
+            "litellm.completion",
+            return_value={
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                }
+            },
+        ) as call,
+        background_usage(config, "entity_canonicalizer"),
+    ):
+        provider_completion(model="anthropic/claude-haiku-5-5", messages=[], max_tokens=300)
+        with pytest.raises(BackgroundBudgetExceeded, match="exhausted"):
+            provider_completion(model="anthropic/claude-sonnet-5-5", messages=[], max_tokens=300)
+        assert call.call_count == 1
+    assert len(usage_summary(config)["workers"]) == 1
