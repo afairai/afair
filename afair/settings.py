@@ -149,7 +149,10 @@ class Settings(BaseSettings):
     # USD per million input/output tokens. Haiku 5.5 high-context rates are
     # conservative for all contexts; reservations additionally cover cache writes.
     background_model_prices: dict[str, tuple[float, float]] = Field(
-        default={"anthropic/claude-haiku-5-5": (0.50, 2.50)},
+        default={
+            "anthropic/claude-haiku-5-5": (0.50, 2.50),
+            "anthropic/claude-sonnet-5-5": (2.0, 10.0),
+        },
         validation_alias=AliasChoices("background_model_prices", "AFAIR_BACKGROUND_MODEL_PRICES"),
     )
 
@@ -162,7 +165,11 @@ class Settings(BaseSettings):
 
         if any(not math.isfinite(rate) or rate < 0 for pair in value.values() for rate in pair):
             raise ValueError("background model prices must be finite and nonnegative")
-        return {"anthropic/claude-haiku-5-5": (0.50, 2.50), **value}
+        return {
+            "anthropic/claude-haiku-5-5": (0.50, 2.50),
+            "anthropic/claude-sonnet-5-5": (2.0, 10.0),
+            **value,
+        }
 
     # Vision model for image extraction — must be vision-capable.
     # Override VISION_MODEL for another provider or vision-capable model.

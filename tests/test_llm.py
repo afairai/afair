@@ -306,3 +306,90 @@ def test_classify_name_marker_auth_still_works() -> None:
         pass
 
     assert isinstance(llm._classify(AuthError("nope")), llm.LLMAuthError)
+
+
+@pytest.mark.parametrize("matched_id", [None, "entity:synthetic"])
+def test_sonnet_55_wire_request_uses_strict_auto_without_upfront_thinking(
+    monkeypatch: pytest.MonkeyPatch, matched_id: str | None
+) -> None:
+    """Exercise the installed adapter down to HTTP, without provider/network I/O."""
+    import httpx
+
+    from afair.agents.entity_canonicalizer import _MATCH_TOOL_SCHEMA_SONNET55
+
+    captured: dict[str, Any] = {}
+
+    def fake_post(self: Any, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(json.loads(kwargs["data"]))
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "id": "msg_synthetic",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool_synthetic",
+                        "name": "match_entity",
+                        "input": {
+                            "matched_entity_id": matched_id,
+                            "reason": "synthetic",
+                            "confidence": 0.9,
+                        },
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+            },
+        )
+
+    monkeypatch.setattr("litellm.llms.custom_httpx.http_handler.HTTPHandler.post", fake_post)
+    result = llm.call_tool(
+        model="anthropic/claude-sonnet-5-5",
+        system="Match entities.",
+        user="Synthetic input.",
+        tool_name="match_entity",
+        tool_description="Match one candidate.",
+        tool_schema=_MATCH_TOOL_SCHEMA_SONNET55,
+        api_key="synthetic-test-key",
+        max_tokens=300,
+    )
+    assert result.data["matched_entity_id"] == matched_id
+    assert captured["tool_choice"] == {"type": "auto"}
+    assert captured["tools"][0]["strict"] is True
+    schema = captured["tools"][0]["input_schema"]
+    assert schema["additionalProperties"] is False
+    assert not {"minimum", "maximum"} & schema["properties"]["confidence"].keys()
+    assert schema["properties"]["matched_entity_id"]["type"] == ["string", "null"]
+    assert set(schema["required"]) == set(schema["properties"])
+    assert captured["thinking"] == {"type": "between_tools"}
+    assert captured["output_config"] == {"effort": "low"}
+    assert captured["max_tokens"] == 300
+    assert not {"temperature", "top_p", "top_k", "extra_body"} & captured.keys()
+    assert "calling the match_entity tool" in captured["system"][0]["text"]
+
+
+def test_sonnet_55_text_only_refusal_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        llm,
+        "provider_completion",
+        lambda **_: SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content="No tool call", tool_calls=[]))
+            ]
+        ),
+    )
+    with pytest.raises(llm.LLMResponseError, match="no tool_calls"):
+        llm.call_tool(
+            model="anthropic/claude-sonnet-5-5",
+            system="s",
+            user="u",
+            tool_name="t",
+            tool_description="d",
+            tool_schema=SCHEMA,
+        )

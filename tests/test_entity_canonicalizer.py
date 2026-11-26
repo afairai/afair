@@ -330,7 +330,7 @@ def test_sonnet_escalation_on_low_confidence(
     # Two distinct models were invoked.
     models_seen = {c["model"] for c in call_log}
     assert any("haiku" in m for m in models_seen)
-    assert any("sonnet" in m for m in models_seen)
+    assert "anthropic/claude-sonnet-5-5" in models_seen
 
 
 def test_llm_hallucinated_entity_id_falls_back_to_new(
@@ -1445,3 +1445,30 @@ def test_retry_success_after_failure_is_selected(db: sqlite3.Connection) -> None
 
     found = ec._find_uncanonicalized_events(db, ec.MAX_EVENTS_PER_CYCLE)
     assert [e.content_hash for e, _ in found] == [event.content_hash]
+
+
+@pytest.mark.parametrize("confidence", [-0.1, 1.1, float("nan"), float("inf")])
+def test_sonnet_strict_verdict_checks_numeric_range_locally(monkeypatch, confidence):
+    from afair.agents.llm import LLMResponseError
+
+    captured = {}
+
+    def verdict(**kwargs):
+        captured.update(kwargs)
+        return LLMResult(
+            data={"matched_entity_id": None, "reason": "synthetic", "confidence": confidence},
+            model=kwargs["model"],
+            raw="",
+        )
+
+    monkeypatch.setattr(ec, "call_tool", verdict)
+    with pytest.raises(LLMResponseError, match="confidence"):
+        ec._llm_judge_match(
+            surface_form="Synthetic",
+            surrounding_text="Synthetic only",
+            candidates=[],
+            model="anthropic/claude-sonnet-5-5",
+            api_key=None,
+        )
+    assert "minimum" not in captured["tool_schema"]["properties"]["confidence"]
+    assert ec._MATCH_TOOL_SCHEMA["properties"]["confidence"]["minimum"] == 0
