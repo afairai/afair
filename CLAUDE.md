@@ -246,6 +246,8 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` | Structured bug/feature/PR forms | When the contribution flow changes |
 | `.env.example` | Full env-var reference, with hosted variables marked optional | When env shape changes |
 | `docs/self-hosting.md` | Self-host guide: local + prod, encryption + the vault key, backups, upgrades | When setup/encryption changes |
+| [Vault exports](docs/self-hosting.md#vault-exports) | Consistent read-only JSONL snapshots, disconnect cleanup, streaming encrypted artifacts, atomic publication, retries and crash recovery | When export consistency, artifact format or lifecycle changes |
+| [Observability privacy](docs/observability-privacy.md) | Shared credential redaction contract for structured logs and Sentry, including diagnostic text and escaped secret handling | When observability sanitization policy changes |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |
 | `.github/workflows/ci.yml` | Product CI: lint/type/test on push + PR. No deploy, no secrets | When the gate set changes |
 | `.github/workflows/release.yml` | A `vX.Y.Z` tag publishes a GitHub Release (notes from the CHANGELOG section) and dispatches the afair-web fleet deploy at that tag (manual-tag fallback path) | When the release flow changes |

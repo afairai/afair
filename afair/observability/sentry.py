@@ -4,9 +4,8 @@ DSN is read from ``SENTRY_DSN``. If unset, init is a no-op so local
 development and self-hosted instances do not phone home unless the
 operator explicitly opts in.
 
-Sampling stays low (10% traces) because the cold-path LLM-calling
-workers create plenty of internal traffic; we want errors and a
-representative sample, not every span.
+Only content-free errors are sent; performance tracing is disabled because
+span descriptions and provider attributes may contain vault content.
 
 EU region is implied by the DSN host (``de.sentry.io``); the SDK
 honours that automatically.
@@ -25,92 +24,95 @@ key to a third-party error tracker.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import sentry_sdk
 from sentry_sdk.integrations.starlette import StarletteIntegration
 
-# Substring match (case-insensitive) against context/extra keys whose
-# values must be masked before an event leaves the process.
-_SENSITIVE_KEY_TOKENS = (
-    "authorization",
-    "auth_token",
-    "token",
-    "secret",
-    "api_key",
-    "apikey",
-    "password",
-    "passwd",
-    "cookie",
-    "vault_key",
-    "bearer",
-    "credential",
-    "email",
-    "payload",
-    "text",
-    "prompt",
-)
+from .privacy import MASK, diagnostic, key_is_sensitive
 
-_MASK = "[redacted]"
+_key_is_sensitive = key_is_sensitive
 
 
-def _key_is_sensitive(key: str) -> bool:
-    lowered = key.lower()
-    return any(token in lowered for token in _SENSITIVE_KEY_TOKENS)
+def _before_breadcrumb(crumb: Any, _hint: Any) -> Any:
+    """Breadcrumb messages, URLs, HTTP/SQL data and provider bodies are private."""
+    return diagnostic(crumb)
 
 
-def _scrub_mapping(data: dict[str, Any]) -> None:
-    """Mask sensitive values in-place, recursing into nested dicts."""
-    for key, value in list(data.items()):
-        if _key_is_sensitive(str(key)):
-            data[key] = _MASK
-        elif isinstance(value, dict):
-            _scrub_mapping(value)
+def _frames(stacktrace: Any) -> dict[str, Any]:
+    """Keep source locations, never locals, absolute paths or source text."""
+    if not isinstance(stacktrace, dict):
+        return {"frames": []}
+    frames = []
+    for frame in stacktrace.get("frames", []):
+        if not isinstance(frame, dict):
+            continue
+        clean = {
+            k: frame[k]
+            for k in ("lineno", "colno", "in_app")
+            if isinstance(frame.get(k), (int, bool))
+        }
+        for key in ("function", "module"):
+            value = frame.get(key)
+            # Source-code symbols only, never repr, vars, paths or context lines.
+            if isinstance(value, str) and value.replace(".", "_").isidentifier():
+                clean[key] = value[:128]
+        frames.append(clean)
+    return {"frames": frames}
 
 
 def _before_send(event: Any, _hint: Any) -> Any:
-    """Strip request internals and mask credential-shaped fields.
+    """Allow content-free incident metadata; fail closed on unknown fields.
 
-    Defense-in-depth on top of ``send_default_pii=False`` /
-    ``include_local_variables=False``: even if a future code path attaches
-    request data or sets an ``extra`` containing vault text, it is masked
-    here before transmission.
+    Filtering precedes sanitization so the established narrow uvicorn
+    disconnect-noise rule continues to work on the original message.
     """
-    # Drop the benign uvicorn client-disconnect noise: when a client closes
-    # the connection mid-stream on the Streamable-HTTP MCP endpoint, uvicorn
-    # logs "ASGI callable returned without completing response" at error level.
-    # 0 users impacted, not actionable (AFAIR-6 — 114 events of pure noise that
-    # were drowning real signal). Matched narrowly on logger + message so a
-    # genuine mid-response failure from any other source still reports.
     if event.get("logger") == "uvicorn.error":
         logentry = event.get("logentry") or {}
         message = logentry.get("message") or event.get("message") or ""
         if "ASGI callable returned without completing response" in str(message):
             return None
 
-    request = event.get("request")
-    if isinstance(request, dict):
-        # Headers and cookies carry the bearer + session; the body can be
-        # raw vault content. None of it belongs in an error report.
-        request.pop("headers", None)
-        request.pop("cookies", None)
-        request.pop("data", None)
-
-    for section in ("extra", "contexts", "tags"):
-        value = event.get(section)
-        if isinstance(value, dict):
-            _scrub_mapping(value)
-
-    # Belt-and-braces: drop any frame-local vars the SDK may still attach.
+    # Rebuild rather than chasing every SDK/provider extension field. SDK event
+    # ids are error-tracker ids, distinct from private vault event identifiers.
+    clean = {k: event[k] for k in ("event_id", "timestamp", "platform", "level") if k in event}
+    if "event_id" in clean and not (
+        isinstance(clean["event_id"], str) and re.fullmatch(r"[0-9a-f]{32}", clean["event_id"])
+    ):
+        clean["event_id"] = MASK
+    for key in ("logger", "extra", "contexts", "tags", "breadcrumbs"):
+        if key in event:
+            clean[key] = diagnostic(event[key], key="logger" if key == "logger" else "")
+    if "message" in event:
+        clean["message"] = MASK
+    if "logentry" in event:
+        clean["logentry"] = {"message": MASK}
+    if "transaction" in event:
+        clean["transaction"] = MASK
+    if "fingerprint" in event:
+        clean["fingerprint"] = [MASK]
+    # Omit request/user/thread/module/server sections altogether: substituting
+    # strings for their SDK mapping schemas would create invalid incidents.
     exception = event.get("exception")
     if isinstance(exception, dict):
+        entries = []
         for entry in exception.get("values", []):
-            stacktrace = entry.get("stacktrace") if isinstance(entry, dict) else None
-            if isinstance(stacktrace, dict):
-                for frame in stacktrace.get("frames", []):
-                    if isinstance(frame, dict):
-                        frame.pop("vars", None)
-
+            if not isinstance(entry, dict):
+                continue
+            item: dict[str, Any] = {"value": MASK}
+            for key in ("type", "module"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.replace(".", "_").isidentifier():
+                    item[key] = value[:128]
+            if "stacktrace" in entry:
+                item["stacktrace"] = _frames(entry["stacktrace"])
+            entries.append(item)
+        clean["exception"] = {"values": entries}
+    if "stacktrace" in event:
+        clean["stacktrace"] = _frames(event["stacktrace"])
+    event.clear()
+    event.update(clean)
     return event
 
 
@@ -130,8 +132,10 @@ def init_sentry() -> None:
         # text, and provider keys). See module docstring.
         send_default_pii=False,
         include_local_variables=False,
-        traces_sample_rate=0.1,
+        # Error-only telemetry: transactions/spans carry URLs and provider data.
+        traces_sample_rate=0.0,
         before_send=_before_send,
+        before_breadcrumb=_before_breadcrumb,
         # Starlette covers the FastMCP HTTP surface + all our routes.
         # We avoid the FastAPI integration because we mount via Starlette
         # directly, and double-init produces noisy log lines.
