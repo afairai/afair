@@ -162,11 +162,22 @@ def test_sentry_init_installs_both_privacy_boundaries(monkeypatch) -> None:
     from afair.observability import sentry as module
 
     captured = {}
+    monkeypatch.setenv("GIT_SHA", "1a" * 20)
     monkeypatch.setenv("SENTRY_DSN", "https://synthetic@example.test/1")
     monkeypatch.setattr(module.sentry_sdk, "init", lambda **options: captured.update(options))
     module.init_sentry()
+    assert captured["release"] == "1a" * 20
     assert captured["before_send"] is module._before_send
     assert captured["before_breadcrumb"] is module._before_breadcrumb
     assert captured["traces_sample_rate"] == 0
     assert captured["send_default_pii"] is False
     assert captured["include_local_variables"] is False
+
+
+def test_release_environment_survive_and_private_fingerprint_does_not(monkeypatch) -> None:
+    monkeypatch.setenv("AFAIR_ENVIRONMENT", "dev")
+    clean = _before_send(
+        {"environment": "dev", "release": "0.1.30", "fingerprint": ["private"]}, {}
+    )
+    assert clean == {"environment": "dev", "release": "0.1.30"}
+    assert _before_send({"environment": "private", "release": "private"}, {}) == {}
