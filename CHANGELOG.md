@@ -10,6 +10,13 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.30](https://github.com/afairai/afair/compare/v0.1.29...v0.1.30) (2026-11-26)
+
+
+### Bug Fixes
+
+* use Haiku 5.5 for image memories by default ([#96](https://github.com/afairai/afair/issues/96)) ([2de70c4](https://github.com/afairai/afair/commit/2de70c4c365f22d7dbb8cb5e1165dfda2c1b3087))
+
 ## [0.1.29](https://github.com/afairai/afair/compare/v0.1.28...v0.1.29) (2026-11-26)
 
 
