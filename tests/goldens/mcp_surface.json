@@ -1,5 +1,5 @@
 {
-  "instructions_sha256": "fe12ed575af027e4650a25688acb5e75aac5364b66d20ba442e925aa65f75356",
+  "instructions_sha256": "20a54f07685b9139c21cb768f374e4839c5c2abdae32ed8150953503fa969f04",
   "resources": [
     {
       "description": "Snapshot of the user's current vault state. Read at session start so the AI knows what's been on the user's mind without having to recall first.",
@@ -342,7 +342,7 @@
       },
       "name": "recall",
       "outputSchema": {
-        "description": "Result of any `recall` call.\n\nSix call modes share this shape:\n  - ``recall(query=...)``                      → search via FTS+vector\n  - ``recall(by_id=...)``                      → single-event lookup\n  - ``recall(by_content_hash=...)``            → single-event lookup\n  - ``recall(stats=True)``                     → summary + recent hits\n  - ``recall(query=..., full_payload=True)``   → search, untruncated\n  - ``recall()``                               → most-recent N hits\n\n``summary`` is only populated when ``stats=True`` was requested.\n``coverage`` is the honesty layer (see RecallCoverage) — populated on\nquery/browse results, null on single-event lookups.\n``pending_corrections`` lists open entity-audit AND ontology proposals —\npopulated on ``stats=True`` (and on any call that carried a ``decide``,\nso the client sees the remaining queue after acting).\n``pending_corrections_count`` is the TRUE total of open proposals\n(entity-audit + ontology) and is populated on EVERY call — a cheap\nnudge signal; call ``stats=True`` to fetch the list itself.",
+        "description": "Result of any `recall` call.\n\nSix call modes share this shape:\n  - ``recall(query=...)``                      → search via FTS+vector\n  - ``recall(by_id=...)``                      → single-event lookup\n  - ``recall(by_content_hash=...)``            → single-event lookup\n  - ``recall(stats=True)``                     → summary + recent hits\n  - ``recall(query=..., full_payload=True)``   → search, untruncated\n  - ``recall()``                               → most-recent N hits\n\n``summary`` is only populated when ``stats=True`` was requested.\n``coverage`` is the honesty layer (see RecallCoverage) — populated on\nquery/browse results, null on single-event lookups.\n``pending_corrections`` lists open entity-audit AND ontology proposals —\npopulated on ``stats=True`` (and on any call that carried a ``decide``,\nso the client sees the remaining queue after acting).\n``pending_corrections_count`` is the TRUE total of open proposals\n(entity-audit + ontology) and is populated on EVERY call as passive metadata.\nFetch the list with ``stats=True`` when the user requests review.",
         "properties": {
           "coverage": {
             "anyOf": [
@@ -711,7 +711,7 @@
           "pending_counts": {
             "anyOf": [
               {
-                "description": "Open-proposal counts split BY VALUE CLASS, so a client can value-rank what\nit surfaces instead of quoting one undifferentiated total.\n\n``conflicts`` are the highest-value class (a memory conflict needs the\noperator's call) and worth surfacing on sight. ``entity`` (retype / merge /\nmerge_review) and ``ontology`` are worth mentioning when they accumulate.\n``edge_reviews`` are low-value: low-confidence relation reviews that expire on\ntheir own (Fix 2) and are not worth the operator's attention unless asked.\n\n``pending_corrections_count`` on ``RecallResult`` stays the true grand total;\nthis is the same information split for ranking. Additive per I1.",
+                "description": "True open-proposal counts by class for explicitly requested review.\n\nPassive metadata, never a request to announce a queue or prompt maintenance.\nRelevant conflict caveats remain attached to recalled evidence. Review and\ndecisions are initiated by the user; low-confidence reviews self-expire.\nThe grand total remains pending_corrections_count for compatibility.",
                 "properties": {
                   "conflicts": {
                     "default": 0,

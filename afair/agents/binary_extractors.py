@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from .llm import LLMResponseError, _classify, _extract_tool_arguments
+from .usage import BackgroundBudgetExceeded, provider_completion
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -140,8 +141,6 @@ def transcribe_audio(
     :class:`AudioTranscriptionError` with the original cause so the
     Extractor can record a typed failed_interpretation row and move on.
     """
-    import litellm
-
     try:
         with path.open("rb") as fh:
             kwargs: dict[str, Any] = {
@@ -151,7 +150,9 @@ def transcribe_audio(
             }
             if api_key is not None:
                 kwargs["api_key"] = api_key
-            response = litellm.transcription(**kwargs)
+            response = provider_completion(_operation="transcription", **kwargs)
+    except BackgroundBudgetExceeded:
+        raise
     except Exception as e:
         raise AudioTranscriptionError(str(e)) from e
 
@@ -206,8 +207,6 @@ def describe_image(
     blob is content-addressed, two calls for the same image are a sign
     of a higher-level bug we don't want to mask).
     """
-    import litellm
-
     raw = path.read_bytes()
     data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
@@ -245,7 +244,9 @@ def describe_image(
         kwargs["api_key"] = api_key
 
     try:
-        response = litellm.completion(**kwargs)
+        response = provider_completion(**kwargs)
+    except BackgroundBudgetExceeded:
+        raise
     except Exception as e:
         # Reuse llm.py's classifier so the Extractor sees the same error
         # taxonomy regardless of modality.

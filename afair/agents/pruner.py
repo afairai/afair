@@ -104,6 +104,9 @@ TELEMETRY_PRUNE_BATCH = 5000
 (~1M rows) never holds one giant write lock. Looped until nothing older than
 the cutoff remains."""
 
+STALE_FAILURE_DELETE_BATCH = 500
+"""Stale failed extractions deleted per short write transaction."""
+
 
 class Pruner(ColdPathWorker):
     """OAuth + stale-failure pruning. No LLM; pure SQL."""
@@ -198,23 +201,30 @@ def _prune_telemetry(conn: sqlite3.Connection, cutoff_iso: str) -> int:
     total = 0
     for table in TELEMETRY_TABLES:
         while True:
-            with conn:
-                cursor = conn.execute(
-                    f"""
-                    DELETE FROM {table}
-                    WHERE id IN (
-                        SELECT id FROM {table}
-                        WHERE recorded_at < ?
-                        LIMIT ?
-                    )
-                    """,  # table names are module constants (TELEMETRY_TABLES), never user input
+            # Select the batch outside the writer lock: recorded_at has no
+            # index on pipeline_events, so the scan must not block writers.
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    f"SELECT id FROM {table} WHERE recorded_at < ? LIMIT ?",
                     (cutoff_iso, TELEMETRY_PRUNE_BATCH),
                 )
-            deleted = cursor.rowcount or 0
-            total += deleted
-            if deleted < TELEMETRY_PRUNE_BATCH:
+            ]
+            if not ids:
+                break
+            total += _delete_ids(conn, table, ids)
+            if len(ids) < TELEMETRY_PRUNE_BATCH:
                 break
     return total
+
+
+def _delete_ids(conn: sqlite3.Connection, table: str, ids: list[Any]) -> int:
+    """Delete rows by primary key in one short write transaction. ``table`` is
+    always a module constant, never user input."""
+    placeholders = ",".join("?" for _ in ids)
+    with conn:
+        cursor = conn.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
+    return cursor.rowcount or 0
 
 
 def _prune_stale_failed_extractions(conn: sqlite3.Connection, cutoff_iso: str) -> int:
@@ -226,41 +236,36 @@ def _prune_stale_failed_extractions(conn: sqlite3.Connection, cutoff_iso: str) -
     portion before ``#retry`` so 'extractor:anthropic/claude#retry2'
     is treated as the same producer family as 'extractor:anthropic/claude'.
     """
-    # One correlated anti-join DELETE instead of the old per-row SELECT +
-    # per-row DELETE-in-its-own-tx (Perf audit — N+1). The base-producer
-    # family match (compare the portion before ``#retry``) moves into SQL:
-    # ``instr``/``substr`` derive the base producer of each failed row and the
-    # EXISTS subquery checks for a success sibling under that family.
-    with conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM interpretations
-            WHERE id IN (
-                SELECT f.id
-                FROM interpretations f
-                WHERE f.produced_by LIKE 'extractor:%'
-                  AND f.produced_at < :cutoff
-                  AND json_extract(f.extraction, '$.status') = 'failed'
-                  AND EXISTS (
-                      SELECT 1 FROM interpretations s
-                      WHERE s.event_hash = f.event_hash
-                        AND s.version = f.version
-                        AND json_extract(s.extraction, '$.status') = 'success'
-                        AND s.produced_by LIKE (
-                            (CASE
-                                WHEN instr(f.produced_by, '#retry') > 0
-                                THEN substr(
-                                    f.produced_by, 1, instr(f.produced_by, '#retry') - 1
-                                )
-                                ELSE f.produced_by
-                             END) || '%'
-                        )
-                  )
-            )
-            """,
-            {"cutoff": cutoff_iso},
-        )
-    deleted = cursor.rowcount or 0
+    # Identify eligible failures without taking the writer lock. Successful
+    # interpretations are immutable, so a selected failure remains eligible,
+    # or another pruner has already deleted it.
+    rows = conn.execute(
+        """
+        SELECT f.id
+        FROM interpretations f
+        WHERE f.produced_by LIKE 'extractor:%'
+          AND f.produced_at < :cutoff
+          AND json_extract(f.extraction, '$.status') = 'failed'
+          AND EXISTS (
+              SELECT 1 FROM interpretations s
+              WHERE s.event_hash = f.event_hash
+                AND s.version = f.version
+                AND json_extract(s.extraction, '$.status') = 'success'
+                AND s.produced_by LIKE (
+                    (CASE
+                        WHEN instr(f.produced_by, '#retry') > 0
+                        THEN substr(f.produced_by, 1, instr(f.produced_by, '#retry') - 1)
+                        ELSE f.produced_by
+                     END) || '%'
+                )
+          )
+        """,
+        {"cutoff": cutoff_iso},
+    ).fetchall()
+    deleted = 0
+    for start in range(0, len(rows), STALE_FAILURE_DELETE_BATCH):
+        ids = [row["id"] for row in rows[start : start + STALE_FAILURE_DELETE_BATCH]]
+        deleted += _delete_ids(conn, "interpretations", ids)
     if deleted:
         log.info("pruner.dropped_stale_failures", count=deleted)
     return deleted

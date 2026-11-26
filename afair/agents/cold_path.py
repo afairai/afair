@@ -55,6 +55,8 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ..substrate.db import open_db
+from .foreground import background_should_yield
+from .usage import BackgroundBudgetExceeded, background_usage
 
 if TYPE_CHECKING:
     import sqlite3
@@ -150,7 +152,7 @@ class ColdPathScheduler:
             time.sleep(self._poll_seconds)
             now = time.monotonic()
             due = [w for w in self._workers if now - self._last_run[w.name] >= w.interval_seconds]
-            if not due:
+            if not due or background_should_yield():
                 continue
             if conn is None:
                 try:
@@ -159,9 +161,21 @@ class ColdPathScheduler:
                     log.warning("cold_path.db_open_failed", error=str(e))
                     continue
             for worker in due:
+                if background_should_yield():
+                    break
                 self._last_run[worker.name] = time.monotonic()
                 try:
-                    stats = worker.run(conn, self._settings)
+                    with background_usage(self._settings, worker.name):
+                        stats = worker.run(conn, self._settings)
+                except BackgroundBudgetExceeded:
+                    # No success timestamp: durable candidates stay pending.
+                    log.info("cold_path.budget_deferred", worker=worker.name)
+                    # A worker may have staged local writes before its next
+                    # provider reservation was refused. Release that writer
+                    # transaction exactly as on any other interrupted cycle.
+                    with contextlib.suppress(Exception):
+                        conn.rollback()
+                    continue
                 except Exception as e:
                     log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
                     # Roll back any open transaction so a worker that raised
@@ -172,6 +186,23 @@ class ColdPathScheduler:
                     with contextlib.suppress(Exception):
                         conn.rollback()
                     continue
+                if conn.in_transaction:
+                    # A bare write without a commit keeps SQLite's writer lock
+                    # through the poll sleep and every later worker, which
+                    # starves remember/observe past busy_timeout. The worker
+                    # succeeded, so its writes are intended: commit them.
+                    log.warning("cold_path.worker_left_open_transaction", worker=worker.name)
+                    try:
+                        conn.commit()
+                    except Exception as e:
+                        # An unhandled raise here would end this thread with
+                        # the lock still held, blocking every write until restart.
+                        log.error(
+                            "cold_path.worker_commit_failed", worker=worker.name, error=str(e)
+                        )
+                        with contextlib.suppress(Exception):
+                            conn.rollback()
+                        continue
                 self._last_success[worker.name] = time.monotonic()
                 log.info("cold_path.worker_done", worker=worker.name, **stats)
 

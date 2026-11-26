@@ -61,7 +61,7 @@ def test_empty_vault_yields_default_payload(db: sqlite3.Connection) -> None:
     assert "instructions" in payload
 
 
-def test_pending_corrections_surface_with_prompt(
+def test_pending_corrections_do_not_interrupt_session_start(
     db: sqlite3.Connection, settings: Settings
 ) -> None:
     """An open audit proposal shows up at session start with a yes/no prompt
@@ -83,15 +83,11 @@ def test_pending_corrections_surface_with_prompt(
     EntityAuditWorker().run(db, settings)
 
     payload = resources.build_session_start_payload(db)
-    pending = payload["pending_corrections"]
-    assert len(pending) == 1
-    assert pending[0]["kind"] == "retype"
-    assert "re-type" in pending[0]["prompt"]
-    # Fix 3: a single fresh high-value item is below the nudge threshold, so the
-    # decide-nudge sentence is suppressed — the item still rides the structured
-    # payload, and the AI is told to surface it only if it fits (not as a count).
-    assert "afair.recall(decide=" not in payload["instructions"]
-    assert "only if it fits" in payload["instructions"]
+    assert payload["pending_corrections"] == []
+    assert "only when the user asks" in payload["instructions"]
+    from afair.substrate import read_pending_corrections
+
+    assert len(read_pending_corrections(db)) == 1
 
 
 def test_top_salient_query_uses_producer_index(db: sqlite3.Connection) -> None:
@@ -434,7 +430,7 @@ def test_session_start_upcoming_empty_when_nothing_due(db: sqlite3.Connection) -
     assert payload["upcoming"] == []
 
 
-# ── Fix 3: value-ranked, rate-limited pending nudge ──────────────────────────
+# ── No unsolicited queue maintenance ──────────────────────────────────────
 
 
 def _seed_retype(db: sqlite3.Connection, settings: Settings, name: str = "maxime.team") -> None:
@@ -538,132 +534,26 @@ def _seed_conflict(db: sqlite3.Connection) -> None:
     )
 
 
-def test_edge_reviews_ride_payload_but_not_the_nudge(
-    db: sqlite3.Connection, settings: Settings
+@pytest.mark.parametrize("queue_kind", ["edge", "conflict", "entity"])
+def test_session_start_never_prompts_queue_maintenance(
+    db: sqlite3.Connection, settings: Settings, queue_kind: str
 ) -> None:
-    """Only edge_reviews pending: they appear in pending_corrections, but NO
-    review-ask sentence fires — they expire on their own."""
-    _seed_edge_review(db, settings)
-    payload = resources.build_session_start_payload(db)
-    kinds = {p["kind"] for p in payload["pending_corrections"]}
-    assert "edge_review" in kinds
-    # No decide-nudge for the edge_review; the static auto-expire line is present.
-    assert "afair.recall(decide=" not in payload["instructions"]
-    assert "expire on their own" in payload["instructions"]
-
-
-def test_conflict_is_itemized_first_and_always_nudges(
-    db: sqlite3.Connection, settings: Settings
-) -> None:
-    """A pending conflict is listed FIRST and bypasses the rate limit — a memory
-    conflict always earns a mention."""
-    _seed_retype(db, settings)  # a high-value item, below the growth threshold alone
-    _seed_conflict(db)
-    payload = resources.build_session_start_payload(db)
-    pending = payload["pending_corrections"]
-    assert pending[0]["kind"] == "conflict"  # conflicts first
-    assert "a memory conflict needs your call" in payload["instructions"].lower()
-    assert "afair.recall(decide=" in payload["instructions"]
-
-
-def test_nudge_is_rate_limited_and_self_acknowledges(
-    db: sqlite3.Connection, settings: Settings
-) -> None:
-    """Three fresh high-value items cross NUDGE_MIN_NEW so the nudge fires and
-    records the marker; an immediate rebuild with the SAME queue does not
-    re-fire (cooldown + no growth)."""
-    for n in ("alpha.team", "beta.team", "gamma.team"):
-        _seed_retype(db, settings, name=n)
-    first = resources.build_session_start_payload(db)
-    assert "afair.recall(decide=" in first["instructions"]  # fired (3 >= NUDGE_MIN_NEW)
-
-    # Immediate rebuild, unchanged queue → cooldown + no growth → suppressed.
-    resources.clear_cache()
-    second = resources.build_session_start_payload(db)
-    assert "afair.recall(decide=" not in second["instructions"]
-    assert "only if it fits" in second["instructions"]
-
-
-def test_nudge_returns_after_growth_and_cooldown(
-    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """After the nudge is shown, it returns once the queue grows by NUDGE_MIN_NEW
-    AND the cooldown has elapsed (simulated by back-dating the marker)."""
     from afair.substrate import watermarks
 
-    for n in ("alpha.team", "beta.team", "gamma.team"):
-        _seed_retype(db, settings, name=n)
-    resources.build_session_start_payload(db)  # fires, records marker at total=3
-
-    # Back-date the marker 8 days so the cooldown has elapsed.
-    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-    wm = watermarks.read_watermark(db, resources._PENDING_NUDGE_MARKER)
-    assert wm is not None
-    with db:
-        db.execute(
-            "UPDATE worker_watermarks SET through_created_at = ? WHERE worker = ?",
-            (old, resources._PENDING_NUDGE_MARKER),
-        )
-    # Grow the high-value queue by 3 more.
-    for n in ("delta.team", "epsilon.team", "zeta.team"):
-        _seed_retype(db, settings, name=n)
-    resources.clear_cache()
-    payload = resources.build_session_start_payload(db)
-    assert "afair.recall(decide=" in payload["instructions"]  # returned
-
-
-def test_resolving_a_conflict_does_not_inflate_the_nudge_baseline(
-    db: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The nudge growth baseline tracks ONLY the non-conflict high-value total.
-
-    A conflict bypasses the growth gate unconditionally, so it must not be folded
-    into the stored baseline: otherwise resolving the conflict deflates the count
-    and a later legitimate +NUDGE_MIN_NEW non-conflict growth is wrongly
-    suppressed. Here the nudge first fires via the conflict bypass (recording the
-    marker), the conflict is resolved, and a later +3 non-conflict growth must
-    still nudge."""
-    from afair.substrate import (
-        decide_conflict_proposal,
-        read_pending_conflict_proposals,
-        watermarks,
-    )
-
-    # A conflict + 3 non-conflict high-value items. The nudge fires via the
-    # conflict bypass and records the marker.
-    for n in ("alpha.team", "beta.team", "gamma.team"):
-        _seed_retype(db, settings, name=n)
-    _seed_conflict(db)
+    if queue_kind == "edge":
+        _seed_edge_review(db, settings)
+    elif queue_kind == "conflict":
+        _seed_conflict(db)
+    else:
+        for name in ("alpha.team", "beta.team", "gamma.team"):
+            _seed_retype(db, settings, name=name)
     first = resources.build_session_start_payload(db)
-    assert "a memory conflict needs your call" in first["instructions"].lower()
-
-    # The marker stored the NON-CONFLICT baseline (3), not the combined total (4).
-    # read_watermark returns (through_created_at, through_id); the stored total
-    # rides in through_id.
-    wm = watermarks.read_watermark(db, resources._PENDING_NUDGE_MARKER)
-    assert wm is not None
-    assert wm[1] == "3"
-
-    # Resolve the conflict — the conflict count drops to 0, the baseline is
-    # unchanged (still 3, conflict-free).
-    proposals = read_pending_conflict_proposals(db, limit=10)
-    assert len(proposals) == 1
-    decide_conflict_proposal(db, proposal_id=proposals[0].id, verdict="confirm")
-
-    # Back-date the marker past the cooldown, then grow the non-conflict queue by
-    # NUDGE_MIN_NEW (3 more retypes → non-conflict total 6). Growth is measured
-    # against the conflict-free baseline of 3, so 6 - 3 = 3 >= NUDGE_MIN_NEW fires.
-    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-    with db:
-        db.execute(
-            "UPDATE worker_watermarks SET through_created_at = ? WHERE worker = ?",
-            (old, resources._PENDING_NUDGE_MARKER),
-        )
-    for n in ("delta.team", "epsilon.team", "zeta.team"):
-        _seed_retype(db, settings, name=n)
-    resources.clear_cache()
-    payload = resources.build_session_start_payload(db)
-    assert "afair.recall(decide=" in payload["instructions"]  # legitimate nudge fired
+    second = resources.build_session_start_payload(db)
+    assert first == second
+    assert first["pending_corrections"] == []
+    assert "only when the user asks" in first["instructions"]
+    assert "needs your call" not in first["instructions"]
+    assert watermarks.read_watermark(db, "pending_nudge") is None
 
 
 def test_pending_corrections_count_stays_true_total(

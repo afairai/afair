@@ -42,6 +42,7 @@ exactly the events the warm path already chose to extract.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -82,7 +83,12 @@ any backlog beyond the cap is picked up on subsequent cycles."""
 
 
 def select_retry_candidates(
-    conn: sqlite3.Connection, *, limit: int = MAX_RETRIES_PER_RUN, wm_id: str | None = None
+    conn: sqlite3.Connection,
+    *,
+    limit: int = MAX_RETRIES_PER_RUN,
+    wm_id: str | None = None,
+    include_deferred: bool = False,
+    through_id: str | None = None,
 ) -> list[tuple[str, str]]:
     """Events whose LATEST extractor interpretation is a transient failure.
 
@@ -114,6 +120,9 @@ def select_retry_candidates(
     params["max_retries"] = MAX_EXTRACTION_RETRIES
     params["limit"] = limit
     params["wm_id"] = wm_id
+    params["now"] = time.time()
+    params["include_deferred"] = include_deferred
+    params["through_id"] = through_id
     rows = conn.execute(
         f"""
         WITH latest AS (
@@ -129,6 +138,12 @@ def select_retry_candidates(
         SELECT l.event_id, l.event_hash
         FROM latest l
         WHERE l.rn = 1
+          AND (:through_id IS NULL OR l.id <= :through_id)
+          AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+              WHERE j.event_id=l.event_id AND j.terminal=1)
+          AND (:include_deferred OR NOT EXISTS (SELECT 1 FROM extraction_jobs j
+              WHERE j.event_id=l.event_id
+              AND (j.available_at > :now OR j.lease_until >= :now)))
           AND json_extract(l.extraction, '$.status') = 'failed'
           AND json_extract(l.extraction, '$.error_type') IN ({transient_named})
           AND (
@@ -155,7 +170,10 @@ class ExtractionRetryWorker(ColdPathWorker):
         # Lazy import — extractor pulls in the mcp.context module chain;
         # keeping it out of module import time matches extractor.py's own
         # circular-import discipline.
+        from .extraction_jobs import ExtractionDeferred
         from .extractor import extract_sync
+        from .foreground import background_should_yield
+        from .usage import BackgroundBudgetExceeded
 
         _ = settings  # extraction config comes from the live ServerContext
 
@@ -178,9 +196,17 @@ class ExtractionRetryWorker(ColdPathWorker):
         # safely re-selected next cycle, so it does NOT block the advance.
         unwritten_failures = 0
         for event_id, event_hash in candidates:
+            if background_should_yield():
+                unwritten_failures += 1
+                stats["deferred"] = len(candidates) - stats["succeeded"] - stats["still_failing"]
+                break
             log.info("extraction_retry.retrying", event_id=event_id)
             try:
                 extract_sync(event_id)
+            except (BackgroundBudgetExceeded, ExtractionDeferred):
+                unwritten_failures += 1
+                stats["deferred"] = stats.get("deferred", 0) + 1
+                continue
             except Exception as e:
                 # extract_sync records LLM failures itself as failed rows;
                 # anything reaching here is unexpected (e.g. missing
@@ -213,6 +239,11 @@ class ExtractionRetryWorker(ColdPathWorker):
             frontier is not None
             and len(candidates) < MAX_RETRIES_PER_RUN
             and unwritten_failures == 0
+            # Deferred leased work was filtered out of selection and must
+            # remain below the cursor until its retry is actually terminal.
+            and not select_retry_candidates(
+                conn, limit=1, wm_id=wm_id, include_deferred=True, through_id=frontier[1]
+            )
         ):
             watermarks.write_watermark(
                 conn,

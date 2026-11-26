@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
     from pydantic import SecretStr
 
+    from ..settings import Settings
+
 
 @dataclass
 class ServerContext:
@@ -67,6 +69,8 @@ class ServerContext:
     # fixture's connection with handler calls. Production leaves this None
     # so connect_for_thread() opens per-thread connections.
     db: sqlite3.Connection | None = None
+    # Preserve the actual configured budget when constructing the server in code.
+    background_usage_settings: Settings | None = None
 
 
 _context: ServerContext | None = None
@@ -102,6 +106,9 @@ def clear_context() -> None:
     from ..agents.extractor import clear_extractor_thread_db
 
     clear_extractor_thread_db()
+    from ..agents.foreground import clear_foreground_state
+
+    clear_foreground_state()
 
 
 def connect_for_thread() -> sqlite3.Connection:

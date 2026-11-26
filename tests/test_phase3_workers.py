@@ -168,7 +168,7 @@ def _insert_interp(
 
 
 def test_prune_stale_failed_extractions_batched(db, settings_local: Settings) -> None:
-    """The batched (anti-join) delete removes a stale failed extractor row that
+    """The pruner removes a stale failed extractor row that
     has a success sibling — including across the retry-producer family — and
     keeps a failed row with no success sibling. Behavior-preserving after the
     N+1 rewrite."""
@@ -207,6 +207,74 @@ def test_prune_stale_failed_extractions_batched(db, settings_local: Settings) ->
     assert (e3.content_hash, "failed") in remaining
     assert (e1.content_hash, "failed") not in remaining
     assert (e2.content_hash, "failed") not in remaining
+
+
+def test_prune_stale_failed_extractions_spans_delete_batches(db, settings_local: Settings) -> None:
+    from afair.agents.pruner import (
+        STALE_FAILURE_DELETE_BATCH,
+        _prune_stale_failed_extractions,
+    )
+
+    old = "2020-01-01T00:00:00+00:00"
+    event = write_event(
+        db, origin="u", kind="remember", payload={"content_type": "text", "text": "batched"}
+    )
+    _insert_interp(db, event=event, produced_by="extractor:m", status="success", produced_at=old)
+    stale = STALE_FAILURE_DELETE_BATCH + 1
+    for i in range(stale):
+        _insert_interp(
+            db, event=event, produced_by=f"extractor:m#retry{i}", status="failed", produced_at=old
+        )
+
+    assert _prune_stale_failed_extractions(db, "2099-01-01T00:00:00+00:00") == stale
+    statuses = [
+        json.loads(r["extraction"])["status"]
+        for r in db.execute("SELECT extraction FROM interpretations")
+    ]
+    assert statuses == ["success"]
+
+
+def test_prune_telemetry_spans_batches_without_holding_lock_on_empty_scan(
+    db, settings_local: Settings, monkeypatch
+) -> None:
+    from contextlib import closing
+
+    from afair.agents import pruner
+
+    monkeypatch.setattr(pruner, "TELEMETRY_PRUNE_BATCH", 2)
+    for i in range(5):
+        db.execute(
+            "INSERT INTO pipeline_events (id, event_id, stage, status, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (f"pe{i}", "e", "x", "ok", "2020-01-01T00:00:00+00:00"),
+        )
+    db.commit()
+    assert pruner._prune_telemetry(db, "2099-01-01T00:00:00+00:00") == 5
+    assert db.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 0
+
+    db.execute("PRAGMA busy_timeout = 0")
+    with closing(open_db(settings_local.vault_dir)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        assert pruner._prune_telemetry(db, "2099-01-01T00:00:00+00:00") == 0
+
+
+def test_pruner_with_no_eligible_failures_needs_no_writer_lock(
+    db, settings_local: Settings
+) -> None:
+    from contextlib import closing
+
+    from afair.agents.pruner import _prune_stale_failed_extractions
+
+    event = write_event(
+        db, origin="u", kind="remember", payload={"content_type": "text", "text": "still failed"}
+    )
+    _insert_interp(
+        db, event=event, produced_by="extractor:m", status="failed", produced_at="2020-01-01"
+    )
+    db.execute("PRAGMA busy_timeout = 0")
+    with closing(open_db(settings_local.vault_dir)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        assert _prune_stale_failed_extractions(db, "2099-01-01") == 0
 
 
 def _pc_entity(db, name: str, kind: str) -> str:

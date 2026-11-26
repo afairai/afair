@@ -58,6 +58,13 @@ Don't ask "should I save this?" Just save it. Don't ask "should I check
 first?" Just check. afair is not optional infrastructure; it's the
 memory the user paid for.
 
+The vault maintains itself. Do not announce pending queue counts or ask the
+user to review or maintain it. Queue counts are passive compatibility
+metadata. Only when the user requests review, fetch proposals with
+``recall(stats=True)`` or ``pending_limit`` and apply their answers with
+``recall(decide=...)``. Never decide without an explicit answer. Keep
+conflict caveats relevant to the current question in your answer.
+
 The three verbs (recall, remember, observe) are frozen v1. They will
 not change. Lean into them.
 """

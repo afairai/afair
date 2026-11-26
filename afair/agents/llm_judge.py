@@ -40,6 +40,7 @@ from dataclasses import dataclass
 import structlog
 
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
+from .usage import BackgroundBudgetExceeded, provider_completion
 
 log = structlog.get_logger(__name__)
 
@@ -176,11 +177,9 @@ def _ask_one_judge(
       * User-controlled content already wrapped in untrusted
         delimiters by :func:`_format_pair_prompt` per ``untrusted.py``.
     """
-    import litellm
-
     user_prompt = _format_pair_prompt(pair)
     try:
-        completion = litellm.completion(
+        completion = provider_completion(
             model=model,
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
@@ -192,6 +191,8 @@ def _ask_one_judge(
             timeout=PER_CALL_TIMEOUT_SECONDS,
         )
         body = completion["choices"][0]["message"]["content"]
+    except BackgroundBudgetExceeded:
+        raise
     except Exception as e:
         log.warning("judge.model_failed", model=model, pair_index=pair_index, error=str(e))
         return None

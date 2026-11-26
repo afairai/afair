@@ -609,17 +609,12 @@ class CorrectionOutcomeView(BaseModel):
 
 
 class PendingCounts(BaseModel):
-    """Open-proposal counts split BY VALUE CLASS, so a client can value-rank what
-    it surfaces instead of quoting one undifferentiated total.
+    """True open-proposal counts by class for explicitly requested review.
 
-    ``conflicts`` are the highest-value class (a memory conflict needs the
-    operator's call) and worth surfacing on sight. ``entity`` (retype / merge /
-    merge_review) and ``ontology`` are worth mentioning when they accumulate.
-    ``edge_reviews`` are low-value: low-confidence relation reviews that expire on
-    their own (Fix 2) and are not worth the operator's attention unless asked.
-
-    ``pending_corrections_count`` on ``RecallResult`` stays the true grand total;
-    this is the same information split for ranking. Additive per I1.
+    Passive metadata, never a request to announce a queue or prompt maintenance.
+    Relevant conflict caveats remain attached to recalled evidence. Review and
+    decisions are initiated by the user; low-confidence reviews self-expire.
+    The grand total remains pending_corrections_count for compatibility.
     """
 
     conflicts: int = 0
@@ -646,8 +641,8 @@ class RecallResult(BaseModel):
     populated on ``stats=True`` (and on any call that carried a ``decide``,
     so the client sees the remaining queue after acting).
     ``pending_corrections_count`` is the TRUE total of open proposals
-    (entity-audit + ontology) and is populated on EVERY call — a cheap
-    nudge signal; call ``stats=True`` to fetch the list itself.
+    (entity-audit + ontology) and is populated on EVERY call as passive metadata.
+    Fetch the list with ``stats=True`` when the user requests review.
     """
 
     hits: list[RecallHit]
@@ -659,8 +654,8 @@ class RecallResult(BaseModel):
     pending_corrections_count: int = 0
     pending_counts: PendingCounts | None = None
     """The open-proposal total split by value class (conflicts / entity /
-    ontology / edge_reviews) so a client can value-rank the nudge rather than
-    quote the raw ``pending_corrections_count``. Populated on every call whenever
+    ontology / edge_reviews), as passive metadata for explicit review.
+    Populated on every call whenever
     anything is pending; null when the queue is empty. Additive per I1."""
     decisions: list[CorrectionOutcomeView] = []
     """Per-decision outcomes when this call carried ``decide=`` (single or

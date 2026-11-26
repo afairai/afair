@@ -1509,12 +1509,12 @@ def _sonnet_for(haiku_model: str) -> str | None:
 
     Returns None for non-Anthropic models — escalation is currently
     Anthropic-only. The Sonnet model name follows the same versioning
-    convention as the Haiku default (see CLAUDE.md for the supported
-    Claude 4.X family).
+    convention as the tested Claude family; Haiku 5.5 deliberately retains
+    the Sonnet 4.6 low-confidence fallback.
     """
     if not haiku_model.startswith("anthropic/"):
         return None
-    if "haiku-4-5" in haiku_model:
+    if "haiku-4-5" in haiku_model or "haiku-5-5" in haiku_model:
         return "anthropic/claude-sonnet-4-6"
     # Unknown Anthropic variant — skip escalation rather than guess.
     return None
