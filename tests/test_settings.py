@@ -23,6 +23,7 @@ def test_defaults_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MCP_HOST",
         "MCP_PORT",
         "EXTRACTOR_MODEL",
+        "VISION_MODEL",
         "EMBEDDING_MODEL",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -40,6 +41,14 @@ def test_defaults_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert s.mcp_port == 8765
     assert s.extractor_model == "anthropic/claude-haiku-4-5"
     assert s.extractor_model.startswith("anthropic/")
+    assert s.vision_model == "anthropic/claude-haiku-5-5"
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-4o-mini", "ollama/llama3.2-vision:11b"])
+def test_vision_model_override(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    monkeypatch.setenv("VISION_MODEL", model)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.vision_model == model
 
 
 def test_vault_dir_expands_tilde(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

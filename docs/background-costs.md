@@ -31,7 +31,8 @@ vision models with no known context limit defer under a cap. Haiku 5.5's
 1,000,000-token context is built in, independently of LiteLLM's pricing map.
 Requests without explicit cache controls reserve uncached input once; requests
 with cache controls reserve input at 2× to cover one-hour cache creation.
-Thus Haiku 5.5 vision can run under a $1 cap (a full-context input reservation
+Haiku 5.5 is the default image extraction model; `VISION_MODEL` overrides it.
+Thus default vision can run under a $1 cap (a full-context input reservation
 costs $0.50, plus bounded output), releasing unused input on settlement. Atomic `BEGIN IMMEDIATE` reservations
 prevent concurrent extractors/workers from spending the same remaining budget.
 A provider response releases the unused reservation after settlement. Dollar

@@ -24,6 +24,7 @@ import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..model_defaults import DEFAULT_VISION_MODEL
 from ..substrate import open_db
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ class ServerContext:
     extractor_model: str = "anthropic/claude-haiku-4-5"
     # Multi-modal extraction models (Phase 1 binary extraction). Vision
     # handles image content; transcription handles audio.
-    vision_model: str = "anthropic/claude-haiku-4-5"
+    vision_model: str = DEFAULT_VISION_MODEL
     transcription_model: str = "openai/whisper-1"
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None

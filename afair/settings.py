@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .model_defaults import DEFAULT_VISION_MODEL
+
 # Minimum acceptable AFAIR_VAULT_KEY length. 32 bytes = 256 bits, matching
 # the AES-256 / SQLCipher key the salt-less HKDF derives from it.
 _MIN_VAULT_KEY_BYTES = 32
@@ -163,9 +165,8 @@ class Settings(BaseSettings):
         return {"anthropic/claude-haiku-5-5": (0.50, 2.50), **value}
 
     # Vision model for image extraction — must be vision-capable.
-    # Defaults to Haiku 4.5 (cheap, fast, has vision); upgrade to a
-    # Sonnet tier when image understanding requirements grow.
-    vision_model: str = "anthropic/claude-haiku-4-5"
+    # Override VISION_MODEL for another provider or vision-capable model.
+    vision_model: str = DEFAULT_VISION_MODEL
 
     # Audio transcription model. litellm shape: ``openai/whisper-1``,
     # ``deepgram/nova-3``, ``groq/whisper-large-v3``. Vendor-neutral

@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ..model_defaults import DEFAULT_VISION_MODEL
 from .llm import LLMResponseError, _classify, _extract_tool_arguments
 from .usage import BackgroundBudgetExceeded, provider_completion
 
@@ -172,13 +173,6 @@ def transcribe_audio(
 
 class ImageDescriptionError(Exception):
     """Image vision-call failed (network, auth, model can't do vision)."""
-
-
-# Default vision model — Claude Haiku 4.5 has vision and is the cheapest
-# vision-capable Anthropic model. The "claude-3-5-sonnet" tier handles
-# more complex images but at ~5x cost. Phase 0 keeps Haiku for cost
-# discipline; users override via VISION_MODEL env.
-DEFAULT_VISION_MODEL = "anthropic/claude-haiku-4-5"
 
 
 def describe_image(
