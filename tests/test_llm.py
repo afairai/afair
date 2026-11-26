@@ -315,7 +315,7 @@ def test_sonnet_55_wire_request_uses_strict_auto_without_upfront_thinking(
     """Exercise the installed adapter down to HTTP, without provider/network I/O."""
     import httpx
 
-    from afair.agents.entity_canonicalizer import _MATCH_TOOL_SCHEMA
+    from afair.agents.entity_canonicalizer import _MATCH_TOOL_SCHEMA_SONNET55
 
     captured: dict[str, Any] = {}
 
@@ -353,7 +353,7 @@ def test_sonnet_55_wire_request_uses_strict_auto_without_upfront_thinking(
         user="Synthetic input.",
         tool_name="match_entity",
         tool_description="Match one candidate.",
-        tool_schema=_MATCH_TOOL_SCHEMA,
+        tool_schema=_MATCH_TOOL_SCHEMA_SONNET55,
         api_key="synthetic-test-key",
         max_tokens=300,
     )
@@ -362,6 +362,7 @@ def test_sonnet_55_wire_request_uses_strict_auto_without_upfront_thinking(
     assert captured["tools"][0]["strict"] is True
     schema = captured["tools"][0]["input_schema"]
     assert schema["additionalProperties"] is False
+    assert not {"minimum", "maximum"} & schema["properties"]["confidence"].keys()
     assert schema["properties"]["matched_entity_id"]["type"] == ["string", "null"]
     assert set(schema["required"]) == set(schema["properties"])
     assert captured["thinking"] == {"type": "between_tools"}

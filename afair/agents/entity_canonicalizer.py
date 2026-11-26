@@ -109,7 +109,7 @@ from .entity_articles import ENTITY_ARTICLE_KIND
 from .framing import PrincipalFraming, current
 from .interpretation import write_interpretation
 from .invalidation import INVALIDATE_KIND
-from .llm import LLMError, call_tool
+from .llm import LLMError, LLMResponseError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
 
 if TYPE_CHECKING:
@@ -230,6 +230,21 @@ _MATCH_TOOL_SCHEMA: dict[str, Any] = {
     },
     "required": ["matched_entity_id", "reason", "confidence"],
     "additionalProperties": False,
+}
+
+
+# Anthropic strict tools reject numerical bounds. Preserve the same confidence
+# description and validate the range locally; other providers keep the schema.
+_MATCH_TOOL_SCHEMA_SONNET55 = {
+    **_MATCH_TOOL_SCHEMA,
+    "properties": {
+        **_MATCH_TOOL_SCHEMA["properties"],
+        "confidence": {
+            key: value
+            for key, value in _MATCH_TOOL_SCHEMA["properties"]["confidence"].items()
+            if key not in {"minimum", "maximum"}
+        },
+    },
 }
 
 
@@ -1225,7 +1240,11 @@ def _llm_judge_match(
         user=user_msg,
         tool_name=_MATCH_TOOL_NAME,
         tool_description=_MATCH_TOOL_DESCRIPTION,
-        tool_schema=_MATCH_TOOL_SCHEMA,
+        tool_schema=(
+            _MATCH_TOOL_SCHEMA_SONNET55
+            if model == "anthropic/claude-sonnet-5-5"
+            else _MATCH_TOOL_SCHEMA
+        ),
         api_key=api_key,
         max_tokens=300,
     )
@@ -1237,10 +1256,13 @@ def _llm_judge_match(
     valid_ids = {c.id for c in candidates}
     if matched is not None and matched not in valid_ids:
         matched = None
+    confidence = float(data.get("confidence", 0.5))
+    if model == "anthropic/claude-sonnet-5-5" and not 0 <= confidence <= 1:
+        raise LLMResponseError("match confidence must be between zero and one")
     return _MatchVerdict(
         matched_entity_id=matched,
         reason=str(data.get("reason", "")),
-        confidence=float(data.get("confidence", 0.5)),
+        confidence=confidence,
     )
 
 
