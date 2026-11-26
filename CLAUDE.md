@@ -246,6 +246,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 | `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` | Structured bug/feature/PR forms | When the contribution flow changes |
 | `.env.example` | Full env-var reference, with hosted variables marked optional | When env shape changes |
 | `docs/self-hosting.md` | Self-host guide: local + prod, encryption + the vault key, backups, upgrades | When setup/encryption changes |
+| [Chronological replay](docs/chronological-replay.md) | Independently frozen synthetic replay through actual intake, extraction, hybrid FTS/vector recall with a bounded synthetic local encoder, cross-client answers and cited synthesis; audit hashes, metric counts, explicit offline/provider modes and bounded costs | When replay paths, scoring or budget controls change |
 | [Vault exports](docs/self-hosting.md#vault-exports) | Consistent read-only JSONL snapshots, disconnect cleanup, streaming encrypted artifacts, atomic publication, retries and crash recovery | When export consistency, artifact format or lifecycle changes |
 | [Observability privacy](docs/observability-privacy.md) | Shared credential redaction contract for structured logs and Sentry, including diagnostic text and escaped secret handling | When observability sanitization policy changes |
 | `docs/clients/*.md` | Per-client MCP connection config + universal instruction snippet | When client integration changes |

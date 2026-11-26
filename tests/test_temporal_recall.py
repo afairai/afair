@@ -202,3 +202,36 @@ def test_recall_demotes_an_actually_invalidated_memory(ctx: ServerContext) -> No
     assert new.content_hash in hashes
     # the superseded memory is floored → ranks below the current one
     assert hashes.index(new.content_hash) < hashes.index(old.content_hash)
+
+
+def test_still_question_prefers_newer_withdrawal_over_lexically_stronger_confirmation(ctx):
+    """An ongoing-state question must not rank an old confirmation first."""
+    old = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "text",
+            "text": "I have confirmed my place on the Silverwing ferry.",
+        },
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    new = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "text",
+            "text": "I withdrew from the Silverwing ferry trip and cancelled my place.",
+        },
+        created_at="2026-02-01T00:00:00+00:00",
+    )
+    result = handlers.recall(
+        query="Do I still have a confirmed place on the Silverwing ferry?",
+        depth="shallow",
+        verbosity="full",
+    )
+    assert [hit.event_id for hit in result.hits][:2] == [new.id, old.id]
+    assert handlers._has_temporal_intent("Am I still enrolled in the workshop?")
+    assert not handlers._has_temporal_intent("What did the Silverwing ferry booking say?")
+    assert not handlers._has_temporal_intent("Show me the still life painting")

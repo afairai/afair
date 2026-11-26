@@ -39,6 +39,7 @@ from .evidence_quality import (
     observation_lane,
 )
 from .framing import PrincipalFraming, current
+from .interpretation import Interpretation, read_latest_interpretations_batch
 from .invalidation import INVALIDATE_KIND, write_invalidation
 from .llm import LLMError, call_tool
 from .untrusted import UNTRUSTED_CONTENT_DIRECTIVE, wrap_untrusted
@@ -235,6 +236,7 @@ class _Prior:
     member_hashes: frozenset[str]
     entity_ids: frozenset[str]
     created_at: str
+    source_extractions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -244,6 +246,7 @@ class _Synthesis:
     key_points: list[dict[str, Any]]
     open_questions: list[str]
     conflict_notes: list[dict[str, Any]]
+    source_extractions: dict[str, str] = field(default_factory=dict)
 
 
 class LivingSynthesisWorker(ColdPathWorker):
@@ -676,6 +679,11 @@ def _live_priors(conn: sqlite3.Connection) -> list[_Prior]:
                 member_hashes=frozenset(str(h) for h in members),
                 entity_ids=frozenset(str(e) for e in payload.get("entity_ids", [])),
                 created_at=row["created_at"],
+                source_extractions={
+                    str(k): str(v) for k, v in payload.get("source_extractions", {}).items()
+                }
+                if isinstance(payload.get("source_extractions"), dict)
+                else {},
             )
         )
     return out
@@ -693,6 +701,13 @@ def _materially_changed(
     byte-equivalent factual content (ignoring transport/timing metadata) can be
     deferred; no numerical similarity threshold can swallow a small correction.
     """
+    # Extracted binary/spilled evidence can become available after a cluster
+    # was first synthesized. Refresh legacy projections once, and refresh on
+    # a new successful interpretation without mutating any original source.
+    selected = _candidate_events(events, candidate)
+    projected = _source_interpretations(conn, selected)
+    if prior.source_extractions != {h: item.id for h, item in projected.items()}:
+        return True
     if not prior.member_hashes <= candidate.member_hashes:
         return True
     added = candidate.member_hashes - prior.member_hashes
@@ -777,12 +792,13 @@ def _synthesize(
     steering: list[dict[str, Any]] | None = None,
 ) -> _Synthesis:
     conflict_map = read_conflicts_batch(conn, [event.content_hash for event in events])
+    interpretations = _source_interpretations(conn, events)
     records = [
         {
             "n": index + 1,
             "created_at": event.created_at,
             "kind": event.kind,
-            "content": _event_content(event),
+            "content": _event_content(event, interpretations.get(event.content_hash)),
             "unresolved_conflicts": [
                 flag
                 for flag in conflict_map.get(event.content_hash, [])
@@ -841,12 +857,77 @@ def _synthesize(
         key_points=_resolve_key_points(data.get("key_points"), events),
         open_questions=_string_list(data.get("open_questions"), limit=5),
         conflict_notes=_resolve_conflict_notes(data.get("conflict_notes"), events),
+        source_extractions={h: item.id for h, item in interpretations.items()},
     )
 
 
-def _event_content(event: Event) -> dict[str, Any]:
-    payload = event.payload
-    return {key: value for key, value in payload.items() if key not in {"data_b64", "blob_hash"}}
+MAX_EXTRACTED_SOURCE_CHARS = 8000
+_NON_INLINE_CONTENT_TYPES = {"binary", "text-large", "compound"}
+
+
+def _source_interpretations(
+    conn: sqlite3.Connection, events: list[Event]
+) -> dict[str, Interpretation]:
+    return read_latest_interpretations_batch(
+        conn,
+        [
+            e.content_hash
+            for e in events
+            if isinstance(e.payload.get("content_type"), str)
+            and e.payload.get("content_type") in _NON_INLINE_CONTENT_TYPES
+        ],
+    )
+
+
+def _event_content(event: Event, interpretation: Interpretation | None = None) -> dict[str, Any]:
+    content = {
+        key: value for key, value in event.payload.items() if key not in {"data_b64", "blob_hash"}
+    }
+    if interpretation is None:
+        return content
+    # Extraction is derived evidence, never silently promoted into source text.
+    # Include only bounded fields and keep every byte inside the existing source
+    # fence. Provider diagnostics/raw responses and binary bytes never enter it.
+    evidence: dict[str, Any] = {
+        "interpretation_id": interpretation.id,
+        "produced_by": interpretation.produced_by[:128],
+    }
+    remaining = MAX_EXTRACTED_SOURCE_CHARS
+    truncated = False
+
+    def take(value: str, *, limit: int | None = None) -> str:
+        nonlocal remaining, truncated
+        cap = remaining if limit is None else min(limit, remaining)
+        clipped = value[:cap]
+        # The existing fence expands closing tags. Account for that expansion
+        # here so adversarial text cannot exceed the advertised prompt budget.
+        escaped = clipped.replace("</event_content>", "&lt;/event_content&gt;")
+        while len(escaped) > cap:
+            clipped = clipped[: max(0, len(clipped) - (len(escaped) - cap))]
+            escaped = clipped.replace("</event_content>", "&lt;/event_content&gt;")
+        remaining -= len(escaped)
+        truncated |= len(clipped) < len(value)
+        return clipped
+
+    for key in ("summary", "extracted_text"):
+        value = interpretation.extraction.get(key)
+        if isinstance(value, str) and value.strip():
+            evidence[key] = take(value)
+    facts = interpretation.extraction.get("salient_facts")
+    if isinstance(facts, list):
+        selected = []
+        for fact in facts[:8]:
+            if isinstance(fact, str):
+                if remaining:
+                    selected.append(take(fact, limit=256))
+                elif fact:
+                    truncated = True
+        if selected:
+            evidence["salient_facts"] = selected
+        truncated |= len(facts) > 8
+    evidence["truncated"] = truncated
+    content["extracted_evidence"] = evidence
+    return content
 
 
 def _resolve_key_points(raw: Any, events: list[Event]) -> list[dict[str, Any]]:
@@ -943,6 +1024,8 @@ def _write_synthesis(
         "produced_by": LIVING_SYNTHESIS_PRODUCER,
         "context": f"Living synthesis: {synthesis.title}",
     }
+    if synthesis.source_extractions:
+        payload["source_extractions"] = synthesis.source_extractions
     return write_event(
         conn,
         origin="agent",

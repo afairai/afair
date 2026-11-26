@@ -1406,7 +1406,7 @@ def _auto_route_depth(query: str) -> Depth:
 # role" surfaces the latest record instead of an equally-text-matching older
 # one. Non-temporal queries are untouched — no ranking regression.
 _TEMPORAL_INTENT_RE = re.compile(
-    r"\b(current|currently|latest|now|today|recent|recently|nowadays|present|"
+    r"\b(current|currently|latest|now|today|recent|recently|nowadays|present|still(?![-\s]+life\b)|"
     r"these days|right now|as of|aktuell(?:e[rmns]?)?|derzeit|momentan|jetzt|heute|"
     r"neueste[rmns]?|zuletzt|gegenwärtig|zurzeit|inzwischen)\b",
     re.IGNORECASE,
