@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 def vault_dir(tmp_path):
     p = tmp_path / "vault"
     p.mkdir()
+    # Server startup initializes schema; the export itself is strictly read-only.
+    open_db(p).close()
     return p
 
 

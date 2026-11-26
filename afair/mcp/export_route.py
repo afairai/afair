@@ -56,15 +56,16 @@ import base64
 import hmac
 import json
 import re
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from starlette.responses import StreamingResponse
 
-from ..substrate import open_db
 from ..substrate.blob_gc import blob_hashes_in_payload
+from ..substrate.db import open_db_readonly
 from ..substrate.objects import (
     object_exists,
     object_plaintext_size,
@@ -73,10 +74,11 @@ from ..substrate.objects import (
 from .cors import cors_headers
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator, Generator
 
     from starlette.requests import Request
     from starlette.responses import Response
+    from starlette.types import Receive, Scope, Send
 
 log = structlog.get_logger(__name__)
 
@@ -131,10 +133,15 @@ def _iter_export(
     vault_dir: Path,
     *,
     include_blobs: bool,
-) -> Iterator[str]:
+) -> Generator[str, None, None]:
     """Stream JSONL records. Each yield is a single ``…\\n`` line."""
-    conn = open_db(vault_dir)
+    conn = open_db_readonly(vault_dir)
     try:
+        # Hold one deferred read transaction across ALL tables, including mutable
+        # operational verdict queues and the second events scan for blob references.
+        # WAL permits concurrent writers; separate SELECTs must not see different
+        # commits (or an interpretation may reference an event absent from the dump).
+        conn.execute("BEGIN")
         # Events first, in chronological order.
         rows = conn.execute(
             """
@@ -354,6 +361,21 @@ def _iter_export(
         conn.close()
 
 
+class _ExportStreamingResponse(StreamingResponse):
+    """Release the read snapshot immediately on disconnect or send failure.
+
+    Starlette's response stops iterating when its disconnect task cancels the
+    sender, but does not promise to close an async body suspended at a yield.
+    Explicitly close it here rather than depending on garbage collection.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await cast("AsyncGenerator[bytes, None]", self.body_iterator).aclose()
+
+
 async def export_endpoint(request: Request) -> Response:
     credential = _check_auth(request)
     if credential is None:
@@ -368,8 +390,9 @@ async def export_endpoint(request: Request) -> Response:
     # are fast and bounded; no need for thread-pool offloading at the
     # volumes we ship (Phase 0: sub-GB vaults).
     async def _stream() -> AsyncGenerator[bytes, None]:
-        for line in _iter_export(vault_dir, include_blobs=include_blobs):
-            yield line.encode("utf-8")
+        with closing(_iter_export(vault_dir, include_blobs=include_blobs)) as records:
+            for line in records:
+                yield line.encode("utf-8")
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     filename = f"afair-export-{stamp}.jsonl"
@@ -387,7 +410,7 @@ async def export_endpoint(request: Request) -> Response:
         credential=credential,
         client_ip=fly_ip,
     )
-    return StreamingResponse(
+    return _ExportStreamingResponse(
         _stream(),
         media_type="application/x-ndjson; charset=utf-8",
         headers={

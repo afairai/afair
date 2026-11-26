@@ -232,11 +232,16 @@ def open_db_readonly(vault_dir: Path) -> _stdlib_sqlite.Connection:
     conn = _open_connection(
         (vault_dir / "substrate.db").resolve(), vault_key=_VAULT_KEY, read_only=True
     )
-    conn.execute("PRAGMA query_only = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.close()
+        raise
     return conn
 
 
