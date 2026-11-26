@@ -105,3 +105,7 @@ apparent failed write.
 New connections read the persistent journal mode before attempting to enable
 WAL. On a new vault, concurrent initializers retry a busy or locked transition
 for up to five seconds. Other database errors propagate immediately.
+
+For a successful interpretation whose FTS postprocessing is incomplete, use the
+[explicit index-only audit and repair](extraction-health.md#targeted-index-only-repair).
+It reuses the stored result and never invokes extraction or generation.

@@ -231,7 +231,8 @@ def repair_missing_vectors(
             AND COALESCE(json_extract(i.extraction,'$.status'),'') != 'failed')
         AND NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.content_hash=e.content_hash)
         AND NOT EXISTS (SELECT 1 FROM extraction_jobs j WHERE j.event_id=e.id
-            AND (j.terminal=1 OR j.available_at > ? OR j.lease_until >= ?))
+            AND (j.terminal=1 OR j.available_at > ? OR j.lease_until >= ?
+                 OR j.purpose='index_repair'))
         ORDER BY e.created_at, e.id LIMIT ?""",
         (time.time(), time.time(), limit),
     ).fetchall()

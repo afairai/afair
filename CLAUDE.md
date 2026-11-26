@@ -222,6 +222,7 @@ If a feature proposal requires accessing user data the user hasn't deliberately 
 |---|---|---|
 | `docs/background-costs.md` and `scripts/background_usage.py` | Inspect daily provider usage and configure the background generation budget | When pricing, reservation or reporting changes |
 | `docs/extraction-recovery.md` and `scripts/recover_extractions.py` | Audit the vault and repair bounded extraction or vector gaps | When recovery or foreground prioritization changes |
+| `docs/extraction-health.md` and `scripts/repair_extraction_indexes.py` | Distinguish telemetry loss from real gaps and verify or repair explicit stored-success indexes without extraction replay | When extraction completion or index repair changes |
 | `docs/evidence-processing.md` | Explain how observations qualify for conflict checks and syntheses, and how to request a review | When evidence selection or review guidance changes |
 | `VISION.md` | The constitution: vision, mission, invariants, architecture, durable product boundaries, research grounding | Quarterly review; treat as zeitlos, no per-phase status updates |
 | `docs/adr/ADR-0001-constitutional-invariants.md` | Why the eight invariants exist + why drawn this way: each negates a failure mode, the three reinforcing chains, the I2-erasure clarification, and the accepted bets (I8 economics, I3 projection discipline, I7 aspirational). Has re-examination triggers | When an invariant is re-examined or a bet resolves |
