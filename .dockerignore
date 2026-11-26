@@ -25,3 +25,5 @@ vault/
 *.db
 *.sqlite*
 .claude/
+.env.secrets.backup.prod
+.env.secrets.backup.prod.*

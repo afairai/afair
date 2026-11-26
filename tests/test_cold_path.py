@@ -325,3 +325,77 @@ def test_budget_deferral_rolls_back_and_releases_writer(
     assert probe.acquired is True
     assert probe.saw_row == 0
     assert sched.status()["budget_deferred"]["seconds_since_last_success"] is None
+
+
+def test_process_progress_starts_unknown_even_with_persisted_pipeline(
+    tmp_path: Path,
+    settings_local: Settings,
+) -> None:
+    """Old DB snapshots cannot bless a daemon that has not completed a cycle."""
+    from afair.substrate import observability
+
+    conn = open_db(tmp_path)
+    observability.write_snapshot(
+        conn, producer="expectation_checker", counters={"expectation_violations": 0}
+    )
+    conn.close()
+    scheduler = ColdPathScheduler(
+        vault_dir=tmp_path, embedding_dim=1536, settings=settings_local, workers=[_CountingWorker()]
+    )
+    status = scheduler.status()["counting"]
+    assert status["state"] == "pending"
+    assert status["seconds_since_last_success"] is None
+    assert status["interval_seconds"] == 1
+    assert scheduler.scheduler_status()["thread_alive"] is False
+    assert scheduler.scheduler_status()["seconds_since_last_poll"] is None
+
+
+class _ExplicitBudgetDeferred(ColdPathWorker):
+    name = "explicit_budget_deferred"
+    interval_seconds = 3600
+
+    def run(self, conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+        from afair.agents.usage import BackgroundBudgetExceeded
+
+        raise BackgroundBudgetExceeded(
+            "private provider details must not enter health", reason="daily_budget_exhausted"
+        )
+
+
+def test_health_distinguishes_real_success_budget_refusal_and_thread_progress(
+    tmp_path: Path,
+    settings_local: Settings,
+) -> None:
+    settings_local.background_daily_budget_usd = 0
+    counting = _CountingWorker()
+    scheduler = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[_ExplicitBudgetDeferred(), counting],
+        poll_seconds=1,
+    )
+    scheduler.start()
+    deadline = time.monotonic() + 3
+    while counting.invocations == 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    states = scheduler.status()
+    refused = states["explicit_budget_deferred"]
+    assert refused["state"] == "budget_deferred"
+    assert refused["seconds_since_last_run"] is not None
+    assert refused["seconds_since_last_success"] is None
+    assert refused["budget_deferral_reason"] == "daily_budget_exhausted"
+    assert refused["budget_deferral_current_day"] is True
+    assert refused["budget_configured"] is True
+    assert states["counting"]["state"] == "succeeded"
+    assert states["counting"]["seconds_since_last_success"] is not None
+    assert scheduler.scheduler_status()["thread_alive"] is True
+    assert scheduler.scheduler_status()["seconds_since_last_poll"] <= 1
+    assert "private provider" not in str(states)
+
+
+def test_budget_reason_is_allowlisted_and_never_derived_from_exception_text() -> None:
+    from afair.agents.usage import BackgroundBudgetExceeded
+
+    failure = BackgroundBudgetExceeded("private-model-name-and-secret", reason="private-diagnostic")
+    assert failure.reason == "unspecified"

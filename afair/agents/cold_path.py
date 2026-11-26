@@ -50,6 +50,7 @@ import contextlib
 import threading
 import time
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -123,6 +124,12 @@ class ColdPathScheduler:
         self._last_run: dict[str, float] = {w.name: float("-inf") for w in workers}
         # A second tracker for SUCCESSFUL completion; used for diagnostics.
         self._last_success: dict[str, float] = dict.fromkeys(self._last_run, float("-inf"))
+        self._states = dict.fromkeys(self._last_run, "pending")
+        self._state_at = dict.fromkeys(self._last_run, time.monotonic())
+        self._deferrals: dict[str, tuple[str, str]] = {}
+        self._created_at = time.monotonic()
+        self._last_poll: float | None = None
+        self._last_heartbeat: float | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -144,6 +151,28 @@ class ColdPathScheduler:
             )
             return self._thread
 
+    def _state(self, name: str, state: str) -> None:
+        with self._lock:
+            self._states[name] = state
+            self._state_at[name] = time.monotonic()
+            self._last_heartbeat = time.monotonic()
+
+    def scheduler_status(self) -> dict[str, Any]:
+        """Current process only: persisted pipeline health cannot prove a new daemon ran."""
+        now = time.monotonic()
+        with self._lock:
+            return {
+                "thread_alive": self._thread is not None and self._thread.is_alive(),
+                "poll_seconds": self._poll_seconds,
+                "seconds_since_last_poll": None
+                if self._last_poll is None
+                else int(now - self._last_poll),
+                "seconds_since_last_heartbeat": None
+                if self._last_heartbeat is None
+                else int(now - self._last_heartbeat),
+                "uptime_seconds": int(now - self._created_at),
+            }
+
     def _loop(self) -> None:
         # Connection is opened lazily inside the loop so a startup-time
         # filesystem hiccup doesn't crash before the daemon's first poll.
@@ -151,6 +180,9 @@ class ColdPathScheduler:
         while True:
             time.sleep(self._poll_seconds)
             now = time.monotonic()
+            with self._lock:
+                self._last_poll = now
+                self._last_heartbeat = now
             due = [w for w in self._workers if now - self._last_run[w.name] >= w.interval_seconds]
             if not due or background_should_yield():
                 continue
@@ -163,11 +195,20 @@ class ColdPathScheduler:
             for worker in due:
                 if background_should_yield():
                     break
-                self._last_run[worker.name] = time.monotonic()
+                with self._lock:
+                    self._last_run[worker.name] = time.monotonic()
+                    self._deferrals.pop(worker.name, None)
+                self._state(worker.name, "running")
                 try:
                     with background_usage(self._settings, worker.name):
                         stats = worker.run(conn, self._settings)
-                except BackgroundBudgetExceeded:
+                except BackgroundBudgetExceeded as deferred:
+                    with self._lock:
+                        self._deferrals[worker.name] = (
+                            deferred.reason,
+                            datetime.now(UTC).date().isoformat(),
+                        )
+                    self._state(worker.name, "budget_deferred")
                     # No success timestamp: durable candidates stay pending.
                     log.info("cold_path.budget_deferred", worker=worker.name)
                     # A worker may have staged local writes before its next
@@ -177,6 +218,7 @@ class ColdPathScheduler:
                         conn.rollback()
                     continue
                 except Exception as e:
+                    self._state(worker.name, "failed")
                     log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
                     # Roll back any open transaction so a worker that raised
                     # between a bare execute and its commit doesn't leak an
@@ -202,8 +244,11 @@ class ColdPathScheduler:
                         )
                         with contextlib.suppress(Exception):
                             conn.rollback()
+                        self._state(worker.name, "failed")
                         continue
-                self._last_success[worker.name] = time.monotonic()
+                with self._lock:
+                    self._last_success[worker.name] = time.monotonic()
+                self._state(worker.name, "succeeded")
                 log.info("cold_path.worker_done", worker=worker.name, **stats)
 
     def status(self) -> dict[str, dict[str, Any]]:
@@ -214,6 +259,12 @@ class ColdPathScheduler:
             return {
                 w.name: {
                     "interval_seconds": w.interval_seconds,
+                    "state": self._states[w.name],
+                    "seconds_since_state_change": int(now - self._state_at[w.name]),
+                    "budget_deferral_reason": self._deferrals.get(w.name, (None, None))[0],
+                    "budget_deferral_current_day": self._deferrals.get(w.name, (None, None))[1]
+                    == datetime.now(UTC).date().isoformat(),
+                    "budget_configured": self._settings.background_daily_budget_usd is not None,
                     "seconds_since_last_run": (
                         None
                         if self._last_run[w.name] == float("-inf")

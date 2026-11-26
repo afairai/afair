@@ -25,7 +25,22 @@ if TYPE_CHECKING:
 
 
 class BackgroundBudgetExceeded(Exception):
-    """Defer background work without recording a failed interpretation."""
+    """Defer work without inventing success. ``reason`` is public-safe taxonomy."""
+
+    def __init__(self, message: str, *, reason: str = "unspecified") -> None:
+        super().__init__(message)
+        self.reason = (
+            reason
+            if reason
+            in {
+                "unspecified",
+                "pricing_unavailable",
+                "ledger_unavailable",
+                "unpriced_attempts",
+                "daily_budget_exhausted",
+            }
+            else "unspecified"
+        )
 
 
 _SCOPE: ContextVar[tuple[Settings, str] | None] = ContextVar("background_usage", default=None)
@@ -148,7 +163,9 @@ def provider_completion(*, _operation: str = "completion", **kwargs: Any) -> Any
             unknown_input = True
     cap = settings.background_daily_budget_usd if _operation == "completion" else None
     if cap is not None and (reserve is None or unknown_input):
-        raise BackgroundBudgetExceeded(f"no safe cost bound for {model}")
+        raise BackgroundBudgetExceeded(
+            f"no safe cost bound for {model}", reason="pricing_unavailable"
+        )
     now = datetime.now(UTC)
     ident = uuid4().hex
     kwargs["num_retries"] = 0
@@ -162,7 +179,7 @@ def provider_completion(*, _operation: str = "completion", **kwargs: Any) -> Any
                 "usage.embedding_unaccounted", failure_class=type(exc).__name__
             )
             return request(**kwargs)
-        raise BackgroundBudgetExceeded(message) from exc
+        raise BackgroundBudgetExceeded(message, reason="ledger_unavailable") from exc
 
     try:
         conn = _connection(settings)
@@ -229,7 +246,9 @@ def _reserve(
     ).fetchone()[0]
     if cap is not None and unknown:
         conn.rollback()
-        raise BackgroundBudgetExceeded("daily ledger contains unpriced provider attempts")
+        raise BackgroundBudgetExceeded(
+            "daily ledger contains unpriced provider attempts", reason="unpriced_attempts"
+        )
     spent = conn.execute(
         "SELECT COALESCE(SUM(COALESCE(cost_usd,reserved_usd)),0) "
         "FROM provider_usage WHERE day=? AND operation='completion'",
@@ -237,7 +256,9 @@ def _reserve(
     ).fetchone()[0]
     if cap is not None and spent + (reserve or 0) > cap:
         conn.rollback()
-        raise BackgroundBudgetExceeded("daily background provider budget exhausted")
+        raise BackgroundBudgetExceeded(
+            "daily background provider budget exhausted", reason="daily_budget_exhausted"
+        )
     conn.execute(
         "INSERT INTO provider_usage (id,day,started_at,worker,model,status,reserved_usd,cost_usd,prompt_tokens,completion_tokens,cost_source,operation) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (

@@ -563,3 +563,28 @@ The hosted browser importer sends bounded batches directly to the user's own
 machine. Identical normalized items deduplicate through the normal content-hash
 contract. A fresh event enters the same extraction and synthesis pipeline as an
 ordinary `remember` call.
+
+
+### Background worker progress in `/health`
+
+The additive `worker_health_schema: 2` response distinguishes current-process
+scheduler liveness from its persisted pipeline snapshot. `scheduler` reports
+`thread_alive`, uptime, poll interval, time since its last poll, and time since
+its last heartbeat (a poll or real worker state transition). A fresh stored
+`pipeline_ok` value alone cannot prove that a newly restarted daemon has run.
+
+Each `workers` entry retains `seconds_since_last_success` and now includes its
+real `interval_seconds`, last attempted-run age, current `state`, state age and
+allowlisted budget-deferral evidence. A new process begins `pending` with null
+success timestamps until actual successful completion. Failed work and budget
+refusal never stamp success. Daily/6-hour worker cadences remain visible; they
+are not mistakenly judged by a universal 30-minute recurrence requirement.
+
+An explicit daily allowance refusal has reason `daily_budget_exhausted`, whether
+an allowance was configured, and whether that refusal belongs to the current
+UTC day. Unknown prices, unavailable usage ledgers and unpriced earlier attempts
+have different fixed reasons. These diagnostics contain no prompt, model name,
+provider response, exception text, allowance amount or customer memory. A budget
+refusal describes deferred work; it is not evidence that the work succeeded.
+HTTP liveness stays 200 when the database is readable; callers can separately
+apply their own cadence/freshness policy to these measured fields.

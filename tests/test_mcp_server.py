@@ -744,3 +744,56 @@ def test_build_revision_requires_full_image_commit(tmp_path: Path) -> None:
     assert _build_revision(path) is None
     path.write_text("a1" * 20 + "\n")
     assert _build_revision(path) == "a1" * 20
+
+
+def test_health_exposes_actual_scheduler_and_cadence_without_private_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.testclient import TestClient
+
+    import afair.mcp.server as module
+
+    worker = {
+        "interval_seconds": 86400,
+        "state": "succeeded",
+        "seconds_since_last_success": 7200,
+        "seconds_since_last_run": 7200,
+        "seconds_since_state_change": 7200,
+        "budget_deferral_reason": None,
+        "budget_deferral_current_day": False,
+        "budget_configured": False,
+    }
+    scheduler = {
+        "thread_alive": True,
+        "seconds_since_last_heartbeat": 20,
+        "seconds_since_last_poll": 20,
+        "poll_seconds": 60,
+        "uptime_seconds": 8000,
+    }
+
+    class MeasuredScheduler:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def status(self) -> dict[str, dict[str, object]]:
+            return {"daily_worker": worker}
+
+        def scheduler_status(self) -> dict[str, object]:
+            return scheduler
+
+    monkeypatch.setattr(module, "ColdPathScheduler", MeasuredScheduler)
+    monkeypatch.setattr(module, "_spawn_warmup", lambda _settings: None)
+    settings = _settings_for(tmp_path)
+    settings.cold_path_enabled = True
+    app = build_server(settings).http_app()
+    with TestClient(app) as client:
+        response = client.get("/health")
+    body = response.json()
+    assert body["worker_health_schema"] == 2
+    assert body["workers"] == {"daily_worker": worker}
+    assert body["scheduler"] == scheduler
+    assert set(body["workers"]["daily_worker"]) == set(worker)
