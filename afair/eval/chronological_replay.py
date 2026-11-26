@@ -531,6 +531,7 @@ def _isolated_runtime() -> Iterator[None]:
     # vault path/key, provider credential, proxy or evaluation-key env survives.
     safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR")
     environment = {name: os.environ[name] for name in safe_names if name in os.environ}
+    environment.update(LITELLM_MODE="PRODUCTION", LITELLM_LOCAL_MODEL_COST_MAP="True")
     with (
         tempfile.TemporaryDirectory(prefix="afair-replay-runtime-") as directory,
         chdir(directory),

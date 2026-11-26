@@ -492,3 +492,27 @@ def test_any_future_ambient_settings_constructor_fails_closed():
 
     with replay._isolated_runtime(), pytest.raises(RuntimeError, match="forbids ambient Settings"):
         Settings()
+
+
+def test_first_provider_library_import_is_offline_and_skips_dotenv(tmp_path):
+    import subprocess
+    import sys
+    from textwrap import dedent
+
+    sentinel = tmp_path / ".env"
+    sentinel.write_text("REPLAY_UNEXPECTED_DOTENV_MARKER=yes\n")
+    script = dedent("""
+        import os, socket, sys
+        from unittest.mock import patch
+        import dotenv, httpx
+        from afair.eval.chronological_replay import _isolated_runtime
+        assert "litellm" not in sys.modules
+        with _isolated_runtime(), patch.object(dotenv,"load_dotenv") as env_reader, patch.object(httpx,"get") as net, patch.object(socket.socket,"connect") as connect:
+            import litellm
+            assert litellm.model_cost
+            assert not env_reader.called
+            assert not net.called
+            assert not connect.called
+            assert "REPLAY_UNEXPECTED_DOTENV_MARKER" not in os.environ
+    """)
+    subprocess.run([sys.executable, "-c", script], cwd=tmp_path, check=True)
