@@ -52,6 +52,7 @@ from afair.agents import extractor
 from afair.agents.consolidator import Consolidator
 from afair.agents.entity_articles import EntityArticleWorker
 from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.agents.usage import background_usage
 from afair.mcp.context import ServerContext, clear_context, set_context
 from afair.settings import Settings
 from afair.substrate import open_db, write_event
@@ -163,7 +164,8 @@ def _run_cold_path(dest: sqlite3.Connection, settings: Settings, max_cycles: int
 
     def drive(worker: Any, cap: int) -> int:
         for cycle in range(cap):
-            stats = worker.run(dest, settings)
+            with background_usage(settings, "operator.rebuild_vault"):
+                stats = worker.run(dest, settings)
             for k, v in stats.items():
                 if isinstance(v, int):
                     totals[f"{worker.name}.{k}"] = totals.get(f"{worker.name}.{k}", 0) + v
@@ -216,6 +218,7 @@ def rebuild(
     ctx = ServerContext(
         db=dest_db,
         vault_dir=dest_dir,
+        background_usage_settings=settings,
         inline_text_max_bytes=settings.inline_text_max_bytes,
         extractor_model=settings.extractor_model,
         vision_model=settings.vision_model,

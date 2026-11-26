@@ -40,6 +40,7 @@ from typing import Any
 
 from afair.agents import entity_dedup as ed
 from afair.agents.entity_dedup import EntityDeduplicator
+from afair.agents.usage import background_usage
 from afair.settings import Settings
 from afair.substrate import open_db
 from afair.substrate.db import set_vault_key
@@ -164,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
         cycles_run = 0
         started = time.monotonic()
         while True:
-            stats = worker.run(db, settings)
+            with background_usage(settings, "operator.drain_entity_dedup"):
+                stats = worker.run(db, settings)
             cycles_run += 1
             _accumulate(totals, stats)
             if not args.quiet:

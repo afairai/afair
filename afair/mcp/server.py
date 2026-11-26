@@ -770,7 +770,10 @@ def _spawn_warmup(settings: Settings) -> None:
             # We want the HTTPS connection + provider state warm — not
             # the cache pre-populated with a string nobody will ever
             # query for.
-            embed_text(model=settings.embedding_model, text="warmup", api_key=api_key)
+            from ..agents.usage import background_usage
+
+            with background_usage(settings, "startup_warmup"):
+                embed_text(model=settings.embedding_model, text="warmup", api_key=api_key)
             log.info("warmup.done", model=settings.embedding_model)
         except Exception as e:
             log.warning("warmup.embedding_failed", error=str(e))

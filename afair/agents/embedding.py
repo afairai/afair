@@ -28,12 +28,18 @@ import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from .usage import BackgroundBudgetExceeded
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
 class EmbeddingError(Exception):
     """Any failure during embedding generation."""
+
+
+class EmbeddingDeferred(BackgroundBudgetExceeded, EmbeddingError):
+    """Transient spending guard refusal: recall can fall back and repair can retry."""
 
 
 # ── query-side embedding cache ────────────────────────────────────────────
@@ -384,14 +390,19 @@ def _embed_via_litellm(
     *, model: str, texts: list[str], api_key: str | None, timeout: float
 ) -> list[list[float]]:
     """Call litellm.embedding for vendor-neutral cloud providers."""
-    # Lazy import — litellm is heavy at import time.
-    import litellm
+    from .usage import provider_completion
 
     try:
         if api_key is not None:
-            response = litellm.embedding(model=model, input=texts, timeout=timeout, api_key=api_key)
+            response = provider_completion(
+                _operation="embedding", model=model, input=texts, timeout=timeout, api_key=api_key
+            )
         else:
-            response = litellm.embedding(model=model, input=texts, timeout=timeout)
+            response = provider_completion(
+                _operation="embedding", model=model, input=texts, timeout=timeout
+            )
+    except BackgroundBudgetExceeded as exc:
+        raise EmbeddingDeferred("embedding temporarily deferred") from exc
     except Exception as e:
         msg = f"embedding call failed: {e}"
         raise EmbeddingError(msg) from e
