@@ -19,7 +19,10 @@ explicit control can still pass ``vault_key=...`` per call.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3 as _stdlib_sqlite
+import time
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 import sqlite_vec  # type: ignore[import-untyped]
@@ -115,51 +118,113 @@ def open_db(
     # and vice-versa, so it must match the connection's origin).
     conn = _open_connection(db_path, vault_key=effective_key)
 
-    # Pragmas — durability + concurrency + performance.
-    #
-    # busy_timeout MUST be set first: the engine consults it on every
-    # subsequent lock attempt, including the next PRAGMA. Setting
-    # journal_mode = WAL briefly requires an exclusive lock on the file;
-    # without the busy timeout in place, two concurrent open_db calls on
-    # the same vault (admin backfill running alongside the server, two
-    # tests sharing a tmp_path, even just the test runner re-opening
-    # during teardown on a slow disk) race and one raises
-    # "database is locked" immediately. With the timeout set first the
-    # second opener simply waits its turn. Was the source of an
-    # occasional CI flake on test_observe_via_mcp_protocol.
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA temp_store = MEMORY")
-    # Memory-mapped reads — SQLite mmaps the database file up to this many
-    # bytes. Reads skip the OS-cache→userspace copy when the page is hot.
-    # 256MB is far larger than the current vault but cheap (only mapped
-    # pages are actually paged in).
-    conn.execute("PRAGMA mmap_size = 268435456")  # 256MB
-    # Page cache — negative value means kilobytes (positive = pages).
-    # -16384 ≈ 16MB of recent pages kept hot in this connection's cache.
-    # This is PER-CONNECTION, and public-launch concurrency opens many
-    # connections at once (the 8-thread recall pool + extractor + cold-path
-    # + checkpoint + per-internal-route). At the old 64MB the worst-case
-    # resident cache across ~10 connections approached the 1GB VM ceiling —
-    # an OOM under a traffic spike. 16MB is ample for the small per-recall
-    # working set and keeps the aggregate well within budget. (Perf NEW-6.)
-    conn.execute("PRAGMA cache_size = -16384")
-    # Run the planner's auto-tune. Cheap to call repeatedly; SQLite skips
-    # the work when nothing has changed since the last optimize.
-    conn.execute("PRAGMA optimize")
+    try:
+        # Pragmas — durability + concurrency + performance.
+        #
+        # Journal-mode transitions can return BUSY immediately even with SQLite's
+        # busy handler installed. Avoid transitions on already-WAL vaults, and
+        # retry genuine first-open races within one bounded startup deadline.
+        _ensure_wal(conn)
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        # Memory-mapped reads — SQLite mmaps the database file up to this many
+        # bytes. Reads skip the OS-cache→userspace copy when the page is hot.
+        # 256MB is far larger than the current vault but cheap (only mapped
+        # pages are actually paged in).
+        conn.execute("PRAGMA mmap_size = 268435456")  # 256MB
+        # Page cache — negative value means kilobytes (positive = pages).
+        # -16384 ≈ 16MB of recent pages kept hot in this connection's cache.
+        # This is PER-CONNECTION, and public-launch concurrency opens many
+        # connections at once (the 8-thread recall pool + extractor + cold-path
+        # + checkpoint + per-internal-route). At the old 64MB the worst-case
+        # resident cache across ~10 connections approached the 1GB VM ceiling —
+        # an OOM under a traffic spike. 16MB is ample for the small per-recall
+        # working set and keeps the aggregate well within budget. (Perf NEW-6.)
+        conn.execute("PRAGMA cache_size = -16384")
+        # Run the planner's auto-tune. Cheap to call repeatedly; SQLite skips
+        # the work when nothing has changed since the last optimize.
+        conn.execute("PRAGMA optimize")
 
-    # Load sqlite-vec extension (provides the vec0 virtual table type).
-    # Must happen before the vec DDL runs. SQLCipher exposes the same
-    # loadable-extension API as upstream SQLite, so this path is identical
-    # in encrypted and plaintext mode.
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+        # Load sqlite-vec extension (provides the vec0 virtual table type).
+        # Must happen before the vec DDL runs. SQLCipher exposes the same
+        # loadable-extension API as upstream SQLite, so this path is identical
+        # in encrypted and plaintext mode.
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
 
-    init_db(conn, embedding_dim=embedding_dim)
+        init_db(conn, embedding_dim=embedding_dim)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.close()
+        raise
+
     return conn
+
+
+WAL_STARTUP_TIMEOUT_SECONDS = 5.0
+WAL_BUSY_SLICE_MS = 100
+WAL_RETRY_SECONDS = 0.05
+
+
+def _is_sqlite_busy(error: Exception) -> bool:
+    """Recognize both backend hierarchies, including extended BUSY codes."""
+    errors: tuple[type[Exception], ...] = (_stdlib_sqlite.OperationalError,)
+    try:
+        cipher = import_module("sqlcipher3")
+    except ImportError:
+        pass
+    else:
+        errors += (cipher.OperationalError,)
+    if not isinstance(error, errors):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (_stdlib_sqlite.SQLITE_BUSY, _stdlib_sqlite.SQLITE_LOCKED)
+    # SQLCipher builds without sqlite_errorcode expose SQLite's stable messages.
+    message = str(error).lower()
+    return message in ("database is locked", "database is busy") or message.startswith(
+        ("database table is locked", "database schema is locked")
+    )
+
+
+def _ensure_wal(conn: _stdlib_sqlite.Connection) -> None:
+    """Read persistent WAL mode before requesting its exclusive transition.
+
+    Short busy-handler slices plus a monotonic deadline bound all attempts,
+    including drivers which return BUSY immediately on a lock upgrade.
+    Non-contention failures propagate and never get hidden by a retry loop.
+    """
+    deadline = time.monotonic() + WAL_STARTUP_TIMEOUT_SECONDS
+    succeeded = False
+    try:
+        while True:
+            remaining = max(0, deadline - time.monotonic())
+            conn.execute(
+                f"PRAGMA busy_timeout = {max(1, min(WAL_BUSY_SLICE_MS, int(remaining * 1000)))}"
+            )
+            try:
+                current = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(current).lower() == "wal":
+                    succeeded = True
+                    return
+                selected = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                if str(selected).lower() != "wal":
+                    raise RuntimeError("SQLite did not enable WAL journal mode")
+                succeeded = True
+                return
+            except Exception as error:
+                remaining = deadline - time.monotonic()
+                if not _is_sqlite_busy(error) or remaining <= 0:
+                    raise
+                time.sleep(min(WAL_RETRY_SECONDS, remaining))
+    finally:
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+        except Exception:
+            if succeeded:
+                raise
 
 
 def open_db_readonly(vault_dir: Path) -> _stdlib_sqlite.Connection:
@@ -225,29 +290,34 @@ def _open_connection(
                 check_same_thread=False,
             ),
         )
-        # sqlcipher3 has its own Row class — using stdlib sqlite3.Row
-        # here would raise TypeError("Row() argument 1 must be
-        # sqlite3.Cursor, not sqlcipher3.dbapi2.Cursor") on the first
-        # fetch. Set the matching factory before any row is read.
-        conn.row_factory = sqlcipher3.Row
-        # Raw-hex key, see docstring above.
-        hex_key = derive_sqlcipher_key(vault_key)
-        conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
-        # Reading sqlite_version (or any other table) verifies the key
-        # is correct — wrong key gives "file is not a database" here.
-        # Fail loud at boot rather than silently 100 queries deep.
-        # Catch BOTH error classes: stdlib sqlite3.DatabaseError and
-        # sqlcipher3's parallel DatabaseError (they don't share a base).
         try:
-            cast("Any", conn).execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except (_stdlib_sqlite.DatabaseError, sqlcipher3.DatabaseError) as exc:
-            msg = (
-                "SQLCipher failed to open the database with the provided "
-                "AFAIR_VAULT_KEY. Either the key is wrong, the file is "
-                "not encrypted (run scripts/encrypt_existing_vault.py "
-                "first), or the file is corrupt."
-            )
-            raise RuntimeError(msg) from exc
+            # sqlcipher3 has its own Row class — using stdlib sqlite3.Row
+            # here would raise TypeError("Row() argument 1 must be
+            # sqlite3.Cursor, not sqlcipher3.dbapi2.Cursor") on the first
+            # fetch. Set the matching factory before any row is read.
+            conn.row_factory = sqlcipher3.Row
+            # Raw-hex key, see docstring above.
+            hex_key = derive_sqlcipher_key(vault_key)
+            conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+            # Reading sqlite_version (or any other table) verifies the key
+            # is correct — wrong key gives "file is not a database" here.
+            # Fail loud at boot rather than silently 100 queries deep.
+            # Catch BOTH error classes: stdlib sqlite3.DatabaseError and
+            # sqlcipher3's parallel DatabaseError (they don't share a base).
+            try:
+                cast("Any", conn).execute("SELECT count(*) FROM sqlite_master").fetchone()
+            except (_stdlib_sqlite.DatabaseError, sqlcipher3.DatabaseError) as exc:
+                msg = (
+                    "SQLCipher failed to open the database with the provided "
+                    "AFAIR_VAULT_KEY. Either the key is wrong, the file is "
+                    "not encrypted (run scripts/encrypt_existing_vault.py "
+                    "first), or the file is corrupt."
+                )
+                raise RuntimeError(msg) from exc
+        except BaseException:
+            with contextlib.suppress(Exception):
+                conn.close()
+            raise
         return conn
 
     plain_conn = _stdlib_sqlite.connect(

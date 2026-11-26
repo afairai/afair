@@ -101,3 +101,7 @@ or SQLCipher contention logs a content-free warning and allows the handler to
 finish and stamp client provenance. Warm execution and bounded discovery remain
 recovery paths; an operational queue lock cannot turn a saved event into an
 apparent failed write.
+
+New connections read the persistent journal mode before attempting to enable
+WAL. On a new vault, concurrent initializers retry a busy or locked transition
+for up to five seconds. Other database errors propagate immediately.
