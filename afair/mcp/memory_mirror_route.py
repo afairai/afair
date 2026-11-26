@@ -20,6 +20,7 @@ from ..agents.invalidation import INVALIDATE_KIND, read_invalidations_batch
 from ..agents.living_syntheses import LIVING_SYNTHESIS_KIND
 from ..substrate import open_db, read_event_by_hash
 from ..substrate.content_corrections import point_digest, read_key_point_reviews
+from ..substrate.provenance import read_event_provenance_batch
 from .cors import cors_headers
 from .internal_auth import authorize_internal
 
@@ -62,6 +63,7 @@ async def memory_mirror_endpoint(request: Request) -> Response:
     conn = _conn(request)
     try:
         syntheses = _read_syntheses(conn, limit=limit)
+        first_evidence = _first_evidence(conn)
     finally:
         conn.close()
 
@@ -77,9 +79,80 @@ async def memory_mirror_endpoint(request: Request) -> Response:
                 "stale_sources": sum(int(item["stale_source_count"]) for item in syntheses),
             },
             "syntheses": syntheses,
+            "first_evidence": first_evidence,
         },
         headers={"Cache-Control": "no-store", **cors_headers(request)},
     )
+
+
+def _source_clients(conn: Connection, event_id: str) -> list[str]:
+    return [row.client for row in read_event_provenance_batch(conn, [event_id]).get(event_id, [])]
+
+
+def _source_history(conn: Connection, source: Any, invalidation: Any) -> dict[str, Any]:
+    """Project explicit correction links; never infer a replacement from wording."""
+    corrections = []
+    if invalidation is not None:
+        rows = conn.execute(
+            """SELECT id, content_hash, created_at, payload FROM events
+               WHERE kind = 'remember' AND json_extract(payload, '$.corrects') = ?
+               ORDER BY created_at DESC, id DESC LIMIT 3""",
+            (source.content_hash,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (ValueError, TypeError):
+                continue
+            corrections.append(
+                {
+                    "event_id": row["id"],
+                    "content_hash": row["content_hash"],
+                    "created_at": row["created_at"],
+                    "preview": _source_preview(payload),
+                    "writing_clients": _source_clients(conn, row["id"]),
+                }
+            )
+    return {
+        "recorded_at": source.created_at,
+        "invalidation": invalidation.model_dump() if invalidation is not None else None,
+        "corrections": corrections,
+    }
+
+
+def _first_evidence(conn: Connection) -> dict[str, Any]:
+    """One recent, still-current source for onboarding, with honest read limits.
+
+    Writer provenance is not reader evidence. No reader tracking is invented,
+    and viewing this dashboard never writes an activation/telemetry event.
+    """
+    rows = conn.execute(
+        """SELECT id, content_hash, created_at, payload FROM events
+           WHERE kind = 'remember' ORDER BY created_at DESC, id DESC LIMIT 20"""
+    ).fetchall()
+    invalidations = read_invalidations_batch(conn, [row["content_hash"] for row in rows])
+    for row in rows:
+        if row["content_hash"] in invalidations:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            continue
+        preview = _source_preview(payload)
+        if not preview:
+            continue
+        return {
+            "source": {
+                "event_id": row["id"],
+                "content_hash": row["content_hash"],
+                "created_at": row["created_at"],
+                "preview": preview,
+                "writing_clients": _source_clients(conn, row["id"]),
+            },
+            "second_client_retrieval": "unknown",
+            "reader_tracking": "not_recorded",
+        }
+    return {"source": None, "second_client_retrieval": "unknown", "reader_tracking": "not_recorded"}
 
 
 def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
@@ -135,9 +208,15 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
         source_invalidations = read_invalidations_batch(conn, citations)
         conflicts = read_conflicts_batch(conn, citations)
         sources = []
+        source_events = {
+            source_hash: read_event_by_hash(conn, source_hash) for source_hash in citations
+        }
+        provenance = read_event_provenance_batch(
+            conn, [source.id for source in source_events.values() if source is not None]
+        )
         unresolved_count = 0
         for source_hash in citations:
-            source = read_event_by_hash(conn, source_hash)
+            source = source_events[source_hash]
             if source is None:
                 sources.append(
                     {
@@ -163,6 +242,8 @@ def _read_syntheses(conn: Connection, *, limit: int) -> list[dict[str, Any]]:
                     "current": source_hash not in source_invalidations,
                     "missing": False,
                     "conflicts": all_conflicts,
+                    "writing_clients": [stamp.client for stamp in provenance.get(source.id, [])],
+                    "history": _source_history(conn, source, source_invalidations.get(source_hash)),
                 }
             )
 
