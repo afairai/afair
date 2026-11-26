@@ -793,6 +793,22 @@ def _enrich_fts_after_extraction(
     rebuild stays uniform regardless of whether the row pre-existed.
     Lives inside the extractor's transaction window for atomicity.
     """
+    enriched = _extraction_searchable_text(payload, extraction, extracted_text)
+    if not enriched:
+        return  # nothing to add; leave existing row in place
+
+    with db:
+        db.execute("DELETE FROM events_fts WHERE content_hash = ?", (content_hash,))
+        db.execute(
+            "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
+            (content_hash, enriched),
+        )
+
+
+def _extraction_searchable_text(
+    payload: dict[str, Any], extraction: dict[str, Any], extracted_text: str | None
+) -> str:
+    """Exact FTS postcondition shared by normal extraction and index-only repair."""
     from ..substrate.payload import derive_searchable_text
 
     pieces: list[str] = []
@@ -807,16 +823,7 @@ def _enrich_fts_after_extraction(
     salient = extraction.get("salient_facts")
     if isinstance(salient, list):
         pieces.extend(s for s in salient if isinstance(s, str) and s.strip())
-    enriched = "\n".join(pieces).strip()
-    if not enriched:
-        return  # nothing to add; leave existing row in place
-
-    with db:
-        db.execute("DELETE FROM events_fts WHERE content_hash = ?", (content_hash,))
-        db.execute(
-            "INSERT INTO events_fts (content_hash, searchable_text) VALUES (?, ?)",
-            (content_hash, enriched),
-        )
+    return "\n".join(pieces).strip()
 
 
 def _store_embedding(db: object, content_hash: str, vector: list[float]) -> None:
