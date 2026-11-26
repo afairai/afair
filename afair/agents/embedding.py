@@ -28,12 +28,18 @@ import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from .usage import BackgroundBudgetExceeded
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
 class EmbeddingError(Exception):
     """Any failure during embedding generation."""
+
+
+class EmbeddingDeferred(BackgroundBudgetExceeded, EmbeddingError):
+    """Transient spending guard refusal: recall can fall back and repair can retry."""
 
 
 # ── query-side embedding cache ────────────────────────────────────────────
@@ -395,6 +401,8 @@ def _embed_via_litellm(
             response = provider_completion(
                 _operation="embedding", model=model, input=texts, timeout=timeout
             )
+    except BackgroundBudgetExceeded as exc:
+        raise EmbeddingDeferred("embedding temporarily deferred") from exc
     except Exception as e:
         msg = f"embedding call failed: {e}"
         raise EmbeddingError(msg) from e

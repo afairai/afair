@@ -471,3 +471,29 @@ def test_audio_transcript_survives_budget_deferral_and_restart(ctx, monkeypatch,
         .startswith("Paid transcription")
     )
     assert not select_missing_extractions(ctx.db)
+
+
+def test_vector_repair_ledger_outage_remains_retryable(ctx, monkeypatch):
+    from afair.agents import usage
+
+    source = event(ctx, 11)
+    write_interpretation(
+        ctx.db, event=source, version=1, produced_by="extractor:mock", extraction=GOOD
+    )
+    config = ctx.background_usage_settings.model_copy(
+        update={"background_daily_budget_usd": 1.0, "embedding_model": "test/model"}
+    )
+
+    def unavailable(_settings):
+        raise OSError("ledger offline")
+
+    monkeypatch.setattr(usage, "_connection", unavailable)
+    for _ in range(4):
+        with ctx.db:
+            ctx.db.execute("UPDATE extraction_jobs SET available_at=0")
+        result = repair_missing_vectors(ctx.db, config, limit=1)
+        assert result["deferred"] == 1
+        record = ctx.db.execute(
+            "SELECT failures,terminal FROM extraction_jobs WHERE event_id=?", (source.id,)
+        ).fetchone()
+        assert tuple(record) == (0, 0)
