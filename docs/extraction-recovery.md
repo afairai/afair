@@ -90,7 +90,14 @@ classes without exception messages or source content.
 
 The intake origin is historically `agent` even for genuine MCP remembers; it is
 preserved as eligible. Internal `agent:<worker>` origins and payloads marked with
-`produced_by` are excluded, as are operator `resolve_conflict` audit actions.
+`produced_by` are excluded, as are operator `resolve_conflict`, `correct_content` and `suppress_key_point`
+audit actions.
 This does not depend on provenance or telemetry that older intake may lack.
 Malformed legacy timestamps receive the normal grace instead of aborting a
 whole discovery batch; naive timestamps are interpreted as UTC.
+
+Request-side queue insertion is best-effort after the raw write commits. SQLite
+or SQLCipher contention logs a content-free warning and allows the handler to
+finish and stamp client provenance. Warm execution and bounded discovery remain
+recovery paths; an operational queue lock cannot turn a saved event into an
+apparent failed write.

@@ -30,7 +30,8 @@ RECOVERY_GRACE_SECONDS = INITIAL_GRACE_SECONDS
 _ELIGIBLE = """
     e.origin NOT LIKE 'agent:%'
     AND json_extract(e.payload, '$.produced_by') IS NULL
-    AND COALESCE(json_extract(e.payload, '$.action'),'') != 'resolve_conflict'
+    AND COALESCE(json_extract(e.payload, '$.action'),'')
+        NOT IN ('resolve_conflict','correct_content','suppress_key_point')
     AND (
         json_extract(e.payload, '$.content_type') IN ('text','text-large','binary','compound')
         OR (e.kind = 'observe' AND json_extract(e.payload, '$.content_type') = 'event')

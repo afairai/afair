@@ -849,3 +849,74 @@ def test_bounded_indexed_discovery_on_noisy_19000_event_vault(conn, monkeypatch)
     eligible = ls._eligible_events(conn)
     assert set(eligible) == {source.content_hash for source in sources}
     assert reads <= ls.MAX_OBSERVATION_SCAN + len(sources)
+
+
+@pytest.mark.parametrize("value_field", ["version", "subject", "result", "context", "nested_extra"])
+@pytest.mark.parametrize("explicit_reference", [False, True])
+def test_reversion_in_any_payload_field_refreshes(
+    conn, monkeypatch, value_field, explicit_reference
+):
+    """Review regressions: extra version v1→v2→v1 and changing subject text."""
+    counter = {}
+    for index in range(2):
+        source = _event(conn, f"Atlas note {index}")
+        _mention(conn, source, "Atlas")
+    _stub_llm(monkeypatch, counter=counter)
+    for index, version in enumerate(["v1", "v2", "v1"]):
+        payload = {"action": "deployed", "subject": "afair-prod", "timestamp": str(index)}
+        payload[value_field] = {"version": version} if value_field == "nested_extra" else version
+        if explicit_reference:
+            payload["project_id"] = "Atlas"
+        source = write_event(conn, origin="agent", kind="observe", payload=payload)
+        _mention(conn, source, "Atlas")
+        assert ls.LivingSynthesisWorker().run(conn, Settings())["written"] == 1
+        assert source.content_hash in ls._eligible_events(conn)
+    assert counter["calls"] == 3
+    assert len(_syntheses(conn)) == 3
+
+
+def test_ambiguous_reference_deduplicates_only_adjacent_exact_rows(conn):
+    events = []
+    for index, payload in enumerate(
+        [
+            {"action": "deployed", "subject": "service-a", "version": "v1"},
+            {"action": "verified", "subject": "service-b", "version": "v2"},
+            {"action": "deployed", "subject": "service-a", "version": "v1"},
+            {"action": "deployed", "subject": "service-a", "version": "v1"},
+        ]
+    ):
+        events.append(
+            write_event(
+                conn, origin="agent", kind="observe", payload={**payload, "timestamp": str(index)}
+            )
+        )
+    eligible = ls._eligible_events(conn)
+    assert set(eligible) == {e.content_hash for e in events[:3]}
+
+
+def test_stable_reference_tracks_latest_full_payload_across_other_projects(conn):
+    events = []
+    for index, (project, version) in enumerate(
+        [
+            ("Atlas", "v1"),
+            ("Borealis", "v9"),
+            ("Atlas", "v1"),
+            ("Atlas", "v2"),
+            ("Atlas", "v1"),
+        ]
+    ):
+        events.append(
+            write_event(
+                conn,
+                origin="agent",
+                kind="observe",
+                payload={
+                    "action": "deployed",
+                    "project_id": project,
+                    "version": version,
+                    "timestamp": str(index),
+                },
+            )
+        )
+    eligible = ls._eligible_events(conn)
+    assert set(eligible) == {e.content_hash for index, e in enumerate(events) if index != 2}

@@ -417,13 +417,19 @@ def _eligible_events(
                 pool[event.content_hash] = event
 
     latest: dict[str, str] = {}
+    previous_key: str | None = None
     selected: list[Event] = []
     for event in sorted(pool.values(), key=lambda e: (e.created_at, e.id)):
         if event.kind == "observe":
             lane, key = observation_lane(event.payload), observation_evidence_key(event.payload)
-            if latest.get(lane) == key:
+            repeated = previous_key == key if lane is None else latest.get(lane) == key
+            previous_key = key
+            if lane is not None:
+                latest[lane] = key
+            if repeated:
                 continue
-            latest[lane] = key
+        else:
+            previous_key = None
         selected.append(event)
     return {event.content_hash: event for event in selected[-MAX_SOURCE_EVENTS:]}
 
@@ -696,17 +702,26 @@ def _materially_changed(
     # Compare to the latest outcome in each reference lane, not the set of all
     # historical values: returning to an older value is still a material change.
     latest: dict[str, str] = {}
+    previous_key: str | None = None
     sources = [events.get(h) or read_event_by_hash(conn, h) for h in prior.member_hashes]
     for source in sorted((e for e in sources if e is not None), key=lambda e: (e.created_at, e.id)):
         if source.kind == "observe":
-            latest[observation_lane(source.payload)] = observation_evidence_key(source.payload)
+            lane, key = observation_lane(source.payload), observation_evidence_key(source.payload)
+            previous_key = key
+            if lane is not None:
+                latest[lane] = key
+        else:
+            previous_key = None
     for source in sorted((events[h] for h in added), key=lambda e: (e.created_at, e.id)):
         if source.kind != "observe":
             return True
         lane, key = observation_lane(source.payload), observation_evidence_key(source.payload)
-        if latest.get(lane) != key:
+        repeated = previous_key == key if lane is None else latest.get(lane) == key
+        if not repeated:
             return True
-        latest[lane] = key
+        previous_key = key
+        if lane is not None:
+            latest[lane] = key
     return False
 
 

@@ -114,14 +114,20 @@ def observation_evidence_key(payload: Mapping[str, Any]) -> str:
     )
 
 
-def observation_lane(payload: Mapping[str, Any]) -> str:
-    """Reference and action whose latest outcome is being compared.
+def observation_lane(payload: Mapping[str, Any]) -> str | None:
+    """Stable reference identity, never the factual value being tracked.
 
-    Keep actor and unfamiliar factual fields. Different assertions must not
-    collapse just because they share a tool name or a success string.
+    Subject, result and arbitrary extras can all carry changing state. Including
+    them in an identity hides a reversion to a historical value. Only action,
+    actor and explicit reference IDs partition outcomes. Without an explicit
+    reference, identity is ambiguous: callers may collapse adjacent exact rows,
+    never search backward for an earlier matching value.
     """
+    references = {key: payload[key] for key in _REFERENCE_FIELDS if payload.get(key)}
+    if not references:
+        return None
     return json.dumps(
-        {k: v for k, v in payload.items() if k not in _TIMING_FIELDS and k != "result"},
+        {"action": payload.get("action"), "actor": payload.get("actor"), **references},
         sort_keys=True,
         ensure_ascii=False,
     )

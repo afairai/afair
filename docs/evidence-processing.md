@@ -35,13 +35,19 @@ horizon; existing substantive syntheses remain live when their sources still
 qualify. Durable remembers have an independent window so routine bursts cannot
 evict them from discovery.
 
-Consecutive identical observation outcomes in the same reference lane retain
-the first source as a stable representative. Timestamp and execution duration
-do not change factual content; actor and unfamiliar payload fields do. This
+Consecutive identical observation outcomes in a stable reference lane retain
+the first source as a representative. Explicit project/task/reference IDs,
+action and actor identify a lane; subject, result, context and arbitrary extras
+remain factual content and never partition historical values into separate
+lanes. Without explicit reference IDs, identity is ambiguous and only adjacent
+exact observation rows collapse. Timestamp and execution duration do not change
+factual content; actor and unfamiliar payload fields do. This
 collapse precedes the 40-source synthesis cap so repeated observations cannot
 rotate the selected hashes and cause needless calls. A 150→151→150 sequence
-has three runs and refreshes at each change; a historical value is never treated
-as a duplicate merely because it appeared before. Remembers, source removals,
+has three runs and refreshes at each change, whether the changing value is in
+`result`, `subject`, an extra `version` field or nested payload content. A
+historical value is never treated as a duplicate merely because it appeared
+before. Remembers, source removals,
 and changed factual content refresh as before. Legacy syntheses supported only
 by routine observations retire by append-only invalidation, without a model
 call or any deletion of raw sources.

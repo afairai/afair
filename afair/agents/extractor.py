@@ -190,6 +190,17 @@ def _serialized_extraction(fn: Callable[..., None]) -> Callable[..., None]:
     return wrapped
 
 
+def _queue_database_errors() -> tuple[type[Exception], ...]:
+    """SQLCipher exceptions have a distinct hierarchy from stdlib SQLite."""
+    import sqlite3
+
+    try:
+        import sqlcipher3  # type: ignore
+    except ImportError:
+        return (sqlite3.Error,)
+    return (sqlite3.Error, sqlcipher3.Error)
+
+
 def schedule_extraction(event_id: str) -> None:
     """Fire-and-forget the extraction for ``event_id``. Returns immediately.
 
@@ -204,7 +215,15 @@ def schedule_extraction(event_id: str) -> None:
     from ..mcp.context import connect_for_thread
     from .extraction_jobs import enqueue_initial
 
-    enqueue_initial(connect_for_thread(), event_id)
+    try:
+        enqueue_initial(connect_for_thread(), event_id)
+    except _queue_database_errors() as error:
+        # Intake is already committed. Operational queue contention must not
+        # turn a saved write into a failed response or skip client provenance.
+        # Warm execution may still succeed; bounded discovery is the backstop.
+        log.warning(
+            "extractor.enqueue_deferred", event_id=event_id, error_type=type(error).__name__
+        )
     slots = _EXTRACTION_QUEUE_SLOTS
     if not slots.acquire(blocking=False):
         # The committed event is the durable source for bounded discovery;

@@ -253,3 +253,89 @@ def test_readonly_connection_accepts_relative_path(ctx, monkeypatch):
             conn.execute("CREATE TABLE forbidden(x)")
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "sqlcipher"])
+@pytest.mark.parametrize("verb", ["remember", "observe"])
+def test_enqueue_busy_does_not_fail_committed_intake_or_skip_provenance(
+    ctx, monkeypatch, backend, verb
+):
+    import sys
+    from types import SimpleNamespace
+
+    from afair.mcp.schemas import ObserveEvent
+
+    class CipherError(Exception):
+        pass
+
+    class CipherBusy(CipherError):
+        pass
+
+    error_type = sqlite3.OperationalError
+    if backend == "sqlcipher":
+        # SQLCipher's separate hierarchy must be caught even in plaintext CI.
+        monkeypatch.setitem(sys.modules, "sqlcipher3", SimpleNamespace(Error=CipherError))
+        error_type = CipherBusy
+
+    def busy(*args, **kwargs):
+        raise error_type("database is locked")
+
+    monkeypatch.setattr("afair.agents.extraction_jobs.enqueue_initial", busy)
+    monkeypatch.setattr(handlers, "current_client", lambda: ("review-client", "bearer"))
+    future = Future()
+    monkeypatch.setattr(extractor._EXECUTOR, "submit", lambda *args, **kwargs: future)
+    try:
+        if verb == "remember":
+            result = handlers.remember(
+                TextContent(type="text", text="Save despite queue contention")
+            )
+        else:
+            result = handlers.observe(ObserveEvent(action="read_file", subject="A local document"))
+        assert result.ok
+        assert (
+            ctx.db.execute("SELECT COUNT(*) FROM events WHERE id=?", (result.event_id,)).fetchone()[
+                0
+            ]
+            == 1
+        )
+        row = ctx.db.execute(
+            "SELECT client,verb FROM event_provenance WHERE event_id=?", (result.event_id,)
+        ).fetchone()
+        assert tuple(row) == ("review-client", verb)
+    finally:
+        future.cancel()
+
+
+def test_historical_content_audits_are_excluded_but_real_observations_and_corrections_survive(
+    ctx, monkeypatch
+):
+    from afair.mcp.schemas import ObserveEvent
+
+    monkeypatch.setattr(handlers, "schedule_extraction", lambda event_id: None)
+    observation = handlers.observe(ObserveEvent(action="read_file", subject="User-owned document"))
+    correction = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "text",
+            "text": "A corrected durable fact",
+            "type_hint": "correction",
+        },
+    )
+    audit_ids = []
+    for action in ("resolve_conflict", "correct_content", "suppress_key_point"):
+        # Historical rows may predate a produced_by sidecar marker.
+        audit_ids.append(
+            write_event(
+                ctx.db,
+                origin="user",
+                kind="observe",
+                payload={"content_type": "event", "action": action, "subject": "historical audit"},
+            ).id
+        )
+    discover_missing_extractions(ctx.db)
+    jobs = {row[0] for row in ctx.db.execute("SELECT event_id FROM extraction_jobs")}
+    assert observation.event_id in jobs
+    assert correction.id in jobs
+    assert not jobs.intersection(audit_ids)
