@@ -6,14 +6,22 @@ only reduce regenerable background work; nothing is erased or overwritten.
 The conflict resolver skips observe/observe comparisons with content-free
 routine outcomes, including absent/null `result`. Factual outcomes, zero/false,
 failures, context, or unfamiliar fields remain evidence. Substantive observation
-pairs also need a plausible common reference: explicit lineage, compatible
-project/task/thread/repository metadata, a specific subject/context, or current
-canonical entity evidence. Generic tool names, boilerplate context and reusable
-relative filenames do not supply a project reference. Explicitly different
-projects cannot match just because both observations mention the same file or
-person. Remember pairs retain ordinary eligibility. Existing conflict flags and
-proposals remain readable and undecided even when a future comparison would
-be filtered; the filter is not a retroactive resolution policy.
+pairs use a conservative reference gate. Explicit lineage and shared references
+in project/task/repository metadata, filenames, paths, ticker symbols,
+snake_case actions or canonical graph evidence preserve comparisons. Correction,
+reversion, rollback and status chronology cues fail open, including cues in a
+subject or action with an empty result. Different local and org/repo spellings
+of the same repository are normalized before comparing them.
+
+Substantive pairs are skipped only on positive evidence of disjoint explicit
+projects/repositories or distinct named subjects without a shared reference.
+Missing context, generic workflow words, relative filenames and unfamiliar
+references remain uncertain and receive a comparison. This intentionally favors
+retaining useful conflicts over maximum savings. Remember pairs retain ordinary
+eligibility. Existing conflict flags and proposals remain readable and undecided
+even when a future comparison would be filtered; the filter is not a retroactive
+resolution policy. Canonical graph references are loaded per bounded Binder
+page rather than adding a graph query for every pair.
 
 Living syntheses filter observations before the useful-source and cluster caps.
 Discovery uses the existing `(kind, created_at DESC)` index: up to 400 records

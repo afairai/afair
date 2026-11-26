@@ -2,7 +2,7 @@
 
 `AFAIR_BACKGROUND_DAILY_BUDGET_USD=1.00` enables a vault-wide UTC-day
 budget for background generative provider calls. Audio transcription has a separate
-ledger operation and is excluded from this generative ceiling. `0` pauses paid background work.
+ledger operation and is excluded from this generative ceiling. `0` pauses background generation; separately accounted audio transcription remains enabled.
 Unset preserves existing self-hosted and local-model behavior. Storing raw
 memories and keyword search remain available; deferred extraction is left
 pending for the recovery worker. Reset occurs at midnight UTC, without a
@@ -97,3 +97,12 @@ write failure returns the paid result and retains its committed reservation.
 Definitive rejected 400/401/403/404/429 requests release reservations; ambiguous
 server errors and timeouts retain them. Failed settlement logging never masks
 the original provider exception.
+
+Successful audio transcription is committed to the encrypted substrate's
+operational `extraction_transcripts` cache, keyed by event and transcription
+model, before downstream generative extraction. A budget refusal, including
+one caused by another concurrent worker, leaves this paid transcript reusable
+across retries and process restarts. The existing per-event cross-process lease
+also prevents concurrent transcriptions of the same event. This cache is covered
+by ordinary substrate backups and contains no API credentials. Changing the
+transcription model deliberately requests a new transcript.

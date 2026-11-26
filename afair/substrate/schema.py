@@ -1172,13 +1172,23 @@ SCHEMA_DDL: tuple[str, ...] = (
         SELECT RAISE(ABORT, 'event_provenance is append-only (ADR-0006 / Invariant I2)');
     END
     """,
+    # Regenerable transcript cache: a paid transcription is committed before
+    # downstream generative work can defer. Uses substrate encryption and
+    # ordinary backups; event leases prevent duplicate in-flight transcription.
+    """CREATE TABLE IF NOT EXISTS extraction_transcripts (
+        event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        model TEXT NOT NULL, transcript TEXT NOT NULL,
+        PRIMARY KEY (event_id, model)
+    ) STRICT""",
     # Regenerable operational queue/leases. No user memory or I2 triggers.
     """CREATE TABLE IF NOT EXISTS extraction_jobs (
         event_id TEXT PRIMARY KEY, available_at REAL NOT NULL DEFAULT 0,
         lease_until REAL NOT NULL DEFAULT 0, lease_token TEXT,
-        purpose TEXT NOT NULL DEFAULT 'initial'
+        purpose TEXT NOT NULL DEFAULT 'initial',
+        failures INTEGER NOT NULL DEFAULT 0, terminal INTEGER NOT NULL DEFAULT 0,
+        priority INTEGER NOT NULL DEFAULT 0, last_error_type TEXT
     ) STRICT""",
-    "CREATE INDEX IF NOT EXISTS extraction_jobs_ready ON extraction_jobs(purpose, available_at, event_id)",
+    "CREATE INDEX IF NOT EXISTS extraction_jobs_ready ON extraction_jobs(purpose, terminal, priority DESC, available_at, event_id)",
 )
 
 

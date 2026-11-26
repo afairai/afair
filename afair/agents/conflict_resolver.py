@@ -432,9 +432,10 @@ def _enumerate_candidate_pairs(
 ) -> list[tuple[Event, Event]]:
     """Walk binder:v0 interpretation rows; yield (anchor, linked) pairs.
 
-    Binder links supply similarity, but two observations also need substantive
-    outcomes and a plausible shared reference. Skip invalidation events. Apply
-    the result bound after filtering so routine links cannot crowd out evidence.
+    Binder links supply similarity. Suppress known routine observations and
+    positively disjoint project references, while corrections and ambiguous
+    references fail open. Skip invalidation events. Apply the result bound after
+    filtering so routine links cannot crowd out substantive evidence.
     """
     rows = conn.execute(
         """

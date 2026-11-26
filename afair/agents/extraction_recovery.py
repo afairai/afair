@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from .cold_path import ColdPathWorker
+from .extraction_jobs import INITIAL_GRACE_SECONDS, initial_available_at
 from .foreground import background_should_yield
 
 if TYPE_CHECKING:
@@ -22,13 +23,14 @@ if TYPE_CHECKING:
 MAX_RECOVERIES_PER_RUN = 5
 # Give the normal warm worker time to start. Slow/inflight attempts are also
 # protected by the extractor's per-event lock and a second existence check.
-RECOVERY_GRACE_SECONDS = 300
+RECOVERY_GRACE_SECONDS = INITIAL_GRACE_SECONDS
 
 # Intake shapes, not an ontology of memory kinds. Agent-derived events carry
 # produced_by; agent:<worker> origins are internal, never normal MCP intake.
 _ELIGIBLE = """
     e.origin NOT LIKE 'agent:%'
     AND json_extract(e.payload, '$.produced_by') IS NULL
+    AND COALESCE(json_extract(e.payload, '$.action'),'') != 'resolve_conflict'
     AND (
         json_extract(e.payload, '$.content_type') IN ('text','text-large','binary','compound')
         OR (e.kind = 'observe' AND json_extract(e.payload, '$.content_type') = 'event')
@@ -83,8 +85,8 @@ def discover_missing_extractions(conn: sqlite3.Connection) -> int:
     with conn:
         for row in rows:
             if row["eligible"] and not row["attempted"]:
-                available = (
-                    datetime.fromisoformat(row["created_at"]).timestamp() + RECOVERY_GRACE_SECONDS
+                available = initial_available_at(
+                    row["created_at"], grace_seconds=RECOVERY_GRACE_SECONDS
                 )
                 conn.execute(
                     "INSERT OR IGNORE INTO extraction_jobs(event_id,available_at) VALUES (?,?)",
@@ -112,7 +114,16 @@ def extraction_audit(conn: sqlite3.Connection) -> dict[str, int]:
                 WHERE v.content_hash=e.content_hash)),0) AS missing_vectors
             FROM events e WHERE {_ELIGIBLE}"""
     ).fetchone()
+    has_jobs = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='extraction_jobs'"
+    ).fetchone()
+    exhausted = (
+        conn.execute("SELECT COUNT(*) FROM extraction_jobs WHERE terminal=1").fetchone()[0]
+        if has_jobs
+        else 0
+    )
     return {
+        "operational_exhausted": exhausted,
         "eligible": row["eligible"],
         "missing_extraction": row["missing"],
         "successful_extraction": row["succeeded"],
@@ -141,12 +152,22 @@ def recover_missing_extractions(
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     scanned = discover_missing_extractions(conn)
-    candidates = conn.execute(
-        """SELECT j.event_id FROM extraction_jobs j
-        WHERE j.purpose='initial' AND j.available_at <= ? AND j.lease_until < ?
-        ORDER BY j.available_at,j.event_id LIMIT ?""",
-        (time.time(), time.time(), limit),
-    ).fetchall()
+    candidates: list[Any] = []
+    # Two indexed ranges keep future high-priority jobs from forcing a scan
+    # over the full queue. Each range fetches only the remaining bounded slots.
+    now = time.time()
+    for priority in (1, 0):
+        if len(candidates) == limit:
+            break
+        candidates.extend(
+            conn.execute(
+                """SELECT j.event_id FROM extraction_jobs j
+            WHERE j.purpose='initial' AND j.terminal=0 AND j.priority=?
+              AND j.available_at <= ? AND j.lease_until < ?
+            ORDER BY j.available_at,j.event_id LIMIT ?""",
+                (priority, now, now, limit - len(candidates)),
+            ).fetchall()
+        )
     stats = {
         "scanned": scanned,
         "candidates": len(candidates),
@@ -209,7 +230,7 @@ def repair_missing_vectors(
             AND COALESCE(json_extract(i.extraction,'$.status'),'') != 'failed')
         AND NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.content_hash=e.content_hash)
         AND NOT EXISTS (SELECT 1 FROM extraction_jobs j WHERE j.event_id=e.id
-            AND (j.available_at > ? OR j.lease_until >= ?))
+            AND (j.terminal=1 OR j.available_at > ? OR j.lease_until >= ?))
         ORDER BY e.created_at, e.id LIMIT ?""",
         (time.time(), time.time(), limit),
     ).fetchall()

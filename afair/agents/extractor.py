@@ -143,6 +143,7 @@ def _serialized_extraction(fn: Callable[..., None]) -> Callable[..., None]:
     @wraps(fn)
     def wrapped(**kwargs: Any) -> None:
         only_if_missing = kwargs.pop("only_if_missing", False)
+        warm_start = kwargs.pop("warm_start", False)
         configured_settings = kwargs.pop("background_usage_settings", None)
         key = (str(kwargs["vault_dir"]), kwargs["event_id"])
         with _EXTRACTION_LOCKS[hash(key) % len(_EXTRACTION_LOCKS)]:
@@ -169,6 +170,7 @@ def _serialized_extraction(fn: Callable[..., None]) -> Callable[..., None]:
                 db,
                 kwargs["event_id"],
                 purpose="retry" if has_attempt and not only_if_missing else "initial",
+                warm_start=warm_start,
             ):
                 # Recheck after acquiring the DB lease: another process may
                 # have completed extraction since our initial lookup.
@@ -200,7 +202,9 @@ def schedule_extraction(event_id: str) -> None:
 
     ctx = get_context()
     from ..mcp.context import connect_for_thread
+    from .extraction_jobs import enqueue_initial
 
+    enqueue_initial(connect_for_thread(), event_id)
     slots = _EXTRACTION_QUEUE_SLOTS
     if not slots.acquire(blocking=False):
         # The committed event is the durable source for bounded discovery;
@@ -212,9 +216,34 @@ def schedule_extraction(event_id: str) -> None:
             _run_extraction,
             event_id=event_id,
             only_if_missing=True,
+            warm_start=True,
             **_capture_extractor_kwargs(ctx),
         )
-        future.add_done_callback(lambda _: slots.release())
+
+        def completed(done: Any) -> None:
+            slots.release()
+            if done.cancelled():
+                log.info("extractor.background_cancelled", event_id=event_id)
+                return
+            error = done.exception()
+            if error is not None:
+                from .extraction_jobs import ExtractionDeferred
+                from .usage import BackgroundBudgetExceeded
+
+                if isinstance(error, (BackgroundBudgetExceeded, ExtractionDeferred)):
+                    log.info(
+                        "extractor.background_deferred",
+                        event_id=event_id,
+                        error_type=type(error).__name__,
+                    )
+                else:
+                    log.warning(
+                        "extractor.background_failed",
+                        event_id=event_id,
+                        error_type=type(error).__name__,
+                    )
+
+        future.add_done_callback(completed)
     except RuntimeError as exc:
         slots.release()
         pe.record_safe(
@@ -411,11 +440,27 @@ def _run_extraction(
         blob_hash = payload.get("blob_hash") if isinstance(payload, dict) else None
         if isinstance(blob_hash, str):
             try:
-                extracted_text = transcribe_audio(
-                    path=object_path(vault_dir, blob_hash),
-                    model=transcription_model,
-                    api_key=transcription_api_key,
-                )
+                cached_transcript = db.execute(
+                    "SELECT transcript FROM extraction_transcripts WHERE event_id=? AND model=?",
+                    (event_id, transcription_model),
+                ).fetchone()
+                if cached_transcript is not None:
+                    extracted_text = str(cached_transcript["transcript"])
+                else:
+                    extracted_text = transcribe_audio(
+                        path=object_path(vault_dir, blob_hash),
+                        model=transcription_model,
+                        api_key=transcription_api_key,
+                    )
+                    # Persist the paid result before the generative call can
+                    # exhaust its daily budget (including a concurrent worker).
+                    # The per-event cross-process lease covers this whole block.
+                    with db:
+                        db.execute(
+                            "INSERT OR IGNORE INTO extraction_transcripts(event_id,model,transcript) "
+                            "VALUES (?,?,?)",
+                            (event_id, transcription_model, extracted_text),
+                        )
                 extractor_subtag = "audio"
                 log.info(
                     "extractor.audio_transcript",

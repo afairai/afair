@@ -371,3 +371,38 @@ def test_failure_settlement_cannot_replace_original_provider_error(tmp_path):
         with pytest.raises(TimeoutError) as caught:
             provider_completion(model="test/model", messages=[])
         assert caught.value is original
+
+
+def test_default_vision_model_can_run_with_one_dollar_budget(tmp_path):
+    config = Settings(_env_file=None, vault_dir=tmp_path, background_daily_budget_usd=1)
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,a"}}],
+        }
+    ]
+    with (
+        patch("litellm.completion", return_value={}) as call,
+        background_usage(config, "extractor"),
+    ):
+        provider_completion(model=config.vision_model, messages=messages, max_tokens=2000)
+        call.assert_called_once()
+
+
+def test_failed_unpriced_attempt_stays_unknown_when_cap_enabled_later(tmp_path):
+    config = Settings(_env_file=None, vault_dir=tmp_path)
+    from afair.agents.usage import usage_summary
+
+    with (
+        patch("litellm.cost_per_token", side_effect=ValueError("no price")),
+        patch("litellm.completion", side_effect=TimeoutError),
+        background_usage(config, "worker"),
+        pytest.raises(TimeoutError),
+    ):
+        provider_completion(model="unknown/model", messages=[])
+    assert usage_summary(config)["workers"][0]["unpriced_attempts"] == 1
+    capped = settings(tmp_path)
+    with patch("litellm.completion") as call, background_usage(capped, "worker"):
+        with pytest.raises(BackgroundBudgetExceeded, match="unpriced"):
+            provider_completion(model="test/model", messages=[])
+        call.assert_not_called()

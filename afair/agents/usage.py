@@ -155,7 +155,9 @@ def provider_completion(*, _operation: str = "completion", **kwargs: Any) -> Any
                     "UPDATE provider_usage SET status='failed',cost_usd=?,cost_source=? WHERE id=?",
                     (
                         0.0 if unbilled else None,
-                        "unbilled_rejection" if unbilled else "reservation",
+                        "unbilled_rejection"
+                        if unbilled
+                        else ("reservation" if reserve is not None else "unknown"),
                         ident,
                     ),
                 )

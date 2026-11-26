@@ -94,7 +94,7 @@ def is_routine_observation_payload(payload: Mapping[str, Any]) -> bool:
     """Payload variant for filtering before SQL discovery-window bounds."""
     if any(key not in _METADATA_FIELDS for key in payload):
         return False
-    if payload.get("context"):
+    if payload.get("context") or _has_change_cue(payload):
         return False
     action = str(payload.get("action", "")).strip().casefold()
     raw_result = payload.get("result")
@@ -224,6 +224,33 @@ _GENERIC_REFERENCES = frozenset(
         "passed",
         "budget",
         "owner",
+        "verify",
+        "verification",
+        "record",
+        "corrected",
+        "rollback",
+        "release",
+        "strategic",
+        "strategy",
+        "plan",
+        "merged",
+        "merge",
+        "head",
+        "commit",
+        "branch",
+        "main",
+        "master",
+        "users",
+        "home",
+        "agent",
+        "src",
+        "index",
+        "github",
+        "https",
+        "http",
+        "com",
+        "org",
+        "net",
     }
 )
 
@@ -234,6 +261,57 @@ def _reference(value: object) -> str:
     return " ".join(value.strip().casefold().split())
 
 
+_CHANGE_CUES = re.compile(
+    r"\b(correct(?:ion|ed|ing)?|actually|instead|supersed\w*|invalidat\w*|"
+    r"revert\w*|regress\w*|rollback|contradict\w*|conflict\w*|discrepanc\w*|"
+    r"previously|no longer|changed (?:from|to)|now)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_change_cue(payload: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(payload.get(key) or "").replace("_", " ")
+        for key in ("action", "subject", "result", "context")
+    )
+    return _CHANGE_CUES.search(text) is not None
+
+
+def _content_references(payload: Mapping[str, Any]) -> set[str]:
+    """Recognize named references across actions, paths, PRs and ticker files.
+
+    Shared references preserve comparisons. They never establish a conflict or
+    decide one. Generic workflow vocabulary cannot establish disjoint projects.
+    """
+    text = " ".join(
+        str(payload.get(key) or "") for key in (*_REFERENCE_FIELDS, "action", "subject", "context")
+    )
+    return {
+        token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", text)
+    } - _GENERIC_REFERENCES
+
+
+def _project_identity(value: str) -> str:
+    # A local checkout path and org/repo can designate the same repository.
+    return value.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
+
+
+def _named_subject(payload: Mapping[str, Any]) -> str:
+    """Positive disjointness evidence only for an unambiguous named subject.
+
+    Filenames, paths, generic phrases and prose are deliberately insufficient:
+    different files and different release tasks can belong to one project.
+    """
+    subject = str(payload.get("subject") or "").strip()
+    words = subject.split()
+    if not words or len(words) > 3 or not re.fullmatch(r"[A-Z][A-Za-z0-9-]{2,}", words[0]):
+        return ""
+    if any(_reference(word) not in _GENERIC_REFERENCES for word in words[1:]):
+        return ""
+    name = _reference(words[0])
+    return name if name not in _GENERIC_REFERENCES else ""
+
+
 def should_compare_observations(
     event_a: Event,
     event_b: Event,
@@ -241,15 +319,18 @@ def should_compare_observations(
     entity_ids_a: frozenset[str] = frozenset(),
     entity_ids_b: frozenset[str] = frozenset(),
 ) -> bool:
-    """Pure paid-comparison gate; prior judgments and raw events are untouched.
+    """Pure conservative paid-comparison gate; never modifies prior judgments.
 
-    Binder similarity alone is insufficient for two observations: generic tool
-    language often looks similar across unrelated projects. Require substantive
-    outcomes plus explicit lineage, a compatible task/project/subject/context,
-    or shared canonical entity evidence. Mixed remember/observe pairs retain
-    their existing eligibility.
+    Suppress known routine outcomes, or substantive pairs with positive evidence
+    of different references. Missing context is uncertainty, not disjointness.
+    Corrections and chronology fail open. Shared references in paths, filenames,
+    ticker symbols, snake_case actions or graph evidence preserve comparisons.
     """
     if event_a.kind != "observe" or event_b.kind != "observe":
+        return True
+    a, b = event_a.payload, event_b.payload
+    # Cues can occur in subject/action even with an empty result.
+    if _has_change_cue(a) or _has_change_cue(b):
         return True
     if is_routine_observation(event_a) or is_routine_observation(event_b):
         return False
@@ -260,48 +341,23 @@ def should_compare_observations(
         or parents_a & parents_b
     ):
         return True
-    a, b = event_a.payload, event_b.payload
     refs_a = {key: _reference(a.get(key)) for key in _REFERENCE_FIELDS}
     refs_b = {key: _reference(b.get(key)) for key in _REFERENCE_FIELDS}
-    # Explicitly different projects must not match on a generic filename or a
-    # shared person. A common task/thread still supplies a legitimate bridge.
-    shared = {
-        refs_a[k]
-        for k in _REFERENCE_FIELDS
-        if refs_a[k] and refs_a[k] == refs_b[k] and refs_a[k] not in _GENERIC_REFERENCES
-    }
-    if shared:
-        return True
     if any(
-        refs_a[k] and refs_b[k] and refs_a[k] != refs_b[k]
+        refs_a[k] and refs_a[k] == refs_b[k] and refs_a[k] not in _GENERIC_REFERENCES
+        for k in _REFERENCE_FIELDS
+    ):
+        return True
+    # Explicitly different projects cannot match on an incidental common file
+    # or person. Normalize repository spellings before deciding they differ.
+    if any(
+        refs_a[k] and refs_b[k] and _project_identity(refs_a[k]) != _project_identity(refs_b[k])
         for k in ("project", "project_id", "repository", "repo", "workspace")
     ):
         return False
-    if entity_ids_a & entity_ids_b:
+    if entity_ids_a & entity_ids_b or _content_references(a) & _content_references(b):
         return True
-    for key in ("subject", "context"):
-        left, right = _reference(a.get(key)), _reference(b.get(key))
-        if not left or not right:
-            continue
-        tokens_a = set(re.findall(r"[a-z][a-z0-9_-]{2,}", left)) - _GENERIC_REFERENCES
-        # Relative filenames are reusable across projects; require lineage,
-        # graph evidence or an explicit project/task rather than guessing.
-        if (
-            left == right
-            and tokens_a
-            and (("." not in left and "/" not in left) or left.startswith("/"))
-        ):
-            return True
-        # A capitalized shared named reference permits "Atlas budget" vs
-        # "Atlas owner" without using arbitrary workflow-word overlap.
-        named_a = {
-            _reference(token)
-            for token in re.findall(r"\b[A-Z][A-Za-z0-9_-]{2,}\b", str(a.get(key, "")))
-        } - _GENERIC_REFERENCES
-        named_b = {
-            _reference(token)
-            for token in re.findall(r"\b[A-Z][A-Za-z0-9_-]{2,}\b", str(b.get(key, "")))
-        } - _GENERIC_REFERENCES
-        if named_a & named_b and not any(mark in left + right for mark in ("/", ".")):
-            return True
-    return False
+    name_a, name_b = _named_subject(a), _named_subject(b)
+    # File differences, generic task words, sparse payloads and unfamiliar
+    # references do not establish unrelatedness. Prefer an extra comparison.
+    return not (name_a and name_b and name_a != name_b)

@@ -411,3 +411,63 @@ def test_warm_executor_queue_is_bounded_and_recoverable(ctx, monkeypatch):
     assert len(submitted) == 1
     future.cancel()
     assert len(select_missing_extractions(ctx.db)) == 2
+
+
+@pytest.mark.parametrize("refusal_mode", ["zero_cap", "concurrent_exhaustion"])
+def test_audio_transcript_survives_budget_deferral_and_restart(ctx, monkeypatch, refusal_mode):
+    from afair.substrate import write_object
+
+    blob = write_object(ctx.vault_dir, b"audio source")
+    source = write_event(
+        ctx.db,
+        origin="user",
+        kind="remember",
+        payload={
+            "content_type": "binary",
+            "blob_hash": blob,
+            "mime": "audio/mpeg",
+            "size_bytes": 12,
+            "filename_hint": "memo.mp3",
+        },
+        created_at="2020-01-01T00:00:00+00:00",
+    )
+    transcripts = []
+
+    def transcribe(**kwargs):
+        transcripts.append(kwargs)
+        return "Paid transcription survives downstream budget exhaustion"
+
+    monkeypatch.setattr(extractor, "transcribe_audio", transcribe)
+
+    def exhausted_after_audio(**kwargs):
+        raise BackgroundBudgetExceeded("another worker reserved the remaining generation budget")
+
+    if refusal_mode == "zero_cap":
+        ctx.background_usage_settings = ctx.background_usage_settings.model_copy(
+            update={"background_daily_budget_usd": 0}
+        )
+    else:
+        monkeypatch.setattr(extractor, "call_tool", exhausted_after_audio)
+    for _ in range(2):
+        assert recover_missing_extractions(ctx.db)["deferred"] == 1
+        assert ctx.db.execute("SELECT COUNT(*) FROM interpretations").fetchone()[0] == 0
+        # Reopen the extraction connection to simulate a process restart and
+        # expire its durable backoff before the next real recovery attempt.
+        extractor.clear_extractor_thread_db()
+        with ctx.db:
+            ctx.db.execute("UPDATE extraction_jobs SET available_at=0,lease_until=0")
+    ctx.background_usage_settings = ctx.background_usage_settings.model_copy(
+        update={"background_daily_budget_usd": None}
+    )
+    calls = patch_llm(monkeypatch)
+    assert recover_missing_extractions(ctx.db)["attempted"] == 1
+    assert len(transcripts) == 1
+    assert len(calls) == 1
+    assert (
+        ctx.db.execute(
+            "SELECT transcript FROM extraction_transcripts WHERE event_id=?", (source.id,)
+        )
+        .fetchone()[0]
+        .startswith("Paid transcription")
+    )
+    assert not select_missing_extractions(ctx.db)

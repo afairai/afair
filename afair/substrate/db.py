@@ -198,6 +198,8 @@ def _open_connection(
     application layer already (see encryption.py), and double-deriving
     would waste cycles on every open without adding security.
     """
+    if read_only:
+        db_path = db_path.resolve()
     if vault_key is not None:
         # Import lazily so local dev (no SQLCipher installed) still works
         # when vault_key is None. Production has the dep so this import

@@ -62,3 +62,35 @@ success booleans. The local component includes routing, ranking and projection;
 it is not engine-only SQL timing. Compare p50/p95 across these fields to separate
 provider latency from local hydration/locking. No query, event identifier, source
 payload or returned text is included.
+
+The scheduler also releases SQLite's writer transaction between every worker:
+successful leftover writes are committed, while exceptions and budget deferrals
+roll back. A failed safety-net commit rolls back and the scheduler continues.
+The production roster is shared with a transaction-hygiene conformance test.
+Pruner candidate scans run before short batches of primary-key deletes; entity
+audit scans run outside the per-proposal write transactions. These keep a large
+historical cleanup or graph scan from holding the writer lock through unrelated
+foreground `remember`/`observe` requests.
+
+Unexpected local or post-provider failures use a separate operational attempt
+counter: three failures exhaust a job, with exponential backoff capped at one
+hour. The terminal operational row survives restart and discovery; it is never
+silently reactivated. Budget refusals do not increment this counter. Exhaustion
+emits a content-free warning and the read-only audit reports
+`operational_exhausted`. After diagnosing and fixing its cause, an operator may
+remove the affected operational job row and reschedule that specific event;
+raw events and existing interpretations must stay intact.
+
+Normal intake persists a job before executor submission. Jobs deferred by queue
+capacity or shutdown retain foreground-intake priority, so recent writes do not
+wait behind a full historical sweep. Warm execution may start inside the initial
+five-minute grace; recovery honors that grace. Both paths honor subsequent
+budget/error backoff and terminal status. Completion callbacks log exception
+classes without exception messages or source content.
+
+The intake origin is historically `agent` even for genuine MCP remembers; it is
+preserved as eligible. Internal `agent:<worker>` origins and payloads marked with
+`produced_by` are excluded, as are operator `resolve_conflict` audit actions.
+This does not depend on provenance or telemetry that older intake may lack.
+Malformed legacy timestamps receive the normal grace instead of aborting a
+whole discovery batch; naive timestamps are interpreted as UTC.
