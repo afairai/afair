@@ -10,6 +10,34 @@ frozen and additive per Invariant I1; everything behind it can still move.
 Per-feature detail and dates live in
 [`analysis/build-log.md`](analysis/build-log.md).
 
+## [0.1.31](https://github.com/afairai/afair/compare/v0.1.30...v0.1.31) (2026-11-26)
+
+
+### Features
+
+* account for remote embeddings and measure vault load ([810b67f](https://github.com/afairai/afair/commit/810b67f077b9f20dd3232d79961324252d5a511f))
+* exercise chronological memory quality and preserve multimodal evidence ([44f93ee](https://github.com/afairai/afair/commit/44f93ee96e9445e98f10df960acd59d033893ac5))
+* expose bounded correction history for cited memory sources ([0d170b6](https://github.com/afairai/afair/commit/0d170b655ee40d6842a3843be18363ba982097b2))
+* expose immutable build revision in vault health ([7705fb6](https://github.com/afairai/afair/commit/7705fb6784447ec57139412e1899f75463cbc833))
+
+
+### Bug Fixes
+
+* account for operator reembedding and preserve uncapped fallback ([4904c8b](https://github.com/afairai/afair/commit/4904c8b21ccfc2b349b577cdfeafb22a6204b987))
+* add bounded stored-success index repair without extraction replay ([d5e4c8d](https://github.com/afairai/afair/commit/d5e4c8dd4e47d60a1a0d3d7f3786895643571fb8))
+* identify Sentry releases with the built commit ([2449b85](https://github.com/afairai/afair/commit/2449b85c9bf01510674536855cec034264236615))
+* isolate provider library initialization during replay ([f3c2a1e](https://github.com/afairai/afair/commit/f3c2a1e3ce5cb655fe09eda377f63b8a40bbadd8))
+* keep vector repair retryable during a ledger outage ([ec39f4b](https://github.com/afairai/afair/commit/ec39f4b371f88c546632abc282aaa96e441be9dd))
+* measure actual scheduler progress and exclude failed extraction evidence ([21aee0e](https://github.com/afairai/afair/commit/21aee0e8d70215c3755c509b71fa810cc3925529))
+* reconcile verified extraction completion without terminal trace ([10853ce](https://github.com/afairai/afair/commit/10853ce870cd4d0095c48e03cecc12e9cb9040f9))
+* reconcile verified extraction completion without terminal trace ([b8407b1](https://github.com/afairai/afair/commit/b8407b127fa423d2fd4fc8c172737d47f8edc19c))
+* repair explicit stored-success indexes without extraction replay ([5ea7515](https://github.com/afairai/afair/commit/5ea751569fea93469cebadee121019abb40d2366))
+* retain content-free export audit and release dimensions ([a7925ca](https://github.com/afairai/afair/commit/a7925cac3658f0c416444a37a0cde4845e72a0a0))
+* scrub vault content at telemetry output boundaries ([be76c79](https://github.com/afairai/afair/commit/be76c79d7ec3c17dc88285c11738f081d490f258))
+* stop scheduler test threads before interpreter shutdown ([a58ef57](https://github.com/afairai/afair/commit/a58ef5759568a7beb35d2f0274540d69e369c994))
+* stop scheduler test threads before interpreter shutdown ([db0abfc](https://github.com/afairai/afair/commit/db0abfc441058c513e5e41efcd2b08ceeda46a50))
+* stream consistent vault exports into atomic encrypted artifacts ([958a62f](https://github.com/afairai/afair/commit/958a62fc0a18503521c98105a472b4468b1b37ce))
+
 ## [Unreleased]
 
 ### Fixed
