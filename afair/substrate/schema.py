@@ -31,6 +31,9 @@ SCHEMA_DDL: tuple[str, ...] = (
     """,
     # Read-path indexes — writes never UPDATE, these help SELECTs.
     "CREATE INDEX IF NOT EXISTS events_created_at_idx ON events(created_at)",
+    # Direct, bounded lookup of correction lineage for the read-only Mirror.
+    "CREATE INDEX IF NOT EXISTS events_correction_target_idx "
+    "ON events(json_extract(payload, '$.corrects'), created_at DESC) WHERE kind = 'remember'",
     "CREATE INDEX IF NOT EXISTS events_kind_idx       ON events(kind)",
     "CREATE INDEX IF NOT EXISTS events_origin_idx     ON events(origin)",
     # Composite for the hot _recent_canonical_context query (Perf audit C1):
