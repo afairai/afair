@@ -373,8 +373,10 @@ def test_failure_settlement_cannot_replace_original_provider_error(tmp_path):
         assert caught.value is original
 
 
-def test_default_vision_model_can_run_with_one_dollar_budget(tmp_path):
+def test_default_vision_model_can_run_with_one_dollar_budget(tmp_path, monkeypatch):
+    monkeypatch.delenv("VISION_MODEL", raising=False)
     config = Settings(_env_file=None, vault_dir=tmp_path, background_daily_budget_usd=1)
+    assert config.vision_model == "anthropic/claude-haiku-5-5"
     messages = [
         {
             "role": "user",

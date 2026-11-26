@@ -43,7 +43,7 @@ variable, and you only need keys for the providers those models actually use:
 | Role | Default model | Provider key | Needed when |
 |---|---|---|---|
 | `EXTRACTOR_MODEL` (text structuring) | `anthropic/claude-haiku-4-5` | `ANTHROPIC_API_KEY` | the core "organizes itself" |
-| `VISION_MODEL` (images) | `anthropic/claude-haiku-4-5` | `ANTHROPIC_API_KEY` (same) | only if you remember images |
+| `VISION_MODEL` (images) | `anthropic/claude-haiku-5-5` | `ANTHROPIC_API_KEY` (same) | only if you remember images |
 | `EMBEDDING_MODEL` (semantic recall) | `openai/text-embedding-3-small` | `OPENAI_API_KEY` | only if `SEMANTIC_RECALL_ENABLED=true` |
 | `TRANSCRIPTION_MODEL` (audio) | `openai/whisper-1` | `OPENAI_API_KEY` (same) | only if you remember audio |
 

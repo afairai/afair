@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ..model_defaults import DEFAULT_VISION_MODEL
 from ..substrate import object_path, open_db, read_object
 from ..substrate import pipeline_events as pe
 from ..substrate.events import read_event_by_id
@@ -366,7 +367,7 @@ def _run_extraction(
     embedding_api_key: str | None = None,
     embedding_dim: int = 1536,
     semantic_recall_enabled: bool = True,
-    vision_model: str = "anthropic/claude-haiku-4-5",
+    vision_model: str = DEFAULT_VISION_MODEL,
     vision_api_key: str | None = None,
     transcription_model: str = "openai/whisper-1",
     transcription_api_key: str | None = None,

@@ -218,7 +218,9 @@ def test_describe_image_returns_validated_extraction(tmp_path: Path) -> None:
     }
     args_json = '{"best_guess_kind":"screenshot","summary":"A blue button labelled Submit."}'
 
-    with patch("litellm.completion", return_value=_fake_completion_response(args_json)):
+    with patch(
+        "litellm.completion", return_value=_fake_completion_response(args_json)
+    ) as completion:
         result = describe_image(
             path=img_path,
             mime="image/png",
@@ -230,6 +232,7 @@ def test_describe_image_returns_validated_extraction(tmp_path: Path) -> None:
             api_key="sk-test",
         )
     assert result == extraction
+    assert completion.call_args.kwargs["model"] == "anthropic/claude-haiku-5-5"
 
 
 def test_describe_image_wraps_provider_failures(tmp_path: Path) -> None:

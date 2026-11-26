@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
@@ -381,8 +382,13 @@ def test_extract_audio_routes_through_whisper(
     assert extraction["extracted_text"] == "transcribed audio content"
 
 
+@pytest.mark.parametrize("vision_override", [None, "openai/gpt-4o-mini"])
+@pytest.mark.parametrize("entrypoint", ["context", "direct"])
 def test_extract_image_routes_through_vision(
-    ctx: ServerContext, monkeypatch: pytest.MonkeyPatch
+    ctx: ServerContext,
+    monkeypatch: pytest.MonkeyPatch,
+    vision_override: str | None,
+    entrypoint: str,
 ) -> None:
     """A binary event with mime=image/*:
     describe_image runs (NOT the text-LLM call) and returns directly."""
@@ -393,9 +399,36 @@ def test_extract_image_routes_through_vision(
         raise AssertionError(msg)
 
     monkeypatch.setattr("afair.agents.extractor.call_tool", fake_call_tool)
-    monkeypatch.setattr(
-        "afair.agents.extractor.describe_image",
-        lambda **_: GOOD_EXTRACTION,
+    from litellm import ModelResponse
+
+    from afair.model_defaults import DEFAULT_VISION_MODEL
+
+    if vision_override is not None:
+        ctx.vision_model = vision_override
+    expected_model = vision_override or DEFAULT_VISION_MODEL
+    ctx.semantic_recall_enabled = False
+    ctx.anthropic_api_key = SecretStr("sk-anthropic-test")
+    ctx.openai_api_key = SecretStr("sk-openai-test")
+    response = ModelResponse(
+        choices=[
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "vision-call",
+                            "type": "function",
+                            "function": {
+                                "name": "record_extraction",
+                                "arguments": json.dumps(GOOD_EXTRACTION),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
     )
 
     from afair.substrate import write_event, write_object
@@ -415,11 +448,33 @@ def test_extract_image_routes_through_vision(
             "type_hint": None,
         },
     )
-    extractor.extract_sync(e.id)
+    with patch("litellm.completion", return_value=response) as completion:
+        if entrypoint == "context":
+            extractor.extract_sync(e.id)
+        else:
+            # Operator/recovery callers may omit vision_model entirely.
+            overrides = {"vision_model": vision_override} if vision_override else {}
+            extractor._run_extraction(
+                event_id=e.id,
+                vault_dir=ctx.vault_dir,
+                model=ctx.extractor_model,
+                api_key=None,
+                semantic_recall_enabled=False,
+                vision_api_key="sk-openai-test" if vision_override else "sk-anthropic-test",
+                **overrides,
+            )
+    completion.assert_called_once()
+    request = completion.call_args.kwargs
+    assert request["model"] == expected_model
+    assert request["api_key"] == ("sk-openai-test" if vision_override else "sk-anthropic-test")
+    image = request["messages"][1]["content"][1]
+    assert image["image_url"]["url"].startswith("data:image/png;base64,")
 
     extraction = _load_only_interpretation(ctx)
     assert extraction["status"] == "success"
     assert extraction["best_guess_kind"] == "email"  # from GOOD_EXTRACTION
+    producer = ctx.db.execute("SELECT produced_by FROM interpretations").fetchone()[0]
+    assert producer == f"extractor:image:{expected_model}"
 
 
 def test_extract_pdf_failure_writes_failed_interpretation(
