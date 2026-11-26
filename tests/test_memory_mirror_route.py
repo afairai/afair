@@ -208,3 +208,94 @@ def _synthesis_payload(vault_dir: Path, content_hash: str) -> str:
         return str(row["payload"])
     finally:
         conn.close()
+
+
+def test_specific_claim_history_links_original_reason_and_recorded_correction(
+    vault_dir: Path,
+) -> None:
+    from afair.substrate.content_corrections import correct_event
+    from afair.substrate.provenance import record_event_provenance
+
+    _, source_hash = _seed(vault_dir)
+    conn = open_db(vault_dir)
+    original = conn.execute(
+        "SELECT id, payload FROM events WHERE content_hash = ?", (source_hash,)
+    ).fetchone()
+    record_event_provenance(
+        conn, event_id=original["id"], client="claude", auth_kind="oauth", verb="remember"
+    )
+    correction = correct_event(
+        conn,
+        target_hash=source_hash,
+        correction_text="Fictional Atlas is a prototype, not a research task.",
+        reason=None,
+    )
+    before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.close()
+    response = TestClient(_app(vault_dir)).get(
+        "/internal/memory-mirror", headers={"Authorization": "Bearer MASTER"}
+    )
+    source = next(
+        s for s in response.json()["syntheses"][0]["sources"] if s["content_hash"] == source_hash
+    )
+    assert source["preview"] == "Atlas started as research."
+    assert source["current"] is False
+    assert source["writing_clients"] == ["claude"]
+    assert (
+        source["history"]["invalidation"]["reason"]
+        == "Fictional Atlas is a prototype, not a research task."
+    )
+    assert source["history"]["invalidation"]["at"]
+    assert source["history"]["corrections"][0]["event_id"] == correction.correction_event_id
+    assert source["history"]["corrections"][0]["preview"].startswith("Fictional Atlas")
+    conn = open_db(vault_dir)
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
+    assert (
+        conn.execute(
+            "SELECT payload FROM events WHERE content_hash = ?", (source_hash,)
+        ).fetchone()[0]
+        == original["payload"]
+    )
+    conn.close()
+
+
+def test_writer_provenance_never_claims_a_distinct_reader(vault_dir: Path) -> None:
+    from afair.substrate.provenance import record_event_provenance
+
+    _seed(vault_dir)
+    conn = open_db(vault_dir)
+    event_id = conn.execute(
+        "SELECT id FROM events WHERE kind='remember' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()[0]
+    for client in ("claude", "chatgpt"):
+        record_event_provenance(
+            conn, event_id=event_id, client=client, auth_kind="oauth", verb="remember"
+        )
+    before = conn.execute("SELECT COUNT(*) FROM event_provenance").fetchone()[0]
+    conn.close()
+    body = (
+        TestClient(_app(vault_dir))
+        .get("/internal/memory-mirror", headers={"Authorization": "Bearer MASTER"})
+        .json()
+    )
+    evidence = body["first_evidence"]
+    assert evidence["source"]["event_id"] == event_id
+    assert evidence["source"]["writing_clients"] == ["claude", "chatgpt"]
+    assert evidence["second_client_retrieval"] == "unknown"
+    assert evidence["reader_tracking"] == "not_recorded"
+    conn = open_db(vault_dir)
+    assert conn.execute("SELECT COUNT(*) FROM event_provenance").fetchone()[0] == before
+    conn.close()
+
+
+def test_empty_vault_has_explicit_unknown_first_evidence(vault_dir: Path) -> None:
+    conn = open_db(vault_dir)
+    conn.close()
+    response = TestClient(_app(vault_dir)).get(
+        "/internal/memory-mirror", headers={"Authorization": "Bearer MASTER"}
+    )
+    assert response.json()["first_evidence"] == {
+        "source": None,
+        "second_client_retrieval": "unknown",
+        "reader_tracking": "not_recorded",
+    }
