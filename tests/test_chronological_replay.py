@@ -301,7 +301,7 @@ def test_time_and_request_size_budgets_stop_before_dispatch():
         "messages": [{"role": "user", "content": "x"}],
         "tools": [{"function": {"name": "replay_answer"}}],
     }
-    budget = replay._Budget(config, None, started=0)
+    budget = replay._Budget(config, None, started=replay.time.monotonic() - config.max_seconds - 1)
     with pytest.raises(RuntimeError, match="call/time budget"):
         budget.completion(**kwargs)
     budget = replay._Budget(config, None)
