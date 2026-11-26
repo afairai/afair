@@ -1942,9 +1942,22 @@ def recall(
             slots = _RECALL_EMBEDDING_SLOTS
             if slots.acquire(blocking=False):
                 try:
-                    emb_future = _RECALL_POOL.submit(
-                        embed_query, model=ctx.embedding_model, text=query, api_key=api_key
-                    )
+
+                    def embed_for_recall() -> list[float]:
+                        # The pool thread has its own context. Only cache misses
+                        # reach the provider and create a usage ledger row.
+                        from ..agents.usage import background_usage
+
+                        if ctx.background_usage_settings is None:
+                            return embed_query(
+                                model=ctx.embedding_model, text=query, api_key=api_key
+                            )
+                        with background_usage(ctx.background_usage_settings, "recall"):
+                            return embed_query(
+                                model=ctx.embedding_model, text=query, api_key=api_key
+                            )
+
+                    emb_future = _RECALL_POOL.submit(embed_for_recall)
                 except Exception:
                     slots.release()
                     raise

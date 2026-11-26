@@ -81,14 +81,20 @@ No prompt text, memory contents or API keys are stored in the ledger.
 
 ## Explicit scope and failure policy
 
-The production scheduler and extraction/recovery paths establish accounting
-scopes. Direct operator scripts that invoke workers themselves (for example
-`backfill_entities.py`, `drain_entity_dedup.py`, and bespoke maintenance Python)
-are exempt unless they explicitly wrap execution in
-`with background_usage(settings, "operator:<script>"):`. The extraction
-recovery operator script uses the normally scoped extractor. Embeddings,
-including vector repair, remain outside this generative ledger and cap.
-A zero generative cap still permits separately accounted transcription.
+The scheduler, extraction, vector repair, remote recall embedding and the shipped
+backfill, deduplication and rebuild scripts establish accounting scopes. Local
+FastEmbed runs incur no provider fee. Cache hits avoid creating a paid-attempt
+row. Embedding and transcription costs appear separately from the generation
+cap. Historical embedding costs before instrumentation require a provider invoice.
+Custom operator scripts that call providers must establish a named
+`background_usage(settings, "operator.name")` scope.
+
+The daily report groups estimated settled costs, retained reservations and
+unknown attempts by operation. Pass the daily infrastructure invoice allocation
+with `--infrastructure-usd` to include it in the report. An absent allocation
+is JSON null. A zero completion budget permits separately accounted embedding
+and transcription requests. Read-only reports support older ledgers; the next
+accounted operation adds missing columns in a short transaction.
 
 If the ledger cannot be opened or the preflight reservation cannot commit,
 work defers before provider I/O, including a plaintext ledger encountered after
@@ -107,3 +113,18 @@ across retries and process restarts. The existing per-event cross-process lease
 also prevents concurrent transcriptions of the same event. This cache is covered
 by ordinary substrate backups and contains no API credentials. Changing the
 transcription model deliberately requests a new transcript.
+
+## Synthetic mixed-load baseline
+
+Run `PYTHONPATH=. uv run python scripts/bench_vault_load.py` from the checkout.
+The runner creates a temporary vault with 20,000 historical synthetic events,
+issues 100 observe and 100 recall calls alongside a snapshot export and one
+recovery-discovery batch, and simulates an unavailable embedding provider.
+The extractor dispatch is disabled to make this an offline outage measurement.
+
+On the development Mac on 2026-11-26, recall took 327 ms at p50 and 382 ms at
+p95. Writes took 1.65 ms at p50 and 5.46 ms at p95. All 100 recalls fell back
+to keyword retrieval. Recovery queued 500 events; the oldest pending age was
+3,608 seconds (seed age was one hour). Peak process RSS was 180.1 MiB, sampled
+disk use 25.3 MiB and WAL size 11.5 MiB. Production latency, provider timing
+and network transport are outside this local process benchmark.

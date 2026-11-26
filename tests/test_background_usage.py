@@ -408,3 +408,38 @@ def test_failed_unpriced_attempt_stays_unknown_when_cap_enabled_later(tmp_path):
         with pytest.raises(BackgroundBudgetExceeded, match="unpriced"):
             provider_completion(model="test/model", messages=[])
         call.assert_not_called()
+
+
+def test_scoped_embedding_accounted_separately_and_allowed_under_zero_cap(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    config = settings(tmp_path, 0.0)
+    reply = {"usage": {"prompt_tokens": 6}, "data": [{"embedding": [0.5]}]}
+    with patch("litellm.embedding", return_value=reply), background_usage(config, "recall"):
+        assert (
+            provider_completion(_operation="embedding", model="test/model", input=["private"])
+            == reply
+        )
+    (row,) = usage_summary(config)["workers"]
+    assert (row["operation"], row["worker"], row["prompt_tokens"]) == ("embedding", "recall", 6)
+    assert row["settled_estimated_usd"] == pytest.approx(6e-6)
+
+
+def test_pre_operation_ledger_reports_readonly_and_upgrades_on_use(tmp_path):
+    from afair.agents.usage import usage_summary
+
+    config = settings(tmp_path)
+    conn = _connection(config)
+    for name in ("operation", "cache_read_tokens", "cache_write_tokens"):
+        conn.execute(f"ALTER TABLE provider_usage DROP COLUMN {name}")
+    conn.close()
+    assert usage_summary(config)["workers"] == []
+    with (
+        patch(
+            "litellm.completion",
+            return_value={"usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+        ),
+        background_usage(config, "worker"),
+    ):
+        provider_completion(model="test/model")
+    assert usage_summary(config)["workers"][0]["operation"] == "completion"

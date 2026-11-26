@@ -60,6 +60,26 @@ def _connection(settings: Settings) -> Any:
         completion_tokens INTEGER, cost_source TEXT NOT NULL,
         operation TEXT NOT NULL DEFAULT 'completion', cache_read_tokens INTEGER,
         cache_write_tokens INTEGER)""")
+    # Older ledgers acquired these columns after release. Recheck under
+    # the write lock so concurrent first calls cannot race an ALTER TABLE.
+    additions = {
+        "operation": "TEXT NOT NULL DEFAULT 'completion'",
+        "cache_read_tokens": "INTEGER",
+        "cache_write_tokens": "INTEGER",
+    }
+    if not additions.keys() <= {
+        row[1] for row in conn.execute("PRAGMA table_info(provider_usage)")
+    }:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(provider_usage)")}
+            for name, definition in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE provider_usage ADD COLUMN {name} {definition}")
+            conn.commit()
+        except BaseException:
+            conn.close()
+            raise
     conn.execute("CREATE INDEX IF NOT EXISTS provider_usage_day ON provider_usage(day)")
     conn.commit()
     return conn
@@ -240,7 +260,7 @@ def _settle(
 
     usage = _get(response, "usage")
     incoming = _get(usage, "prompt_tokens")
-    outgoing = _get(usage, "completion_tokens")
+    outgoing = _get(usage, "completion_tokens", 0 if operation == "embedding" else None)
     cache_read = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     details = _get(usage, "prompt_tokens_details")
@@ -321,12 +341,16 @@ def usage_summary(settings: Settings, day: str | None = None) -> dict[str, Any]:
     conn = _open_connection(path, vault_key=_key(settings), read_only=True)
     conn.execute("PRAGMA query_only = ON")
     try:
+        available = {row[1] for row in conn.execute("PRAGMA table_info(provider_usage)")}
+        operation = "operation" if "operation" in available else "'completion'"
+        cache_read = "cache_read_tokens" if "cache_read_tokens" in available else "NULL"
+        cache_write = "cache_write_tokens" if "cache_write_tokens" in available else "NULL"
         rows = conn.execute(
-            "SELECT worker,model,operation,COUNT(*) AS attempts,"
+            f"SELECT worker,model,{operation} AS operation,COUNT(*) AS attempts,"
             "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_attempts,"
             "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_attempts,"
-            "SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,"
-            "SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens,"
+            f"SUM(COALESCE({cache_read},0)) AS cache_read_tokens,"
+            f"SUM(COALESCE({cache_write},0)) AS cache_write_tokens,"
             "SUM(COALESCE(cost_usd,0)) AS settled_estimated_usd,"
             "SUM(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END) AS retained_reservations_usd,"
             "SUM(COALESCE(prompt_tokens,0)) AS prompt_tokens,"
@@ -334,7 +358,7 @@ def usage_summary(settings: Settings, day: str | None = None) -> dict[str, Any]:
             "SUM(COALESCE(cost_usd,reserved_usd)) AS accounted_usd,"
             "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unsettled_attempts,"
             "SUM(CASE WHEN cost_usd IS NULL AND cost_source='unknown' THEN 1 ELSE 0 END) AS unpriced_attempts "
-            "FROM provider_usage WHERE day=? GROUP BY worker,model,operation ORDER BY worker,model,operation",
+            "FROM provider_usage WHERE day=? GROUP BY 1,2,3 ORDER BY 1,2,3",
             (day,),
         ).fetchall()
         return {

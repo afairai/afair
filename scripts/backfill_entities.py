@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from afair.agents.entity_canonicalizer import EntityCanonicalizer
+from afair.agents.usage import background_usage
 from afair.mcp.context import ServerContext, set_context
 from afair.settings import Settings
 from afair.substrate import open_db
@@ -169,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     try:
         for cycle in range(1, args.max_cycles + 1):
-            stats = worker.run(db, settings)
+            with background_usage(settings, "operator.backfill_entities"):
+                stats = worker.run(db, settings)
             cycles_run = cycle
             _accumulate(totals, stats)
             if not args.quiet:
