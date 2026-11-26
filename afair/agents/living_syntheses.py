@@ -60,13 +60,16 @@ MAX_SOURCE_EVENTS = 400
 MAX_OBSERVATION_SCAN = 3200
 # Index-ordered and output-bounded; filtering invalidated sources uses the
 # existing partial invalidation-target index rather than scanning that history.
+# Unary + removes TEXT column affinity so SQLite can SEEK the JSON expression
+# index. It does not change canonical (textual sha256) hash values. A bare
+# e.content_hash comparison silently turns even INDEXED BY into a full scan.
 _SOURCE_SELECTION_SQL = """
     SELECT e.* FROM events e
     WHERE e.kind = ?
       AND NOT EXISTS (
         SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx
         WHERE inv.kind = 'invalidate'
-          AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+          AND json_extract(inv.payload, '$.target_hash') = +e.content_hash
       )
     ORDER BY e.created_at DESC LIMIT ?
 """
@@ -265,6 +268,7 @@ class LivingSynthesisWorker(ColdPathWorker):
         stats: dict[str, Any] = {
             "candidates": 0,
             "written": 0,
+            "attempted": 0,
             "skipped_unchanged": 0,
             "llm_errors": 0,
             "retired": 0,
@@ -283,10 +287,6 @@ class LivingSynthesisWorker(ColdPathWorker):
         api_key = _api_key_for_model(model, settings)
 
         for candidate in candidates:
-            if stats["written"] >= MAX_SYNTHESES_PER_CYCLE:
-                stats["capped"] = True
-                break
-
             prior = _matching_prior(candidate, priors)
             if prior is not None and not _materially_changed(conn, candidate, prior, events):
                 stats["skipped_unchanged"] += 1
@@ -308,6 +308,12 @@ class LivingSynthesisWorker(ColdPathWorker):
                     stats["reconciled"] += len(reconciled)
                 continue
 
+            # Bound all provider attempts, including errors: counting only
+            # successful writes lets an outage consume every candidate timeout.
+            if stats["attempted"] >= MAX_SYNTHESES_PER_CYCLE:
+                stats["capped"] = True
+                break
+
             source_events = _candidate_events(events, candidate)
             # Steer re-synthesis away from claims the operator marked wrong on a
             # prior synthesis of this cluster (ADR-0009 b3). Cluster ids include
@@ -320,6 +326,7 @@ class LivingSynthesisWorker(ColdPathWorker):
             )
             if steering:
                 stats["steered"] += 1
+            stats["attempted"] += 1
             try:
                 synthesis = _synthesize(
                     conn,
@@ -360,6 +367,7 @@ class LivingSynthesisWorker(ColdPathWorker):
             producer=LIVING_SYNTHESIS_PRODUCER,
             detail=(
                 f"candidates={stats['candidates']} written={stats['written']} "
+                f"attempted={stats['attempted']} "
                 f"unchanged={stats['skipped_unchanged']} errors={stats['llm_errors']} "
                 f"retired={stats['retired']} reconciled={stats['reconciled']} "
                 f"steered={stats['steered']} capped={stats['capped']}"
@@ -410,9 +418,9 @@ def _eligible_events(
         placeholders = ",".join("?" for _ in anchors)
         rows = conn.execute(
             f"""SELECT e.* FROM events e WHERE e.content_hash IN ({placeholders})
-            AND NOT EXISTS (SELECT 1 FROM events inv WHERE inv.kind = ?
-                AND json_extract(inv.payload, '$.target_hash') = e.content_hash)""",
-            (*anchors, INVALIDATE_KIND),
+            AND NOT EXISTS (SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx WHERE inv.kind = 'invalidate'
+                AND json_extract(inv.payload, '$.target_hash') = +e.content_hash)""",
+            tuple(anchors),
         )
         for row in rows:
             event = row_to_event(row)
@@ -654,13 +662,13 @@ def _live_priors(conn: sqlite3.Connection) -> list[_Prior]:
         FROM events e
         WHERE e.kind = ?
           AND NOT EXISTS (
-            SELECT 1 FROM events inv
-            WHERE inv.kind = ?
-              AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+            SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx
+            WHERE inv.kind = 'invalidate'
+              AND json_extract(inv.payload, '$.target_hash') = +e.content_hash
           )
         ORDER BY e.created_at DESC, e.id DESC
         """,
-        (LIVING_SYNTHESIS_KIND, INVALIDATE_KIND),
+        (LIVING_SYNTHESIS_KIND,),
     ).fetchall()
     out: list[_Prior] = []
     for row in rows:
@@ -1051,12 +1059,12 @@ def _supersede_priors(
             SELECT 1 FROM events e
             WHERE e.content_hash = ? AND e.kind = ?
               AND NOT EXISTS (
-                SELECT 1 FROM events inv
-                WHERE inv.kind = ?
-                  AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+                SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx
+                WHERE inv.kind = 'invalidate'
+                  AND json_extract(inv.payload, '$.target_hash') = +e.content_hash
               )
             """,
-            (prior_hash, LIVING_SYNTHESIS_KIND, INVALIDATE_KIND),
+            (prior_hash, LIVING_SYNTHESIS_KIND),
         ).fetchone()
         if live is None:
             continue
@@ -1114,9 +1122,9 @@ def _current_source_count(conn: sqlite3.Connection, hashes: frozenset[str]) -> i
         WHERE e.content_hash IN ({placeholders})
           AND e.kind NOT IN (?, ?, ?, ?)
           AND NOT EXISTS (
-            SELECT 1 FROM events inv
-            WHERE inv.kind = ?
-              AND json_extract(inv.payload, '$.target_hash') = e.content_hash
+            SELECT 1 FROM events inv INDEXED BY events_invalidate_target_idx
+            WHERE inv.kind = 'invalidate'
+              AND json_extract(inv.payload, '$.target_hash') = +e.content_hash
           )
         """,
         (
@@ -1125,7 +1133,6 @@ def _current_source_count(conn: sqlite3.Connection, hashes: frozenset[str]) -> i
             "consolidation",
             "entity_article",
             LIVING_SYNTHESIS_KIND,
-            INVALIDATE_KIND,
         ),
     )
     from ..substrate.events import row_to_event
