@@ -480,7 +480,8 @@ def _enumerate_candidate_pairs(
                 link_hash = link.get("event_hash")
                 if not isinstance(link_hash, str) or not link_hash:
                     continue
-                key = tuple(sorted([anchor.content_hash, link_hash]))
+                low, high = sorted((anchor.content_hash, link_hash))
+                key = (low, high)
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)

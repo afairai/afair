@@ -103,10 +103,7 @@ def build_cold_path_workers() -> list[ColdPathWorker]:
     return [
         Pruner(),
         OrphanBlobSweeper(),
-        # Bounded re-extraction of events whose latest extractor
-        # interpretation is a transient failure (llm_timeout /
-        # llm_rate_limit). Closes the silent-permanent-gap failure
-        # mode where a timed-out extraction was never re-attempted.
+        # Recover durable intake gaps before retrying attempted transient failures.
         ExtractionRecoveryWorker(),
         ExtractionRetryWorker(),
         # Phase 0.5 observability — detection-only. Counts silent
