@@ -14,7 +14,30 @@ from afair.substrate import open_db
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Iterator
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def stop_test_schedulers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Own every daemon started by this module, including failed test paths."""
+    schedulers: list[ColdPathScheduler] = []
+    original_start = ColdPathScheduler.start
+
+    def tracked_start(scheduler: ColdPathScheduler) -> threading.Thread:
+        if scheduler not in schedulers:
+            schedulers.append(scheduler)
+        return original_start(scheduler)
+
+    monkeypatch.setattr(ColdPathScheduler, "start", tracked_start)
+    yield
+    # Request shutdown for all before checking any result, so one failure cannot
+    # leave its siblings polling and logging during interpreter finalization.
+    for scheduler in schedulers:
+        scheduler.stop(timeout=0)
+    for scheduler in schedulers:
+        assert scheduler.stop(timeout=5), "test leaked a cold-path scheduler"
+        assert scheduler.scheduler_status()["thread_alive"] is False
 
 
 class _CountingWorker(ColdPathWorker):
@@ -58,7 +81,7 @@ def test_worker_invoked_at_least_once_within_short_window(
     invoke the worker within a couple of seconds."""
     worker = _CountingWorker()
     worker.interval_seconds = 0  # always due
-    open_db(tmp_path)  # create the file
+    open_db(tmp_path).close()  # create the file
     sched = ColdPathScheduler(
         vault_dir=tmp_path,
         embedding_dim=1536,
@@ -80,7 +103,7 @@ def test_worker_failure_does_not_block_others(tmp_path: Path, settings_local: Se
     raiser.interval_seconds = 0
     counter = _CountingWorker()
     counter.interval_seconds = 0
-    open_db(tmp_path)
+    open_db(tmp_path).close()
     sched = ColdPathScheduler(
         vault_dir=tmp_path,
         embedding_dim=1536,
@@ -168,7 +191,7 @@ def test_worker_failure_rolls_back_open_transaction(
     with it, the tx is rolled back and the checker sees 0."""
     leaky = _LeakyWriter()
     checker = _RowChecker()
-    open_db(tmp_path)
+    open_db(tmp_path).close()
     sched = ColdPathScheduler(
         vault_dir=tmp_path,
         embedding_dim=1536,
@@ -399,3 +422,73 @@ def test_budget_reason_is_allowlisted_and_never_derived_from_exception_text() ->
 
     failure = BackgroundBudgetExceeded("private-model-name-and-secret", reason="private-diagnostic")
     assert failure.reason == "unspecified"
+
+
+def test_stop_wakes_long_poll_and_supports_restart(
+    settings_local: Settings, tmp_path: Path
+) -> None:
+    worker = _CountingWorker()
+    scheduler = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[worker],
+        poll_seconds=3600,
+    )
+    assert scheduler.stop()
+    first = scheduler.start()
+    assert scheduler.stop(timeout=1)
+    assert not first.is_alive()
+    assert worker.invocations == 0
+    second = scheduler.start()
+    assert second is not first
+    assert scheduler.stop(timeout=1)
+    assert not second.is_alive()
+
+
+def test_stop_drains_current_worker_closes_connection_and_skips_siblings(
+    settings_local: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    closed_by: list[int] = []
+
+    class Connection:
+        in_transaction = False
+
+        def close(self) -> None:
+            closed_by.append(threading.get_ident())
+
+    class BlockingWorker(_CountingWorker):
+        def run(self, _conn: sqlite3.Connection, _settings: Settings) -> dict[str, Any]:
+            entered.set()
+            assert release.wait(5), "test did not release worker"
+            return super().run(_conn, _settings)
+
+    connection = Connection()
+    monkeypatch.setattr("afair.agents.cold_path.open_db", lambda *a, **kw: connection)
+    first = BlockingWorker()
+    sibling = _CountingWorker()
+    sibling.name = "sibling"
+    scheduler = ColdPathScheduler(
+        vault_dir=tmp_path,
+        embedding_dim=1536,
+        settings=settings_local,
+        workers=[first, sibling],
+        poll_seconds=0,
+    )
+    thread = scheduler.start()
+    try:
+        assert entered.wait(3)
+        assert scheduler.stop(timeout=0) is False
+        assert thread.is_alive()
+        assert closed_by == []  # never close another thread's active connection
+    finally:
+        release.set()
+        assert scheduler.stop(timeout=3)
+    assert not thread.is_alive()
+    assert first.invocations == 1
+    assert sibling.invocations == 0
+    assert closed_by == [thread.ident]

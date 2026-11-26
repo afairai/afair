@@ -132,6 +132,7 @@ class ColdPathScheduler:
         self._last_heartbeat: float | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._stop = threading.Event()
 
     def start(self) -> threading.Thread:
         """Spawn the daemon. Idempotent — repeat calls return the same
@@ -140,6 +141,7 @@ class ColdPathScheduler:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return self._thread
+            self._stop.clear()
             self._thread = threading.Thread(
                 target=self._loop, name="cold-path-scheduler", daemon=True
             )
@@ -150,6 +152,24 @@ class ColdPathScheduler:
                 poll_seconds=self._poll_seconds,
             )
             return self._thread
+
+    def stop(self, timeout: float | None = 5.0) -> bool:
+        """Wake the poll loop and join it; return whether shutdown completed.
+
+        An in-flight worker finishes normally (including transaction cleanup),
+        but no next worker starts. A timeout does not kill a worker or close its
+        connection from another thread; callers must check the result and join
+        again if necessary. A fully stopped scheduler may be started again.
+        """
+        with self._lock:
+            self._stop.set()
+            thread = self._thread
+        if thread is None:
+            return True
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout)
+        return not thread.is_alive()
 
     def _state(self, name: str, state: str) -> None:
         with self._lock:
@@ -177,79 +197,84 @@ class ColdPathScheduler:
         # Connection is opened lazily inside the loop so a startup-time
         # filesystem hiccup doesn't crash before the daemon's first poll.
         conn: sqlite3.Connection | None = None
-        while True:
-            time.sleep(self._poll_seconds)
-            now = time.monotonic()
-            with self._lock:
-                self._last_poll = now
-                self._last_heartbeat = now
-            due = [w for w in self._workers if now - self._last_run[w.name] >= w.interval_seconds]
-            if not due or background_should_yield():
-                continue
-            if conn is None:
-                try:
-                    conn = open_db(self._vault_dir, embedding_dim=self._embedding_dim)
-                except Exception as e:
-                    log.warning("cold_path.db_open_failed", error=str(e))
-                    continue
-            for worker in due:
-                if background_should_yield():
-                    break
+        try:
+            while not self._stop.wait(self._poll_seconds):
+                now = time.monotonic()
                 with self._lock:
-                    self._last_run[worker.name] = time.monotonic()
-                    self._deferrals.pop(worker.name, None)
-                self._state(worker.name, "running")
-                try:
-                    with background_usage(self._settings, worker.name):
-                        stats = worker.run(conn, self._settings)
-                except BackgroundBudgetExceeded as deferred:
-                    with self._lock:
-                        self._deferrals[worker.name] = (
-                            deferred.reason,
-                            datetime.now(UTC).date().isoformat(),
-                        )
-                    self._state(worker.name, "budget_deferred")
-                    # No success timestamp: durable candidates stay pending.
-                    log.info("cold_path.budget_deferred", worker=worker.name)
-                    # A worker may have staged local writes before its next
-                    # provider reservation was refused. Release that writer
-                    # transaction exactly as on any other interrupted cycle.
-                    with contextlib.suppress(Exception):
-                        conn.rollback()
+                    self._last_poll = now
+                    self._last_heartbeat = now
+                due = [
+                    w for w in self._workers if now - self._last_run[w.name] >= w.interval_seconds
+                ]
+                if not due or background_should_yield():
                     continue
-                except Exception as e:
-                    self._state(worker.name, "failed")
-                    log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
-                    # Roll back any open transaction so a worker that raised
-                    # between a bare execute and its commit doesn't leak an
-                    # open tx that the NEXT worker's commit would absorb
-                    # (attributing this worker's partial writes to it). The
-                    # shared per-daemon connection is reused across workers.
-                    with contextlib.suppress(Exception):
-                        conn.rollback()
-                    continue
-                if conn.in_transaction:
-                    # A bare write without a commit keeps SQLite's writer lock
-                    # through the poll sleep and every later worker, which
-                    # starves remember/observe past busy_timeout. The worker
-                    # succeeded, so its writes are intended: commit them.
-                    log.warning("cold_path.worker_left_open_transaction", worker=worker.name)
+                if conn is None:
                     try:
-                        conn.commit()
+                        conn = open_db(self._vault_dir, embedding_dim=self._embedding_dim)
                     except Exception as e:
-                        # An unhandled raise here would end this thread with
-                        # the lock still held, blocking every write until restart.
-                        log.error(
-                            "cold_path.worker_commit_failed", worker=worker.name, error=str(e)
-                        )
+                        log.warning("cold_path.db_open_failed", error=str(e))
+                        continue
+                for worker in due:
+                    if self._stop.is_set() or background_should_yield():
+                        break
+                    with self._lock:
+                        self._last_run[worker.name] = time.monotonic()
+                        self._deferrals.pop(worker.name, None)
+                    self._state(worker.name, "running")
+                    try:
+                        with background_usage(self._settings, worker.name):
+                            stats = worker.run(conn, self._settings)
+                    except BackgroundBudgetExceeded as deferred:
+                        with self._lock:
+                            self._deferrals[worker.name] = (
+                                deferred.reason,
+                                datetime.now(UTC).date().isoformat(),
+                            )
+                        self._state(worker.name, "budget_deferred")
+                        # No success timestamp: durable candidates stay pending.
+                        log.info("cold_path.budget_deferred", worker=worker.name)
+                        # A worker may have staged local writes before its next
+                        # provider reservation was refused. Release that writer
+                        # transaction exactly as on any other interrupted cycle.
                         with contextlib.suppress(Exception):
                             conn.rollback()
-                        self._state(worker.name, "failed")
                         continue
-                with self._lock:
-                    self._last_success[worker.name] = time.monotonic()
-                self._state(worker.name, "succeeded")
-                log.info("cold_path.worker_done", worker=worker.name, **stats)
+                    except Exception as e:
+                        self._state(worker.name, "failed")
+                        log.warning("cold_path.worker_failed", worker=worker.name, error=str(e))
+                        # Roll back any open transaction so a worker that raised
+                        # between a bare execute and its commit doesn't leak an
+                        # open tx that the NEXT worker's commit would absorb
+                        # (attributing this worker's partial writes to it). The
+                        # shared per-daemon connection is reused across workers.
+                        with contextlib.suppress(Exception):
+                            conn.rollback()
+                        continue
+                    if conn.in_transaction:
+                        # A bare write without a commit keeps SQLite's writer lock
+                        # through the poll sleep and every later worker, which
+                        # starves remember/observe past busy_timeout. The worker
+                        # succeeded, so its writes are intended: commit them.
+                        log.warning("cold_path.worker_left_open_transaction", worker=worker.name)
+                        try:
+                            conn.commit()
+                        except Exception as e:
+                            # An unhandled raise here would end this thread with
+                            # the lock still held, blocking every write until restart.
+                            log.error(
+                                "cold_path.worker_commit_failed", worker=worker.name, error=str(e)
+                            )
+                            with contextlib.suppress(Exception):
+                                conn.rollback()
+                            self._state(worker.name, "failed")
+                            continue
+                    with self._lock:
+                        self._last_success[worker.name] = time.monotonic()
+                    self._state(worker.name, "succeeded")
+                    log.info("cold_path.worker_done", worker=worker.name, **stats)
+        finally:
+            if conn is not None:
+                conn.close()
 
     def status(self) -> dict[str, dict[str, Any]]:
         """Diagnostic snapshot of when each worker last ran. For tests
