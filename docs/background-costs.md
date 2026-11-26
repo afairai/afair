@@ -147,3 +147,21 @@ in-flight worker is still running; join again before releasing its resources.
 Stopping cannot forcibly interrupt a provider call. A fully stopped scheduler
 can be restarted. The scheduler tests register every started instance for
 teardown and assert that no owned thread survives, even after a failed assertion.
+
+### Bounded synthesis cycles
+
+Living syntheses allow at most six provider attempts per scheduled cycle,
+including timeouts and errors. Unchanged clusters do not consume an attempt.
+The cycle receipt reports `attempted`, `written`, `errors`, and `capped`; capped
+means further changed candidates remain for a later cycle. A failed attempt does
+not become a successful synthesis or a worker budget deferral. The provider
+wrapper disables SDK retries for scheduled work and keeps its existing per-call
+timeout; the attempt cap is not a promise of an exact wall-clock deadline.
+
+Discovery also uses point lookups in the existing partial invalidation-target
+index for every correlated source/prior check. SQLite requires removal of the
+outer column's type affinity (`+e.content_hash`) to seek this JSON expression
+index. `INDEXED BY` alone can still scan its entire history. Canonical hashes
+remain textual `sha256:` values, and null/missing targets do not invalidate them.
+Opening a supported older vault installs the existing index through normal
+additive schema initialization. The query change does not rewrite memory.

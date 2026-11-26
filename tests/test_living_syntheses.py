@@ -920,3 +920,130 @@ def test_stable_reference_tracks_latest_full_payload_across_other_projects(conn)
         )
     eligible = ls._eligible_events(conn)
     assert set(eligible) == {e.content_hash for index, e in enumerate(events) if index != 2}
+
+
+@pytest.mark.parametrize("outcome", ["failure", "mixed", "success"])
+def test_cycle_bounds_all_provider_attempts_including_errors(conn, monkeypatch, outcome) -> None:
+    from afair.agents.llm import LLMError
+
+    for group in range(10):
+        for index in range(3):
+            _mention(
+                conn, _event(conn, f"Synthetic group {group} source {index}"), f"Group {group}"
+            )
+    _stub_llm(monkeypatch)
+    success = ls.call_tool
+    attempts = []
+
+    def provider(**kwargs):
+        attempts.append(1)
+        if outcome == "failure" or (outcome == "mixed" and len(attempts) % 2):
+            raise LLMError("synthetic unavailable")
+        return success(**kwargs)
+
+    monkeypatch.setattr(ls, "call_tool", provider)
+    stats = ls.LivingSynthesisWorker().run(conn, Settings())
+    assert stats["candidates"] == 10
+    assert len(attempts) == stats["attempted"] == ls.MAX_SYNTHESES_PER_CYCLE
+    assert stats["written"] + stats["llm_errors"] == stats["attempted"]
+    assert stats["capped"] is True
+    assert stats["written"] == {"failure": 0, "mixed": 3, "success": 6}[outcome]
+    if outcome == "failure":
+        # The cap belongs to a real cycle, not a permanent process allowance.
+        again = ls.LivingSynthesisWorker().run(conn, Settings())
+        assert again["attempted"] == 6
+        assert len(attempts) == 12
+
+
+def test_live_prior_lookup_uses_target_index_on_skewed_legacy_history(tmp_path) -> None:
+    from afair.substrate import open_db
+
+    conn = open_db(tmp_path)
+    try:
+        priors = [
+            (
+                f"prior-{i}",
+                f"prior-{i}",
+                "2026-01-01",
+                "agent",
+                "living_synthesis",
+                json.dumps({"cluster_id": f"cluster-{i}", "member_hashes": ["a", "b", "c"]}),
+                None,
+                1,
+            )
+            for i in range(120)
+        ]
+        invalidations = [
+            (
+                f"inv-{i}",
+                f"inv-{i}",
+                "2026-01-02",
+                "agent",
+                "invalidate",
+                json.dumps({"target_hash": f"prior-{i}" if i < 60 else f"unrelated-{i}"}),
+                None,
+                1,
+            )
+            for i in range(2000)
+        ]
+        # Null/missing targets must not hide unrelated live priors.
+        invalidations.extend(
+            [
+                (
+                    "null",
+                    "null",
+                    "2026-01-02",
+                    "agent",
+                    "invalidate",
+                    '{"target_hash":null}',
+                    None,
+                    1,
+                ),
+                ("missing", "missing", "2026-01-02", "agent", "invalidate", "{}", None, 1),
+            ]
+        )
+        conn.executemany("INSERT INTO events VALUES (?,?,?,?,?,?,?,?)", priors + invalidations)
+        conn.commit()
+        # Reopening a supported older vault installs the existing additive index.
+        conn.execute("DROP INDEX events_invalidate_target_idx")
+        conn.close()
+        conn = open_db(tmp_path)
+        traced = []
+        conn.set_trace_callback(traced.append)
+        found = ls._live_priors(conn)
+        conn.set_trace_callback(None)
+        assert {p.event_hash for p in found} == {f"prior-{i}" for i in range(60, 120)}
+        query = next(
+            sql for sql in traced if "SELECT e.content_hash, e.created_at, e.payload" in sql
+        )
+        plan = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query))
+        assert "SEARCH inv USING INDEX events_invalidate_target_idx (<expr>=?)" in plan
+        # Count VM operations, rather than asserting noisy wall-clock thresholds.
+        steps = []
+        conn.set_progress_handler(lambda: steps.append(1) or 0, 100)
+        ls._live_priors(conn)
+        indexed_steps = len(steps)
+        steps.clear()
+        baseline = query.replace(" INDEXED BY events_invalidate_target_idx", "").replace(
+            "= +e.content_hash", "= e.content_hash"
+        )
+        conn.execute(baseline).fetchall()
+        assert len(steps) > 20 * indexed_steps
+        conn.set_progress_handler(None, 0)
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 2122
+        # All discovery/retirement/supersession reads need seeks, including
+        # the source selector that already used INDEXED BY before this fix.
+        traced.clear()
+        conn.set_trace_callback(traced.append)
+        ls._eligible_events(conn, priors=found)
+        ls._current_source_count(conn, frozenset({"prior-60"}))
+        assert ls._supersede_priors(conn, ["prior-0"], keep_hash="", reason="test") == []
+        conn.set_trace_callback(None)
+        lookups = [sql for sql in traced if "SELECT" in sql and "FROM events inv" in sql]
+        assert len(lookups) >= 4
+        for sql in lookups:
+            plan = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql))
+            assert "SEARCH inv USING INDEX events_invalidate_target_idx (<expr>=?)" in plan
+            assert "SCAN inv" not in plan
+    finally:
+        conn.close()
