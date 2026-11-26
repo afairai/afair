@@ -170,3 +170,12 @@ def test_sentry_init_installs_both_privacy_boundaries(monkeypatch) -> None:
     assert captured["traces_sample_rate"] == 0
     assert captured["send_default_pii"] is False
     assert captured["include_local_variables"] is False
+
+
+def test_release_environment_survive_and_private_fingerprint_does_not(monkeypatch) -> None:
+    monkeypatch.setenv("AFAIR_ENVIRONMENT", "dev")
+    clean = _before_send(
+        {"environment": "dev", "release": "0.1.30", "fingerprint": ["private"]}, {}
+    )
+    assert clean == {"environment": "dev", "release": "0.1.30"}
+    assert _before_send({"environment": "private", "release": "private"}, {}) == {}

@@ -94,3 +94,27 @@ def test_actual_configured_processors_never_render_exception_content(monkeypatch
             assert "redacted" in rendered
     finally:
         structlog.configure(**previous)
+
+
+def test_export_audit_preserves_operational_fields_without_raw_address() -> None:
+    from afair.observability.logging import redact_processor
+
+    job_id = "exp_" + "ca" * 12
+    fields = {
+        "event": "export.started",
+        "credential": "export",
+        "client_ip": "192.0.2.71",
+        "job_id": job_id,
+        "timestamp": "2026-11-26T17:32:01.555555Z",
+    }
+    clean = redact_processor(None, "info", fields.copy())
+    assert clean["timestamp"] == fields["timestamp"]
+    assert clean["job_id"] == job_id
+    assert clean["credential"] == "export"
+    assert clean["client_ip"] == "[redacted]"
+    assert (
+        clean["client_ip_group"] == redact_processor(None, "info", fields.copy())["client_ip_group"]
+    )
+    fields.update(credential="untrusted", job_id="untrusted", timestamp="untrusted")
+    clean = redact_processor(None, "info", fields)
+    assert clean["credential"] == clean["job_id"] == clean["timestamp"] == "[redacted]"

@@ -90,8 +90,23 @@ def _before_send(event: Any, _hint: Any) -> Any:
         clean["logentry"] = {"message": MASK}
     if "transaction" in event:
         clean["transaction"] = MASK
-    if "fingerprint" in event:
-        clean["fingerprint"] = [MASK]
+    # Only accept deployment-controlled release dimensions.
+    deployment_env = os.environ.get("AFAIR_ENVIRONMENT", "prod")
+    if event.get("environment") == deployment_env and deployment_env in {
+        "prod",
+        "production",
+        "dev",
+        "staging",
+        "test",
+        "local",
+        "fly",
+    }:
+        clean["environment"] = deployment_env
+    release = event.get("release")
+    if isinstance(release, str) and (
+        re.fullmatch(r"[0-9a-f]{40}", release) or re.fullmatch(r"\d+\.\d+\.\d+", release)
+    ):
+        clean["release"] = release
     # Omit request/user/thread/module/server sections altogether: substituting
     # strings for their SDK mapping schemas would create invalid incidents.
     exception = event.get("exception")
@@ -125,6 +140,8 @@ def init_sentry() -> None:
     if not dsn:
         return
 
+    from afair import __version__
+
     sentry_sdk.init(
         dsn=dsn,
         # Personal-memory product: never attach IP/headers/cookies/body,
@@ -141,5 +158,5 @@ def init_sentry() -> None:
         # directly, and double-init produces noisy log lines.
         integrations=[StarletteIntegration()],
         environment=os.environ.get("AFAIR_ENVIRONMENT", "prod"),
-        release=os.environ.get("FLY_IMAGE_REF") or os.environ.get("GIT_SHA"),
+        release=os.environ.get("GIT_SHA") or __version__,
     )
